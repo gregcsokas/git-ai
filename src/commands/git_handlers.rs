@@ -627,12 +627,14 @@ fn start_daemon_trace_mirror(
         "sid": sid.clone(),
         "argv": argv,
         "repo_working_dir": repo_working_dir.clone(),
+        "wrapper_mirror": true,
     });
     let cmd_name_payload = json!({
         "event": "cmd_name",
         "sid": sid.clone(),
         "name": command,
         "repo_working_dir": repo_working_dir.clone(),
+        "wrapper_mirror": true,
     });
 
     try_send_daemon_trace_payload(&socket_path, &repo_working_dir, start_payload);
@@ -658,6 +660,7 @@ fn finish_daemon_trace_mirror(
         "sid": ctx.sid,
         "code": exit_status.code().unwrap_or(1),
         "repo_working_dir": ctx.repo_working_dir,
+        "wrapper_mirror": true,
     });
     try_send_daemon_trace_payload(&ctx.socket_path, &ctx.repo_working_dir, payload);
 }

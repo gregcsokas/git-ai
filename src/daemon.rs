@@ -179,6 +179,8 @@ pub struct PendingRootCommand {
     pub name: Option<String>,
     pub worktree: Option<String>,
     pub pre_snapshot: Option<RepoSnapshot>,
+    #[serde(default)]
+    pub wrapper_mirror: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -952,6 +954,10 @@ fn apply_trace_event(
                     .and_then(Value::as_str)
                     .map(ToString::to_string),
                 pre_snapshot: None,
+                wrapper_mirror: payload
+                    .get("wrapper_mirror")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             };
             if let Some(worktree) = pending.worktree.as_ref() {
                 pending.pre_snapshot = snapshot_repo(worktree).ok();
@@ -1039,7 +1045,7 @@ fn apply_trace_event(
                                 .rewrite_events
                                 .drain(0..state.rewrite_events.len() - 1000);
                         }
-                        if runtime.mode.apply_side_effects() {
+                        if runtime.mode.apply_side_effects() && !pending.wrapper_mirror {
                             if let Some(worktree) = pending.worktree.as_deref() {
                                 let _ = apply_rewrite_side_effect(worktree, rewrite_event);
                             } else {
