@@ -7,7 +7,7 @@ use repos::test_repo::{GitTestMode, TestRepo, get_binary_path};
 use serde_json::Value;
 use serial_test::serial;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -39,6 +39,14 @@ fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
         .join("internal")
         .join("daemon")
         .join("control.sock")
+}
+
+fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
+    repo.test_home_path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon")
+        .join("trace2.sock")
 }
 
 fn repo_workdir_string(repo: &TestRepo) -> String {
@@ -88,24 +96,59 @@ impl DaemonGuard {
     }
 
     fn latest_seq_and_wait_idle(&self) -> u64 {
-        let status = self.request(ControlRequest::StatusFamily {
-            repo_working_dir: self.repo_working_dir.clone(),
-        });
-        assert!(status.ok, "status request should succeed");
-        let latest_seq = status
-            .data
-            .as_ref()
-            .and_then(|v| v.get("latest_seq"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        if latest_seq > 0 {
-            let barrier = self.request(ControlRequest::BarrierAppliedThroughSeq {
+        let mut last_latest_seq = 0_u64;
+        let mut stable_idle_polls = 0_u8;
+
+        for _ in 0..200 {
+            let status = self.request(ControlRequest::StatusFamily {
                 repo_working_dir: self.repo_working_dir.clone(),
-                seq: latest_seq,
             });
-            assert!(barrier.ok, "barrier request should succeed");
+            assert!(status.ok, "status request should succeed");
+            let latest_seq = status
+                .data
+                .as_ref()
+                .and_then(|v| v.get("latest_seq"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+
+            if latest_seq > 0 {
+                let barrier = self.request(ControlRequest::BarrierAppliedThroughSeq {
+                    repo_working_dir: self.repo_working_dir.clone(),
+                    seq: latest_seq,
+                });
+                assert!(barrier.ok, "barrier request should succeed");
+            }
+
+            let settled = self.request(ControlRequest::StatusFamily {
+                repo_working_dir: self.repo_working_dir.clone(),
+            });
+            assert!(settled.ok, "settled status request should succeed");
+            let settled_latest = settled
+                .data
+                .as_ref()
+                .and_then(|v| v.get("latest_seq"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let settled_backlog = settled
+                .data
+                .as_ref()
+                .and_then(|v| v.get("backlog"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+
+            if settled_backlog == 0 && settled_latest == last_latest_seq {
+                stable_idle_polls = stable_idle_polls.saturating_add(1);
+                if stable_idle_polls >= 2 {
+                    return settled_latest;
+                }
+            } else {
+                stable_idle_polls = 0;
+            }
+            last_latest_seq = settled_latest;
+            thread::sleep(Duration::from_millis(25));
         }
-        latest_seq
+
+        last_latest_seq
     }
 
     fn wait_until_ready(&mut self) {
@@ -163,6 +206,16 @@ impl DaemonGuard {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn git_trace_env(trace_socket_path: &Path) -> [(&'static str, String); 2] {
+    [
+        (
+            "GIT_TRACE2_EVENT",
+            format!("af_unix:stream:{}", trace_socket_path.to_string_lossy()),
+        ),
+        ("GIT_TRACE2_EVENT_NESTING", "10".to_string()),
+    ]
 }
 
 impl Drop for DaemonGuard {
@@ -370,5 +423,88 @@ fn daemon_trace_mirror_preserves_amend_rewrite_parity_and_records_command() {
     assert!(
         saw_commit,
         "daemon family state should record successful mirrored commit command"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+
+    fs::write(repo.path().join("pure-trace.txt"), "line 1\n").expect("failed to write file");
+    repo.git_og_with_env(&["add", "pure-trace.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "initial"], &env_refs)
+        .expect("commit should succeed");
+
+    fs::write(repo.path().join("pure-trace.txt"), "line 1\nline 2\n")
+        .expect("failed to update file");
+    repo.git_og_with_env(&["add", "pure-trace.txt"], &env_refs)
+        .expect("add before amend should succeed");
+    repo.git_og_with_env(&["commit", "--amend", "-m", "initial amended"], &env_refs)
+        .expect("amend should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    let rewrite_log =
+        fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after amend");
+    let amend_events = rewrite_log
+        .lines()
+        .filter(|line| line.contains("\"commit_amend\""))
+        .count();
+    assert_eq!(
+        amend_events, 1,
+        "pure trace socket mode should emit exactly one commit_amend rewrite event"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_shadow_mode_tracks_without_writes() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "shadow");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+
+    fs::write(repo.path().join("pure-shadow.txt"), "line 1\n").expect("failed to write file");
+    repo.git_og_with_env(&["add", "pure-shadow.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "shadow commit"], &env_refs)
+        .expect("commit should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    assert!(
+        !rewrite_log_path.exists()
+            || fs::read_to_string(&rewrite_log_path)
+                .unwrap_or_default()
+                .is_empty(),
+        "shadow mode should not apply rewrite side effects from pure trace socket events"
+    );
+
+    let family_state_raw = fs::read_to_string(family_state_path(&repo))
+        .expect("family state should exist after pure trace events");
+    let family_state: Value =
+        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let saw_commit = family_state
+        .get("commands")
+        .and_then(Value::as_array)
+        .map(|commands| {
+            commands.iter().any(|command| {
+                command.get("name").and_then(Value::as_str) == Some("commit")
+                    && command.get("exit_code").and_then(Value::as_i64) == Some(0)
+            })
+        })
+        .unwrap_or(false);
+    assert!(
+        saw_commit,
+        "shadow mode should still track commands from pure trace socket events"
     );
 }
