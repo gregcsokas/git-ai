@@ -25,14 +25,6 @@ fn git_common_dir(repo: &TestRepo) -> PathBuf {
     }
 }
 
-fn family_state_path(repo: &TestRepo) -> PathBuf {
-    git_common_dir(repo)
-        .join("ai")
-        .join("state")
-        .join("daemon-v1")
-        .join("family_state.json")
-}
-
 fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
     repo.test_home_path()
         .join(".git-ai")
@@ -151,6 +143,19 @@ impl DaemonGuard {
         }
 
         last_latest_seq
+    }
+
+    fn family_state_snapshot(&self) -> Value {
+        let response = self.request(ControlRequest::SnapshotFamily {
+            repo_working_dir: self.repo_working_dir.clone(),
+        });
+        assert!(response.ok, "snapshot request should succeed");
+        response
+            .data
+            .as_ref()
+            .and_then(|v| v.get("state"))
+            .cloned()
+            .expect("snapshot response should include state payload")
     }
 
     fn wait_until_ready(&mut self) {
@@ -298,10 +303,7 @@ fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
         "write-mode daemon should execute checkpoint side effect"
     );
 
-    let family_state_raw = fs::read_to_string(family_state_path(&repo))
-        .expect("family state should exist after delegated checkpoint");
-    let family_state: Value =
-        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let family_state = daemon.family_state_snapshot();
     let checkpoints_map = family_state
         .get("checkpoints")
         .and_then(Value::as_object)
@@ -347,10 +349,7 @@ fn daemon_shadow_mode_tracks_checkpoint_without_applying_side_effects() {
         "shadow-mode daemon should not apply checkpoint side effects"
     );
 
-    let family_state_raw = fs::read_to_string(family_state_path(&repo))
-        .expect("family state should exist after shadow delegated checkpoint");
-    let family_state: Value =
-        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let family_state = daemon.family_state_snapshot();
     let checkpoints_map = family_state
         .get("checkpoints")
         .and_then(Value::as_object)
@@ -408,10 +407,7 @@ fn daemon_trace_mirror_preserves_amend_rewrite_parity_and_records_command() {
         "daemon trace mirroring in write mode should not duplicate commit_amend rewrite events"
     );
 
-    let family_state_raw = fs::read_to_string(family_state_path(&repo))
-        .expect("family state should exist after mirrored trace events");
-    let family_state: Value =
-        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let family_state = daemon.family_state_snapshot();
     let saw_commit = family_state
         .get("commands")
         .and_then(Value::as_array)
@@ -491,10 +487,7 @@ fn daemon_pure_trace_socket_shadow_mode_tracks_without_writes() {
         "shadow mode should not apply rewrite side effects from pure trace socket events"
     );
 
-    let family_state_raw = fs::read_to_string(family_state_path(&repo))
-        .expect("family state should exist after pure trace events");
-    let family_state: Value =
-        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let family_state = daemon.family_state_snapshot();
     let saw_commit = family_state
         .get("commands")
         .and_then(Value::as_array)
@@ -934,10 +927,7 @@ fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
 
     daemon.latest_seq_and_wait_idle();
 
-    let family_state_raw = fs::read_to_string(family_state_path(&repo))
-        .expect("family state should exist after switch operations");
-    let family_state: Value =
-        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let family_state = daemon.family_state_snapshot();
     let commands = family_state
         .get("commands")
         .and_then(Value::as_array)
@@ -1005,10 +995,7 @@ fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
 
     daemon.latest_seq_and_wait_idle();
 
-    let family_state_raw = fs::read_to_string(family_state_path(&repo))
-        .expect("family state should exist after checkout operations");
-    let family_state: Value =
-        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let family_state = daemon.family_state_snapshot();
     let commands = family_state
         .get("commands")
         .and_then(Value::as_array)
@@ -1136,10 +1123,7 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command_and_ref_reconc
 
     daemon.latest_seq_and_wait_idle();
 
-    let family_state_raw = fs::read_to_string(family_state_path(&repo))
-        .expect("family state should exist after pull operation");
-    let family_state: Value =
-        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let family_state = daemon.family_state_snapshot();
     let commands = family_state
         .get("commands")
         .and_then(Value::as_array)
@@ -1270,10 +1254,7 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
 
     daemon.latest_seq_and_wait_idle();
 
-    let family_state_raw = fs::read_to_string(family_state_path(&repo))
-        .expect("family state should exist after pull --rebase operation");
-    let family_state: Value =
-        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let family_state = daemon.family_state_snapshot();
     let commands = family_state
         .get("commands")
         .and_then(Value::as_array)
@@ -1420,10 +1401,7 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
         "autostash pull should preserve local dirty change content"
     );
 
-    let family_state_raw = fs::read_to_string(family_state_path(&repo))
-        .expect("family state should exist after pull --autostash operation");
-    let family_state: Value =
-        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let family_state = daemon.family_state_snapshot();
     let commands = family_state
         .get("commands")
         .and_then(Value::as_array)

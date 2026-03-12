@@ -18,7 +18,7 @@ use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
@@ -26,20 +26,18 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 
-const DAEMON_STATE_VERSION: &str = "daemon-v1";
 const TRACE_EVENT_TYPE: &str = "trace2_raw";
 const CHECKPOINT_EVENT_TYPE: &str = "checkpoint";
 const RECONCILE_EVENT_TYPE: &str = "reconcile";
 const ENV_OVERRIDE_EVENT_TYPE: &str = "env_override";
-const COMMAND_INDEX_FILE: &str = "command_index.jsonl";
-const CHECKPOINT_INDEX_FILE: &str = "checkpoint_index.jsonl";
 const PID_META_FILE: &str = "daemon.pid.json";
 const REANCHOR_IDLE_NS: u128 = 5_000_000_000;
 const TRACE_REFLOG_CUT_FIELD: &str = "reflog_cut";
+const TRACE_REFLOG_START_CUT_FIELD: &str = "reflog_start_cut";
 const DAEMON_API_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -188,6 +186,7 @@ pub struct PendingRootCommand {
     pub name: Option<String>,
     pub worktree: Option<String>,
     pub pre_snapshot: Option<RepoSnapshot>,
+    pub start_cut: Option<ReflogCutState>,
     #[serde(default)]
     pub wrapper_mirror: bool,
 }
@@ -253,32 +252,23 @@ pub struct ReflogAnchorState {
 pub struct FamilyState {
     pub api_version: u32,
     pub pending_roots: HashMap<String, PendingRootCommand>,
-    #[serde(default)]
     pub deferred_root_exits: HashMap<String, DeferredRootExit>,
-    #[serde(default)]
     pub sid_worktrees: HashMap<String, String>,
-    #[serde(default)]
     pub worktree_snapshots: HashMap<String, RepoSnapshot>,
     pub commands: Vec<AppliedCommand>,
     pub checkpoints: HashMap<String, CheckpointSummary>,
     pub unresolved_transcripts: BTreeSet<String>,
     pub rewrite_events: Vec<Value>,
-    #[serde(default)]
     pub active_cherry_pick_by_worktree: HashMap<String, ActiveCherryPickState>,
-    #[serde(default)]
     pub env_overrides_by_worktree: HashMap<String, HashMap<String, String>>,
     pub last_snapshot: RepoSnapshot,
     pub dedupe_trace: BTreeSet<String>,
     pub dedupe_checkpoints: BTreeSet<String>,
     pub last_error: Option<String>,
     pub last_reconcile_ns: Option<u128>,
-    #[serde(default)]
     pub reflog_anchor: Option<ReflogAnchorState>,
-    #[serde(default)]
     pub reflog_drifted: bool,
-    #[serde(default)]
     pub last_event_applied_ns: Option<u128>,
-    #[serde(default)]
     pub last_reanchor_ns: Option<u128>,
 }
 
@@ -309,91 +299,68 @@ impl Default for FamilyState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct CursorState {
-    cursor: u64,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReflogCutEntry {
+    offset: u64,
 }
 
-#[derive(Debug, Clone, Default)]
-struct ReflogCutState {
-    offsets: HashMap<String, u64>,
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct ReflogCutState {
+    offsets: HashMap<String, ReflogCutEntry>,
+}
+
+#[derive(Debug, Default)]
+struct FamilyStoreMemory {
+    latest_seq: u64,
+    cursor: u64,
+    state: FamilyState,
+    events: VecDeque<EventEnvelope>,
+    command_index: Vec<AppliedCommand>,
+    checkpoint_index: Vec<Value>,
+    reconcile_records: Vec<Value>,
+}
+
+type FamilyStoreMemoryRef = Arc<Mutex<FamilyStoreMemory>>;
+
+static FAMILY_STORE_REGISTRY: OnceLock<Mutex<HashMap<String, FamilyStoreMemoryRef>>> =
+    OnceLock::new();
+
+fn family_store_registry() -> &'static Mutex<HashMap<String, FamilyStoreMemoryRef>> {
+    FAMILY_STORE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Clone)]
 pub struct FamilyStore {
     pub common_dir: PathBuf,
-    pub root: PathBuf,
-    pub events_file: PathBuf,
-    pub seq_file: PathBuf,
-    pub cursor_file: PathBuf,
-    pub state_file: PathBuf,
-    pub command_index_file: PathBuf,
-    pub checkpoint_index_file: PathBuf,
-    pub reconcile_dir: PathBuf,
+    memory: FamilyStoreMemoryRef,
 }
 
 impl FamilyStore {
     pub fn for_common_dir(common_dir: &Path) -> Result<Self, GitAiError> {
-        let root = common_dir
-            .join("ai")
-            .join("state")
-            .join(DAEMON_STATE_VERSION)
-            .to_path_buf();
-        let events_dir = root.join("events");
-        fs::create_dir_all(&events_dir)?;
-        let events_file = events_dir.join("00000001.jsonl");
-        if !events_file.exists() {
-            fs::write(&events_file, "")?;
-        }
-        let seq_file = root.join("seq");
-        if !seq_file.exists() {
-            fs::write(&seq_file, "0\n")?;
-        }
-        let cursor_file = root.join("cursor.json");
-        if !cursor_file.exists() {
-            fs::write(
-                &cursor_file,
-                serde_json::to_string_pretty(&CursorState { cursor: 0 })?,
-            )?;
-        }
-        let state_file = root.join("family_state.json");
-        if !state_file.exists() {
-            fs::write(
-                &state_file,
-                serde_json::to_string_pretty(&FamilyState::default())?,
-            )?;
-        }
-        let command_index_file = root.join(COMMAND_INDEX_FILE);
-        if !command_index_file.exists() {
-            fs::write(&command_index_file, "")?;
-        }
-        let checkpoint_index_file = root.join(CHECKPOINT_INDEX_FILE);
-        if !checkpoint_index_file.exists() {
-            fs::write(&checkpoint_index_file, "")?;
-        }
-        let reconcile_dir = root.join("reconcile");
-        fs::create_dir_all(&reconcile_dir)?;
+        let canonical = common_dir
+            .canonicalize()
+            .unwrap_or_else(|_| common_dir.to_path_buf());
+        let key = canonical.to_string_lossy().to_string();
+        let memory = {
+            let mut registry = family_store_registry()
+                .lock()
+                .map_err(|_| GitAiError::Generic("family store registry lock poisoned".to_string()))?;
+            registry
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(FamilyStoreMemory::default())))
+                .clone()
+        };
         Ok(Self {
-            common_dir: common_dir.to_path_buf(),
-            root,
-            events_file,
-            seq_file,
-            cursor_file,
-            state_file,
-            command_index_file,
-            checkpoint_index_file,
-            reconcile_dir,
+            common_dir: canonical,
+            memory,
         })
     }
 
-    fn read_seq(&self) -> Result<u64, GitAiError> {
-        let raw = fs::read_to_string(&self.seq_file)?;
-        Ok(raw.trim().parse::<u64>().unwrap_or(0))
-    }
-
-    fn write_seq(&self, seq: u64) -> Result<(), GitAiError> {
-        fs::write(&self.seq_file, format!("{seq}\n"))?;
-        Ok(())
+    fn lock_memory(&self) -> Result<std::sync::MutexGuard<'_, FamilyStoreMemory>, GitAiError> {
+        self.memory
+            .lock()
+            .map_err(|_| GitAiError::Generic("family store memory lock poisoned".to_string()))
     }
 
     pub fn append_event(
@@ -403,8 +370,9 @@ impl FamilyStore {
         event_type: &str,
         payload: Value,
     ) -> Result<EventEnvelope, GitAiError> {
-        let seq = self.read_seq()?.saturating_add(1);
-        self.write_seq(seq)?;
+        let mut memory = self.lock_memory()?;
+        let seq = memory.latest_seq.saturating_add(1);
+        memory.latest_seq = seq;
         let received_at_ns = now_unix_nanos();
         let checksum = checksum_for(
             seq,
@@ -423,67 +391,53 @@ impl FamilyStore {
             payload,
             checksum,
         };
-        let serialized = serde_json::to_string(&envelope)?;
-        let mut file = OpenOptions::new().append(true).open(&self.events_file)?;
-        file.write_all(serialized.as_bytes())?;
-        file.write_all(b"\n")?;
+        memory.events.push_back(envelope.clone());
         Ok(envelope)
     }
 
     pub fn latest_seq(&self) -> Result<u64, GitAiError> {
-        self.read_seq()
+        let memory = self.lock_memory()?;
+        Ok(memory.latest_seq)
     }
 
     pub fn read_events_after(&self, cursor: u64) -> Result<Vec<EventEnvelope>, GitAiError> {
-        let file = OpenOptions::new().read(true).open(&self.events_file)?;
-        let mut out = Vec::new();
-        let reader = BufReader::new(file);
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let event: EventEnvelope = serde_json::from_str(&line)?;
-            if event.seq > cursor {
-                out.push(event);
-            }
-        }
+        let memory = self.lock_memory()?;
+        let mut out = memory
+            .events
+            .iter()
+            .filter(|event| event.seq > cursor)
+            .cloned()
+            .collect::<Vec<_>>();
         out.sort_by_key(|e| e.seq);
         Ok(out)
     }
 
     pub fn load_cursor(&self) -> Result<u64, GitAiError> {
-        let content = fs::read_to_string(&self.cursor_file)?;
-        let parsed: CursorState = serde_json::from_str(&content)?;
-        Ok(parsed.cursor)
+        let memory = self.lock_memory()?;
+        Ok(memory.cursor)
     }
 
     pub fn save_cursor(&self, cursor: u64) -> Result<(), GitAiError> {
-        let content = serde_json::to_string_pretty(&CursorState { cursor })?;
-        fs::write(&self.cursor_file, content)?;
+        let mut memory = self.lock_memory()?;
+        memory.cursor = cursor;
         Ok(())
     }
 
     pub fn load_state(&self) -> Result<FamilyState, GitAiError> {
-        let content = fs::read_to_string(&self.state_file)?;
-        let state: FamilyState = serde_json::from_str(&content)?;
-        if state.api_version != DAEMON_API_VERSION {
-            return Err(GitAiError::Generic(format!(
-                "unsupported daemon state api_version {} (expected {})",
-                state.api_version, DAEMON_API_VERSION
-            )));
-        }
-        Ok(state)
+        let memory = self.lock_memory()?;
+        Ok(memory.state.clone())
     }
 
     pub fn save_state(&self, state: &FamilyState) -> Result<(), GitAiError> {
-        let content = serde_json::to_string_pretty(state)?;
-        fs::write(&self.state_file, content)?;
+        let mut memory = self.lock_memory()?;
+        memory.state = state.clone();
         Ok(())
     }
 
     pub fn append_command_index(&self, command: &AppliedCommand) -> Result<(), GitAiError> {
-        append_jsonl(&self.command_index_file, command)
+        let mut memory = self.lock_memory()?;
+        memory.command_index.push(command.clone());
+        Ok(())
     }
 
     pub fn append_checkpoint_index(
@@ -491,19 +445,18 @@ impl FamilyStore {
         checkpoint_id: &str,
         summary: &CheckpointSummary,
     ) -> Result<(), GitAiError> {
-        append_jsonl(
-            &self.checkpoint_index_file,
-            &json!({
-                "checkpoint_id": checkpoint_id,
-                "summary": summary
-            }),
-        )
+        let mut memory = self.lock_memory()?;
+        memory.checkpoint_index.push(json!({
+            "checkpoint_id": checkpoint_id,
+            "summary": summary
+        }));
+        Ok(())
     }
 
     pub fn append_reconcile_record(&self, record: &Value) -> Result<(), GitAiError> {
-        let filename = format!("{}.jsonl", now_unix_nanos());
-        let path = self.reconcile_dir.join(filename);
-        append_jsonl(&path, record)
+        let mut memory = self.lock_memory()?;
+        memory.reconcile_records.push(record.clone());
+        Ok(())
     }
 }
 
@@ -548,6 +501,8 @@ pub enum ControlRequest {
     },
     #[serde(rename = "status.family")]
     StatusFamily { repo_working_dir: String },
+    #[serde(rename = "snapshot.family")]
+    SnapshotFamily { repo_working_dir: String },
     #[serde(rename = "barrier.applied_through_seq")]
     BarrierAppliedThroughSeq { repo_working_dir: String, seq: u64 },
     #[serde(rename = "reconcile.family")]
@@ -659,13 +614,29 @@ impl DaemonCoordinator {
         }
 
         let store = FamilyStore::for_common_dir(&common_dir)?;
+        let cursor = store.load_cursor()?;
+        let mut state = store.load_state()?;
+        if state.last_snapshot.refs.is_empty()
+            && let Ok(snapshot) = snapshot_common_dir(&store.common_dir)
+        {
+            state.last_snapshot = snapshot;
+        }
+        if state.reflog_anchor.is_none()
+            && let Ok(anchor) = capture_reflog_anchor(&store.common_dir, cursor)
+        {
+            state.reflog_anchor = Some(anchor);
+            state.reflog_drifted = false;
+            state.last_reanchor_ns = Some(now_unix_nanos());
+        }
+        store.save_state(&state)?;
+
         let (notify_tx, notify_rx) = mpsc::unbounded_channel();
         let runtime = Arc::new(FamilyRuntime {
             store,
             mode: self.mode,
             append_lock: AsyncMutex::new(()),
             notify_tx,
-            applied_seq: AtomicU64::new(0),
+            applied_seq: AtomicU64::new(cursor),
             applied_notify: Notify::new(),
         });
 
@@ -753,7 +724,7 @@ impl DaemonCoordinator {
             .get_or_create_family_runtime(family_key.clone(), common_dir)
             .await?;
         let _guard = runtime.append_lock.lock().await;
-        let payload = maybe_attach_reflog_cut(&runtime.store.common_dir, event_type, payload);
+        let payload = maybe_attach_reflog_cut(&runtime.store.common_dir, event_type, payload)?;
         let event = runtime
             .store
             .append_event(&family_key, source, event_type, payload)?;
@@ -912,10 +883,12 @@ impl DaemonCoordinator {
         repo_working_dir: String,
     ) -> Result<FamilyStatus, GitAiError> {
         let (family_key, common_dir) = self.resolve_family_from_worktree(&repo_working_dir)?;
-        let store = FamilyStore::for_common_dir(&common_dir)?;
-        let latest_seq = store.latest_seq()?;
-        let cursor = store.load_cursor()?;
-        let state = store.load_state()?;
+        let runtime = self
+            .get_or_create_family_runtime(family_key.clone(), common_dir)
+            .await?;
+        let latest_seq = runtime.store.latest_seq()?;
+        let cursor = runtime.applied_seq.load(Ordering::SeqCst);
+        let state = runtime.store.load_state()?;
         let event_backlog = latest_seq.saturating_sub(cursor);
         let live_backlog =
             state.pending_roots.len() as u64 + state.deferred_root_exits.len() as u64;
@@ -932,6 +905,29 @@ impl DaemonCoordinator {
             last_error: state.last_error,
             last_reconcile_ns: state.last_reconcile_ns,
         })
+    }
+
+    pub async fn snapshot_for_family(
+        self: &Arc<Self>,
+        repo_working_dir: String,
+    ) -> Result<ControlResponse, GitAiError> {
+        let (family_key, common_dir) = self.resolve_family_from_worktree(&repo_working_dir)?;
+        let runtime = self
+            .get_or_create_family_runtime(family_key.clone(), common_dir)
+            .await?;
+        let latest_seq = runtime.store.latest_seq()?;
+        let cursor = runtime.applied_seq.load(Ordering::SeqCst);
+        let state = runtime.store.load_state()?;
+        Ok(ControlResponse::ok(
+            None,
+            None,
+            Some(json!({
+                "family_key": family_key,
+                "latest_seq": latest_seq,
+                "cursor": cursor,
+                "state": state
+            })),
+        ))
     }
 
     pub async fn wait_through_seq(
@@ -1011,6 +1007,9 @@ impl DaemonCoordinator {
                         .map(|v| ControlResponse::ok(None, None, Some(v)))
                         .map_err(GitAiError::from)
                 }),
+            ControlRequest::SnapshotFamily { repo_working_dir } => {
+                self.snapshot_for_family(repo_working_dir).await
+            }
             ControlRequest::BarrierAppliedThroughSeq {
                 repo_working_dir,
                 seq,
@@ -1231,8 +1230,19 @@ fn apply_exit_for_pending_root(
         .as_deref()
         .or_else(|| argv_primary_command(&pending.argv))
         .unwrap_or_default();
+    let start_cut = state
+        .reflog_anchor
+        .as_ref()
+        .map(reflog_cut_from_anchor)
+        .or_else(|| pending.start_cut.clone());
     let ref_changes = if command_may_mutate_refs(command_name, &pending.argv) {
-        consume_reflog_ref_changes(runtime, state, exit_seq, exit_payload)?
+        consume_reflog_ref_changes(
+            runtime,
+            state,
+            exit_seq,
+            start_cut.as_ref(),
+            exit_payload,
+        )?
     } else {
         vec![]
     };
@@ -1479,6 +1489,11 @@ fn apply_trace_event(
                     .or(argv_worktree)
                     .or_else(|| state.sid_worktrees.get(&root_sid).cloned()),
                 pre_snapshot: Some(state.last_snapshot.clone()),
+                start_cut: state
+                    .reflog_anchor
+                    .as_ref()
+                    .map(reflog_cut_from_anchor)
+                    .or_else(|| parse_reflog_start_cut_from_payload(payload)),
                 wrapper_mirror: payload
                     .get("wrapper_mirror")
                     .and_then(Value::as_bool)
@@ -1560,6 +1575,13 @@ fn apply_trace_event(
                     if pending.pre_snapshot.is_none() {
                         pending.pre_snapshot = Some(state.last_snapshot.clone());
                     }
+                    if pending.start_cut.is_none() {
+                        pending.start_cut = state
+                            .reflog_anchor
+                            .as_ref()
+                            .map(reflog_cut_from_anchor)
+                            .or_else(|| parse_reflog_start_cut_from_payload(payload));
+                    }
                     let candidate_name = pending
                         .name
                         .as_deref()
@@ -1602,6 +1624,11 @@ fn apply_trace_event(
                                 name: Some(name.to_string()),
                                 worktree,
                                 pre_snapshot,
+                                start_cut: state
+                                    .reflog_anchor
+                                    .as_ref()
+                                    .map(reflog_cut_from_anchor)
+                                    .or_else(|| parse_reflog_start_cut_from_payload(payload)),
                                 wrapper_mirror: payload
                                     .get("wrapper_mirror")
                                     .and_then(Value::as_bool)
@@ -1750,28 +1777,31 @@ fn consume_reflog_ref_changes(
     runtime: &FamilyRuntime,
     state: &mut FamilyState,
     seq: u64,
+    start_cut: Option<&ReflogCutState>,
     exit_payload: &Value,
 ) -> Result<Vec<RefChange>, GitAiError> {
-    if state.reflog_anchor.is_none() {
-        let _ = ensure_reflog_anchor(runtime, state, seq, true);
-    }
-    let Some(mut anchor) = state.reflog_anchor.take() else {
+    let Some(start_cut) = start_cut else {
+        state.last_error = Some("missing reflog_start_cut for mutating root command".to_string());
+        state.reflog_drifted = true;
         return Ok(vec![]);
     };
 
-    let cut = parse_reflog_cut_from_payload(exit_payload);
-    let result = if let Some(cut) = cut {
-        consume_reflog_ref_changes_bounded(runtime, state, &mut anchor, seq, &cut)
-    } else {
-        state.last_error = Some("missing reflog_cut for mutating root exit".to_string());
-        state.reflog_drifted = true;
-        Ok(vec![])
+    let exit_cut = parse_reflog_cut_from_payload(exit_payload);
+    let result = match exit_cut {
+        Ok(exit_cut) => {
+            let result =
+                consume_reflog_ref_changes_bounded(runtime, state, seq, start_cut, &exit_cut);
+            if let Some(anchor) = state.reflog_anchor.as_mut() {
+                update_anchor_cursors_to_cut(anchor, &runtime.store.common_dir, seq, &exit_cut);
+            }
+            result
+        }
+        Err(e) => {
+            state.last_error = Some(e.to_string());
+            state.reflog_drifted = true;
+            Ok(vec![])
+        }
     };
-    if state.reflog_drifted {
-        state.reflog_anchor = None;
-    } else {
-        state.reflog_anchor = Some(anchor);
-    }
     result
 }
 
@@ -1790,62 +1820,95 @@ fn parse_reflog_line(reference: &str, line: &str) -> Option<RefChange> {
     })
 }
 
-fn maybe_attach_reflog_cut(common_dir: &Path, event_type: &str, payload: Value) -> Value {
+fn maybe_attach_reflog_cut(
+    common_dir: &Path,
+    event_type: &str,
+    payload: Value,
+) -> Result<Value, GitAiError> {
     if event_type != TRACE_EVENT_TYPE {
-        return payload;
+        return Ok(payload);
     }
     let mut payload = payload;
-    if payload.get("event").and_then(Value::as_str) != Some("exit") {
-        return payload;
+    let event_name = payload
+        .get("event")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if !matches!(event_name.as_str(), "start" | "cmd_name" | "exit") {
+        return Ok(payload);
     }
     let Some(sid) = payload.get("sid").and_then(Value::as_str) else {
-        return payload;
+        return Ok(payload);
     };
     if !is_root_sid(sid) {
-        return payload;
+        return Ok(payload);
     }
-    if payload.get(TRACE_REFLOG_CUT_FIELD).is_some() {
-        return payload;
+    let is_exit = event_name == "exit";
+    if is_exit && payload.get(TRACE_REFLOG_CUT_FIELD).is_some() {
+        return Ok(payload);
     }
-    match capture_reflog_cut(common_dir) {
-        Ok(cut) => {
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert(TRACE_REFLOG_CUT_FIELD.to_string(), cut);
-            }
+    if !is_exit && payload.get(TRACE_REFLOG_START_CUT_FIELD).is_some() {
+        return Ok(payload);
+    }
+    let cut = capture_reflog_cut(common_dir)?;
+    if let Some(obj) = payload.as_object_mut() {
+        if is_exit {
+            obj.insert(TRACE_REFLOG_CUT_FIELD.to_string(), serde_json::to_value(cut)?);
+        } else {
+            obj.insert(
+                TRACE_REFLOG_START_CUT_FIELD.to_string(),
+                serde_json::to_value(cut)?,
+            );
         }
-        Err(e) => {
-            debug_log(&format!(
-                "failed to capture reflog cut for root exit: {}; continuing without cut",
-                e
-            ));
-        }
     }
-    payload
+    Ok(payload)
 }
 
-fn capture_reflog_cut(common_dir: &Path) -> Result<Value, GitAiError> {
-    let mut offsets = serde_json::Map::new();
+fn capture_reflog_cut(common_dir: &Path) -> Result<ReflogCutState, GitAiError> {
+    let mut offsets = HashMap::new();
     for (path, reference) in discover_reflog_files(common_dir)? {
         let metadata = fs::metadata(path)?;
-        offsets.insert(reference, json!({ "offset": metadata.len() }));
+        offsets.insert(
+            reference,
+            ReflogCutEntry {
+                offset: metadata.len(),
+            },
+        );
     }
-    Ok(Value::Object(offsets))
+    Ok(ReflogCutState { offsets })
 }
 
-fn parse_reflog_cut_from_payload(payload: &Value) -> Option<ReflogCutState> {
-    let cut = payload.get(TRACE_REFLOG_CUT_FIELD)?;
-    let map = cut.as_object()?;
-    let mut offsets = HashMap::new();
-    for (reference, value) in map {
-        let offset = value.get("offset").and_then(Value::as_u64);
-        if let Some(offset) = offset {
-            offsets.insert(reference.clone(), offset);
-        }
-    }
-    if offsets.is_empty() {
-        None
-    } else {
-        Some(ReflogCutState { offsets })
+fn parse_reflog_cut_from_payload(payload: &Value) -> Result<ReflogCutState, GitAiError> {
+    let cut = payload
+        .get(TRACE_REFLOG_CUT_FIELD)
+        .cloned()
+        .ok_or_else(|| {
+            GitAiError::Generic("missing reflog_cut for mutating root exit".to_string())
+        })?;
+    serde_json::from_value(cut).map_err(GitAiError::from)
+}
+
+fn parse_reflog_start_cut_from_payload(payload: &Value) -> Option<ReflogCutState> {
+    payload
+        .get(TRACE_REFLOG_START_CUT_FIELD)
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+}
+
+fn reflog_cut_from_anchor(anchor: &ReflogAnchorState) -> ReflogCutState {
+    ReflogCutState {
+        offsets: anchor
+            .cursors
+            .iter()
+            .map(|cursor| {
+                (
+                    cursor.reference.clone(),
+                    ReflogCutEntry {
+                        offset: cursor.offset,
+                    },
+                )
+            })
+            .collect(),
     }
 }
 
@@ -1856,49 +1919,44 @@ fn reflog_path_for_reference(common_dir: &Path, reference: &str) -> PathBuf {
 fn consume_reflog_ref_changes_bounded(
     runtime: &FamilyRuntime,
     state: &mut FamilyState,
-    anchor: &mut ReflogAnchorState,
-    seq: u64,
+    _seq: u64,
+    start_cut: &ReflogCutState,
     cut: &ReflogCutState,
 ) -> Result<Vec<RefChange>, GitAiError> {
-    let mut known_refs: HashSet<String> =
-        anchor.cursors.iter().map(|c| c.reference.clone()).collect();
-    for reference in cut.offsets.keys() {
-        if known_refs.insert(reference.clone()) {
-            let path = reflog_path_for_reference(&runtime.store.common_dir, reference);
-            anchor.cursors.push(ReflogCursorState {
-                path: path.to_string_lossy().to_string(),
-                reference: reference.clone(),
-                offset: 0,
-            });
-        }
-    }
-    anchor.cursors.sort_by(|a, b| a.path.cmp(&b.path));
-
     let mut raw_changes: Vec<RefChange> = Vec::new();
-    let mut next_offsets: Vec<u64> = anchor.cursors.iter().map(|c| c.offset).collect();
-    for (idx, cursor) in anchor.cursors.iter().enumerate() {
+    let mut references: HashSet<String> = start_cut.offsets.keys().cloned().collect();
+    references.extend(cut.offsets.keys().cloned());
+    let mut refs_sorted = references.into_iter().collect::<Vec<_>>();
+    refs_sorted.sort();
+
+    for reference in refs_sorted {
+        let start_offset = start_cut
+            .offsets
+            .get(&reference)
+            .map(|entry| entry.offset)
+            .unwrap_or(0);
         let target_end = cut
             .offsets
-            .get(&cursor.reference)
-            .copied()
-            .unwrap_or(cursor.offset);
-        if target_end < cursor.offset {
+            .get(&reference)
+            .map(|entry| entry.offset)
+            .unwrap_or(start_offset);
+        if target_end < start_offset {
             state.reflog_drifted = true;
             state.last_error = Some(format!(
-                "reflog cut offset regressed for {} (cut {} < cursor {})",
-                cursor.reference, target_end, cursor.offset
+                "reflog cut offset regressed for {} (cut {} < start {})",
+                reference, target_end, start_offset
             ));
             return Ok(vec![]);
         }
-        if target_end == cursor.offset {
+        if target_end == start_offset {
             continue;
         }
-        let path = PathBuf::from(&cursor.path);
+        let path = reflog_path_for_reference(&runtime.store.common_dir, &reference);
         if !path.exists() {
             state.reflog_drifted = true;
             state.last_error = Some(format!(
                 "reflog file missing for bounded read: {}",
-                cursor.path
+                path.display()
             ));
             return Ok(vec![]);
         }
@@ -1908,28 +1966,49 @@ fn consume_reflog_ref_changes_bounded(
             state.reflog_drifted = true;
             state.last_error = Some(format!(
                 "reflog file shorter than bounded cut for {} (cut {} > len {})",
-                cursor.reference, target_end, file_len
+                reference, target_end, file_len
             ));
             return Ok(vec![]);
         }
         let mut file = OpenOptions::new().read(true).open(&path)?;
-        file.seek(SeekFrom::Start(cursor.offset))?;
-        let reader = BufReader::new(file.take(target_end - cursor.offset));
+        file.seek(SeekFrom::Start(start_offset))?;
+        let reader = BufReader::new(file.take(target_end - start_offset));
         for line in reader.lines() {
             let line = line?;
-            if let Some(change) = parse_reflog_line(&cursor.reference, &line) {
+            if let Some(change) = parse_reflog_line(&reference, &line) {
                 raw_changes.push(change);
             }
         }
-        next_offsets[idx] = target_end;
     }
-    for (idx, offset) in next_offsets.into_iter().enumerate() {
-        if let Some(cursor) = anchor.cursors.get_mut(idx) {
-            cursor.offset = offset;
-        }
-    }
-    anchor.at_seq = seq;
     Ok(raw_changes)
+}
+
+fn update_anchor_cursors_to_cut(
+    anchor: &mut ReflogAnchorState,
+    common_dir: &Path,
+    seq: u64,
+    cut: &ReflogCutState,
+) {
+    let mut cursors_by_ref = anchor
+        .cursors
+        .iter()
+        .map(|c| (c.reference.clone(), c.clone()))
+        .collect::<HashMap<_, _>>();
+    for (reference, entry) in &cut.offsets {
+        let path = reflog_path_for_reference(common_dir, reference);
+        cursors_by_ref.insert(
+            reference.clone(),
+            ReflogCursorState {
+                path: path.to_string_lossy().to_string(),
+                reference: reference.clone(),
+                offset: entry.offset,
+            },
+        );
+    }
+    let mut cursors = cursors_by_ref.into_values().collect::<Vec<_>>();
+    cursors.sort_by(|a, b| a.path.cmp(&b.path));
+    anchor.cursors = cursors;
+    anchor.at_seq = seq;
 }
 
 fn apply_ref_changes_to_snapshot(pre: &RepoSnapshot, ref_changes: &[RefChange]) -> RepoSnapshot {
@@ -2205,7 +2284,7 @@ struct CheckpointRunPayload {
 }
 
 fn apply_checkpoint_side_effect(payload: &Value) -> Result<(), GitAiError> {
-    let request: CheckpointRunPayload = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let request: CheckpointRunPayload = serde_json::from_value(payload.clone())?;
     let repo_working_dir = request.repo_working_dir.ok_or_else(|| {
         GitAiError::Generic("checkpoint payload missing repo_working_dir".to_string())
     })?;
@@ -3479,17 +3558,6 @@ fn diff_refs(before: &HashMap<String, String>, after: &HashMap<String, String>) 
     out
 }
 
-fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<(), GitAiError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let serialized = serde_json::to_string(value)?;
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(serialized.as_bytes())?;
-    file.write_all(b"\n")?;
-    Ok(())
-}
-
 fn checksum_for(
     seq: u64,
     repo_family: &str,
@@ -4283,7 +4351,7 @@ mod tests {
                 json!({
                     "event": "start",
                     "sid": "root-cut",
-                    "argv": ["git", "status"],
+                    "argv": ["git", "checkout", "main"],
                     "worktree": repo_working_dir,
                     "repo_working_dir": repo.to_string_lossy().to_string()
                 }),
@@ -4297,6 +4365,8 @@ mod tests {
                     "event": "exit",
                     "sid": "root-cut",
                     "code": 0,
+                    "name": "checkout",
+                    "argv": ["git", "checkout", "main"],
                     "worktree": repo.to_string_lossy().to_string(),
                     "repo_working_dir": repo.to_string_lossy().to_string()
                 }),
@@ -4773,7 +4843,7 @@ mod tests {
         }
 
         let mut commit_shas: Vec<String> = Vec::new();
-        let mut reflog_cuts: Vec<Value> = Vec::new();
+        let mut reflog_cuts: Vec<ReflogCutState> = Vec::new();
         for i in 0..n {
             commit_shas.push(empty_commit(&repo, &format!("stress-{i}")));
             reflog_cuts.push(capture_reflog_cut(&common_dir).unwrap());
