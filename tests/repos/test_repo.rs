@@ -155,9 +155,12 @@ impl DaemonProcess {
 
     fn wait_for_repo_idle(&self, repo_working_dir: &str) -> Result<(), String> {
         let mut last_latest_seq = 0_u64;
+        let mut last_backlog = 0_u64;
+        let mut last_pending_roots = 0_u64;
+        let mut last_deferred_root_exits = 0_u64;
         let mut stable_idle_polls = 0_u8;
 
-        for _ in 0..200 {
+        for _ in 0..800 {
             let status = send_control_request(
                 &self.control_socket_path,
                 &ControlRequest::StatusFamily {
@@ -217,8 +220,27 @@ impl DaemonProcess {
                 .and_then(|v| v.get("backlog"))
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
+            let settled_pending_roots = settled
+                .data
+                .as_ref()
+                .and_then(|v| v.get("pending_roots"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let settled_deferred_root_exits = settled
+                .data
+                .as_ref()
+                .and_then(|v| v.get("deferred_root_exits"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            last_backlog = settled_backlog;
+            last_pending_roots = settled_pending_roots;
+            last_deferred_root_exits = settled_deferred_root_exits;
 
-            if settled_backlog == 0 && settled_latest == last_latest_seq {
+            if settled_backlog == 0
+                && settled_pending_roots == 0
+                && settled_deferred_root_exits == 0
+                && settled_latest == last_latest_seq
+            {
                 stable_idle_polls = stable_idle_polls.saturating_add(1);
                 if stable_idle_polls >= 2 {
                     return Ok(());
@@ -232,8 +254,12 @@ impl DaemonProcess {
         }
 
         Err(format!(
-            "daemon did not settle for repo {} (latest seq={})",
-            repo_working_dir, last_latest_seq
+            "daemon did not settle for repo {} (latest seq={}, backlog={}, pending_roots={}, deferred_root_exits={})",
+            repo_working_dir,
+            last_latest_seq,
+            last_backlog,
+            last_pending_roots,
+            last_deferred_root_exits
         ))
     }
 
@@ -567,8 +593,14 @@ impl TestRepo {
         // Prevent base Drop from running - we manage cleanup in the worktree Drop
         std::mem::forget(base);
 
-        let wt_db_n: u64 = rng.gen_range(0..10_000_000_000);
-        let wt_test_db_path = std::env::temp_dir().join(format!("{}-db", wt_db_n));
+        let wt_test_db_path = if git_mode.uses_daemon() {
+            // Daemon mode uses a single process-scoped internal DB path.
+            // Reuse the base DB path for linked worktrees so test expectations and daemon writes align.
+            base_test_db_path.clone()
+        } else {
+            let wt_db_n: u64 = rng.gen_range(0..10_000_000_000);
+            std::env::temp_dir().join(format!("{}-db", wt_db_n))
+        };
 
         let mut repo = Self {
             path: worktree_path,
@@ -1524,6 +1556,13 @@ impl TestRepo {
 
 impl Drop for TestRepo {
     fn drop(&mut self) {
+        if std::env::var("GIT_AI_TEST_KEEP_REPOS")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            return;
+        }
+
         if let Some(daemon) = self.daemon_process.take() {
             daemon.shutdown();
         }

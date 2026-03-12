@@ -410,6 +410,8 @@ impl CommitEvent {
 pub struct StashEvent {
     pub operation: StashOperation,
     pub stash_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stash_sha: Option<String>,
     pub success: bool,
     pub affected_files: Vec<String>,
 }
@@ -419,12 +421,14 @@ impl StashEvent {
     pub fn new(
         operation: StashOperation,
         stash_ref: Option<String>,
+        stash_sha: Option<String>,
         success: bool,
         affected_files: Vec<String>,
     ) -> Self {
         Self {
             operation,
             stash_ref,
+            stash_sha,
             success,
             affected_files,
         }

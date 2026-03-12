@@ -3,8 +3,8 @@ use crate::error::GitAiError;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::repository::{Repository, exec_git};
 use crate::git::rewrite_log::{
-    CherryPickAbortEvent, CherryPickCompleteEvent, RebaseAbortEvent, RebaseCompleteEvent,
-    ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
+    CherryPickAbortEvent, CherryPickCompleteEvent, MergeSquashEvent, RebaseAbortEvent,
+    RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
 };
 use crate::git::{find_repository, find_repository_in_path, from_bare_repository};
 use crate::utils::debug_log;
@@ -12,7 +12,7 @@ use crate::{
     authorship::rebase_authorship::{reconstruct_working_log_after_reset, walk_commits_to_base},
     authorship::working_log::CheckpointKind,
     commands::checkpoint_agent::agent_presets::AgentRunResult,
-    commands::hooks::rebase_hooks::build_rebase_commit_mappings,
+    commands::hooks::{push_hooks, rebase_hooks::build_rebase_commit_mappings, stash_hooks},
 };
 use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -38,6 +38,7 @@ const ENV_OVERRIDE_EVENT_TYPE: &str = "env_override";
 const COMMAND_INDEX_FILE: &str = "command_index.jsonl";
 const CHECKPOINT_INDEX_FILE: &str = "checkpoint_index.jsonl";
 const PID_META_FILE: &str = "daemon.pid.json";
+const REANCHOR_IDLE_NS: u128 = 5_000_000_000;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -233,6 +234,20 @@ pub struct ActiveCherryPickState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ReflogCursorState {
+    pub path: String,
+    pub reference: String,
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ReflogAnchorState {
+    pub at_seq: u64,
+    pub anchored_at_ns: u128,
+    pub cursors: Vec<ReflogCursorState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FamilyState {
     pub pending_roots: HashMap<String, PendingRootCommand>,
     #[serde(default)]
@@ -254,6 +269,14 @@ pub struct FamilyState {
     pub dedupe_checkpoints: BTreeSet<String>,
     pub last_error: Option<String>,
     pub last_reconcile_ns: Option<u128>,
+    #[serde(default)]
+    pub reflog_anchor: Option<ReflogAnchorState>,
+    #[serde(default)]
+    pub reflog_drifted: bool,
+    #[serde(default)]
+    pub last_event_applied_ns: Option<u128>,
+    #[serde(default)]
+    pub last_reanchor_ns: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -708,7 +731,7 @@ impl DaemonCoordinator {
                 Some(json!({ "ignored": true })),
             ));
         }
-        let mut payload = payload;
+        let payload = payload;
         let root_sid = payload
             .get("sid")
             .and_then(Value::as_str)
@@ -762,7 +785,6 @@ impl DaemonCoordinator {
                         );
                     }
                 }
-                enrich_trace_payload_with_snapshots(&common_dir, &mut buffered_payload);
                 let _ = self
                     .append_family_event(
                         family_key.clone(),
@@ -774,7 +796,6 @@ impl DaemonCoordinator {
                     .await?;
             }
         }
-        enrich_trace_payload_with_snapshots(&common_dir, &mut payload);
 
         let (seq, runtime) = self
             .append_family_event(family_key, common_dir, "trace2", TRACE_EVENT_TYPE, payload)
@@ -972,17 +993,19 @@ async fn family_worker_loop(
 ) -> Result<(), GitAiError> {
     let mut cursor = runtime.store.load_cursor()?;
     runtime.applied_seq.store(cursor, Ordering::SeqCst);
+    let mut state = runtime.store.load_state()?;
+    if state.last_snapshot.refs.is_empty()
+        && let Ok(snapshot) = snapshot_common_dir(&runtime.store.common_dir)
+    {
+        state.last_snapshot = snapshot;
+    }
+    let _ = ensure_reflog_anchor(runtime.as_ref(), &mut state, cursor, false);
+    runtime.store.save_state(&state)?;
 
     loop {
         let mut progressed = false;
         let events = runtime.store.read_events_after(cursor)?;
         if !events.is_empty() {
-            let mut state = runtime.store.load_state()?;
-            if state.last_snapshot.refs.is_empty()
-                && let Ok(snapshot) = snapshot_common_dir(&runtime.store.common_dir)
-            {
-                state.last_snapshot = snapshot;
-            }
             for event in events.into_iter().take(512) {
                 if let Err(e) = verify_event_checksum(&event) {
                     state.last_error = Some(e.to_string());
@@ -1002,11 +1025,29 @@ async fn family_worker_loop(
                     state.last_error = None;
                 }
                 cursor = event.seq;
+                state.last_event_applied_ns = Some(now_unix_nanos());
                 runtime.store.save_state(&state)?;
                 runtime.store.save_cursor(cursor)?;
                 runtime.applied_seq.store(cursor, Ordering::SeqCst);
                 runtime.applied_notify.notify_waiters();
                 progressed = true;
+            }
+        } else {
+            match maybe_reanchor_family_state(runtime.as_ref(), &mut state, cursor) {
+                Ok(true) => {
+                    runtime.store.save_state(&state)?;
+                    progressed = true;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    state.last_error = Some(format!("reanchor failed: {}", e));
+                    let _ = runtime.store.append_reconcile_record(&json!({
+                        "seq": cursor,
+                        "kind": "reanchor_error",
+                        "error": e.to_string(),
+                    }));
+                    runtime.store.save_state(&state)?;
+                }
             }
         }
         if !progressed {
@@ -1135,48 +1176,46 @@ fn apply_exit_for_pending_root(
     }
     state.dedupe_trace.insert(dedupe_key);
 
-    let command_is_tracked = pending
+    let pre_snapshot = pending
+        .worktree
+        .as_ref()
+        .and_then(|worktree| state.worktree_snapshots.get(worktree))
+        .cloned()
+        .or_else(|| pending.pre_snapshot.clone())
+        .unwrap_or_else(|| state.last_snapshot.clone());
+    let command_name = pending
         .name
         .as_deref()
-        .map(is_tracked_command_name)
-        .or_else(|| argv_primary_command(&pending.argv).map(is_tracked_command_name))
-        .unwrap_or(false);
-    let (pre_snapshot, post_snapshot, ref_changes) = if command_is_tracked {
-        let prior_worktree_snapshot = pending
-            .worktree
-            .as_ref()
-            .and_then(|worktree| state.worktree_snapshots.get(worktree))
-            .cloned();
-        let post_snapshot = pending
-            .worktree
-            .as_ref()
-            .and_then(|worktree| snapshot_repo(worktree).ok())
-            .or_else(|| parse_payload_snapshot(exit_payload, "post_snapshot"))
-            .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
-            .unwrap_or_default();
-        let pre_snapshot = prior_worktree_snapshot
-            .or_else(|| pending.pre_snapshot.clone())
-            .or_else(|| parse_payload_snapshot(exit_payload, "pre_snapshot"))
-            .or_else(|| {
-                if pending.worktree.is_none() {
-                    Some(state.last_snapshot.clone())
-                } else {
-                    None
-                }
-            })
-            .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
-            .unwrap_or_default();
-        let ref_changes = diff_refs(&pre_snapshot.refs, &post_snapshot.refs);
-        if let Some(worktree) = pending.worktree.as_ref() {
-            state
-                .worktree_snapshots
-                .insert(worktree.clone(), post_snapshot.clone());
-        }
-        state.last_snapshot = post_snapshot.clone();
-        (pre_snapshot, post_snapshot, ref_changes)
+        .or_else(|| argv_primary_command(&pending.argv))
+        .unwrap_or_default();
+    let ref_changes = if command_may_mutate_refs(command_name, &pending.argv) {
+        consume_reflog_ref_changes(runtime, state, exit_seq)?
     } else {
-        (RepoSnapshot::default(), RepoSnapshot::default(), vec![])
+        vec![]
     };
+    let mut post_snapshot = apply_ref_changes_to_snapshot(&pre_snapshot, &ref_changes);
+    if post_snapshot.branch.is_none() {
+        post_snapshot.branch = pre_snapshot.branch.clone();
+    }
+    if post_snapshot.head.is_none() {
+        post_snapshot.head = pre_snapshot.head.clone();
+    }
+    if exit_code == 0
+        && let Some(branch) = infer_branch_after_command(
+            pending.name.as_deref().unwrap_or_default(),
+            &pending.argv,
+            pre_snapshot.branch.as_deref(),
+        )
+    {
+        post_snapshot.branch = Some(branch);
+        update_snapshot_head_from_branch(&mut post_snapshot);
+    }
+    if let Some(worktree) = pending.worktree.as_ref() {
+        state
+            .worktree_snapshots
+            .insert(worktree.clone(), post_snapshot.clone());
+    }
+    state.last_snapshot = post_snapshot.clone();
 
     let command = AppliedCommand {
         seq: exit_seq,
@@ -1228,6 +1267,50 @@ fn apply_exit_for_pending_root(
     }
 
     if exit_code == 0 {
+        if runtime.mode.apply_side_effects() && !pending.wrapper_mirror {
+            if pending.name.as_deref() == Some("push")
+                && let Some(worktree) = pending.worktree.as_deref()
+            {
+                let _ = apply_push_side_effect(worktree, &pending.argv);
+            }
+
+            if pending.name.as_deref() == Some("pull")
+                && !pull_uses_rebase(&pending.argv, pending.worktree.as_deref())
+            {
+                let (old_head, new_head) =
+                    resolve_command_heads(&pre_snapshot, &post_snapshot, &ref_changes);
+                if let (Some(old_head), Some(new_head)) = (old_head, new_head)
+                    && !old_head.is_empty()
+                    && !new_head.is_empty()
+                    && old_head != new_head
+                {
+                    let is_fast_forward = if let Some(worktree) = pending.worktree.as_deref() {
+                        find_repository_in_path(worktree)
+                            .map(|repo| repo_is_ancestor(&repo, &old_head, &new_head))
+                            .unwrap_or(false)
+                    } else {
+                        from_bare_repository(&runtime.store.common_dir)
+                            .map(|repo| repo_is_ancestor(&repo, &old_head, &new_head))
+                            .unwrap_or(false)
+                    };
+
+                    if is_fast_forward {
+                        if let Some(worktree) = pending.worktree.as_deref() {
+                            let _ = apply_pull_fast_forward_working_log_side_effect(
+                                worktree, &old_head, &new_head,
+                            );
+                        } else {
+                            let _ = apply_pull_fast_forward_working_log_side_effect_from_common_dir(
+                                &runtime.store.common_dir,
+                                &old_head,
+                                &new_head,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let active_cherry_pick = cherry_pick_worktree_key
             .as_ref()
             .and_then(|key| state.active_cherry_pick_by_worktree.get(key).cloned());
@@ -1352,7 +1435,7 @@ fn apply_trace_event(
                     .map(ToString::to_string)
                     .or(argv_worktree)
                     .or_else(|| state.sid_worktrees.get(&root_sid).cloned()),
-                pre_snapshot: None,
+                pre_snapshot: Some(state.last_snapshot.clone()),
                 wrapper_mirror: payload
                     .get("wrapper_mirror")
                     .and_then(Value::as_bool)
@@ -1362,30 +1445,22 @@ fn apply_trace_event(
                 resolve_command_from_trace_argv(&pending.argv, pending.worktree.as_deref());
             pending.name = resolved_name;
             pending.argv = resolved_argv;
-
-            let start_command_is_tracked = pending
+            let should_track_pending = pending
                 .name
                 .as_deref()
-                .map(is_tracked_command_name)
-                .or_else(|| argv_primary_command(&pending.argv).map(is_tracked_command_name))
-                .unwrap_or(false);
-            if start_command_is_tracked {
-                pending.pre_snapshot = if let Some(worktree) = pending.worktree.as_ref() {
-                    snapshot_repo(worktree).ok()
-                } else {
-                    parse_payload_snapshot(payload, "pre_snapshot")
-                        .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
-                };
-            }
+                .map(|name| command_may_mutate_refs(name, &pending.argv))
+                .unwrap_or(true);
             if let Some(deferred_exit) = state.deferred_root_exits.remove(&root_sid) {
-                apply_exit_for_pending_root(
-                    runtime,
-                    state,
-                    pending,
-                    deferred_exit.seq,
-                    &deferred_exit.payload,
-                )?;
-            } else {
+                if should_track_pending {
+                    apply_exit_for_pending_root(
+                        runtime,
+                        state,
+                        pending,
+                        deferred_exit.seq,
+                        &deferred_exit.payload,
+                    )?;
+                }
+            } else if should_track_pending {
                 state.pending_roots.insert(root_sid, pending);
             }
         }
@@ -1394,13 +1469,6 @@ fn apply_trace_event(
                 state
                     .sid_worktrees
                     .insert(root_sid.clone(), worktree.to_string());
-                if !state.worktree_snapshots.contains_key(worktree)
-                    && let Ok(snapshot) = snapshot_repo(worktree)
-                {
-                    state
-                        .worktree_snapshots
-                        .insert(worktree.to_string(), snapshot);
-                }
                 if let Some(pending) = state.pending_roots.get_mut(&root_sid) {
                     pending.worktree = Some(worktree.to_string());
                     if !pending
@@ -1424,19 +1492,6 @@ fn apply_trace_event(
                         }
                         pending.argv = resolved_argv;
                     }
-                    let command_is_tracked = pending
-                        .name
-                        .as_deref()
-                        .map(is_tracked_command_name)
-                        .or_else(|| {
-                            argv_primary_command(&pending.argv).map(is_tracked_command_name)
-                        })
-                        .unwrap_or(false);
-                    if pending.pre_snapshot.is_none() && command_is_tracked {
-                        pending.pre_snapshot = snapshot_repo(worktree)
-                            .ok()
-                            .or_else(|| parse_payload_snapshot(payload, "pre_snapshot"));
-                    }
                 }
             }
         }
@@ -1446,6 +1501,7 @@ fn apply_trace_event(
                     return Ok(());
                 }
                 if let Some(pending) = state.pending_roots.get_mut(&root_sid) {
+                    let mut drop_pending = false;
                     let existing_name_is_tracked = pending
                         .name
                         .as_deref()
@@ -1458,13 +1514,21 @@ fn apply_trace_event(
                         pending.worktree = worktree_from_argv(&pending.argv)
                             .or_else(|| state.sid_worktrees.get(&root_sid).cloned());
                     }
-                    if pending.pre_snapshot.is_none() && is_tracked_command_name(name) {
-                        pending.pre_snapshot = if let Some(worktree) = pending.worktree.as_deref() {
-                            snapshot_repo(worktree).ok()
-                        } else {
-                            parse_payload_snapshot(payload, "pre_snapshot")
-                                .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
-                        };
+                    if pending.pre_snapshot.is_none() {
+                        pending.pre_snapshot = Some(state.last_snapshot.clone());
+                    }
+                    let candidate_name = pending
+                        .name
+                        .as_deref()
+                        .or_else(|| argv_primary_command(&pending.argv))
+                        .unwrap_or_default()
+                        .to_string();
+                    if !command_may_mutate_refs(&candidate_name, &pending.argv) {
+                        drop_pending = true;
+                    }
+                    if drop_pending {
+                        state.pending_roots.remove(&root_sid);
+                        state.deferred_root_exits.remove(&root_sid);
                     }
                 } else {
                     let argv = payload
@@ -1483,39 +1547,32 @@ fn apply_trace_event(
                         .map(ToString::to_string)
                         .or_else(|| worktree_from_argv(&argv))
                         .or_else(|| state.sid_worktrees.get(&root_sid).cloned());
-                    let pre_snapshot = if is_tracked_command_name(name) {
-                        if let Some(worktree) = worktree.as_deref() {
-                            snapshot_repo(worktree).ok()
-                        } else {
-                            parse_payload_snapshot(payload, "pre_snapshot")
-                                .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
-                        }
-                    } else {
-                        None
-                    };
-                    state.pending_roots.insert(
-                        root_sid.clone(),
-                        PendingRootCommand {
-                            sid: root_sid.clone(),
-                            start_seq: event.seq,
-                            start_ns: event.received_at_ns,
-                            argv,
-                            name: Some(name.to_string()),
-                            worktree,
-                            pre_snapshot,
-                            wrapper_mirror: payload
-                                .get("wrapper_mirror")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false),
-                        },
-                    );
+                    let pre_snapshot = Some(state.last_snapshot.clone());
+                    if command_may_mutate_refs(name, &argv) {
+                        state.pending_roots.insert(
+                            root_sid.clone(),
+                            PendingRootCommand {
+                                sid: root_sid.clone(),
+                                start_seq: event.seq,
+                                start_ns: event.received_at_ns,
+                                argv,
+                                name: Some(name.to_string()),
+                                worktree,
+                                pre_snapshot,
+                                wrapper_mirror: payload
+                                    .get("wrapper_mirror")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false),
+                            },
+                        );
+                    }
                 }
             }
         }
         "exit" if is_root_sid(sid) => {
             if let Some(pending) = state.pending_roots.remove(&root_sid) {
                 apply_exit_for_pending_root(runtime, state, pending, event.seq, payload)?;
-            } else {
+            } else if trace_payload_may_mutate_refs(payload) {
                 state.deferred_root_exits.insert(
                     root_sid,
                     DeferredRootExit {
@@ -1532,61 +1589,299 @@ fn apply_trace_event(
     Ok(())
 }
 
-fn parse_payload_snapshot(payload: &Value, key: &str) -> Option<RepoSnapshot> {
-    payload
-        .get(key)
-        .cloned()
-        .and_then(|value| serde_json::from_value::<RepoSnapshot>(value).ok())
-}
-
-fn snapshot_for_trace_payload(common_dir: &Path, payload: &Value) -> Option<RepoSnapshot> {
-    payload
-        .get("worktree")
-        .and_then(Value::as_str)
-        .or_else(|| payload.get("repo_working_dir").and_then(Value::as_str))
-        .and_then(|worktree| snapshot_repo(worktree).ok())
-        .or_else(|| snapshot_common_dir(common_dir).ok())
-}
-
-fn set_payload_snapshot(payload: &mut Value, key: &str, snapshot: RepoSnapshot) {
-    if let Some(object) = payload.as_object_mut()
-        && let Ok(serialized) = serde_json::to_value(snapshot)
-    {
-        object.insert(key.to_string(), serialized);
+fn maybe_reanchor_family_state(
+    runtime: &FamilyRuntime,
+    state: &mut FamilyState,
+    cursor: u64,
+) -> Result<bool, GitAiError> {
+    let latest_seq = runtime.store.latest_seq()?;
+    if latest_seq != cursor {
+        return Ok(false);
     }
+
+    let force = state.reflog_anchor.is_none() || state.reflog_drifted;
+    if !force {
+        if !state.pending_roots.is_empty() || !state.deferred_root_exits.is_empty() {
+            return Ok(false);
+        }
+        let now = now_unix_nanos();
+        let idle_since = state
+            .last_event_applied_ns
+            .or(state.last_reanchor_ns)
+            .unwrap_or(now);
+        if now.saturating_sub(idle_since) < REANCHOR_IDLE_NS {
+            return Ok(false);
+        }
+    }
+
+    ensure_reflog_anchor(runtime, state, cursor, force)
 }
 
-fn enrich_trace_payload_with_snapshots(common_dir: &Path, payload: &mut Value) {
-    let trace_event = payload
-        .get("event")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let sid = payload
-        .get("sid")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if sid.is_empty() || !is_root_sid(sid) {
+fn ensure_reflog_anchor(
+    runtime: &FamilyRuntime,
+    state: &mut FamilyState,
+    cursor: u64,
+    force: bool,
+) -> Result<bool, GitAiError> {
+    if !force && state.reflog_anchor.is_some() {
+        return Ok(false);
+    }
+
+    let seq_before = runtime.store.latest_seq()?;
+    if seq_before != cursor {
+        return Ok(false);
+    }
+
+    let snapshot = snapshot_common_dir(&runtime.store.common_dir).unwrap_or_default();
+    let anchor = capture_reflog_anchor(&runtime.store.common_dir, seq_before)?;
+    let seq_after = runtime.store.latest_seq()?;
+    if seq_after != seq_before {
+        return Ok(false);
+    }
+
+    state.last_snapshot = snapshot;
+    state.reflog_anchor = Some(anchor);
+    state.reflog_drifted = false;
+    state.last_reanchor_ns = Some(now_unix_nanos());
+    Ok(true)
+}
+
+fn capture_reflog_anchor(common_dir: &Path, at_seq: u64) -> Result<ReflogAnchorState, GitAiError> {
+    let mut cursors = Vec::new();
+    for (path, reference) in discover_reflog_files(common_dir)? {
+        let metadata = fs::metadata(&path)?;
+        let offset = metadata.len();
+        cursors.push(ReflogCursorState {
+            path: path.to_string_lossy().to_string(),
+            reference,
+            offset,
+        });
+    }
+    cursors.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(ReflogAnchorState {
+        at_seq,
+        anchored_at_ns: now_unix_nanos(),
+        cursors,
+    })
+}
+
+fn discover_reflog_files(common_dir: &Path) -> Result<Vec<(PathBuf, String)>, GitAiError> {
+    let mut out = Vec::new();
+    let logs_dir = common_dir.join("logs");
+    if !logs_dir.exists() {
+        return Ok(out);
+    }
+    discover_reflog_files_recursive(&logs_dir, &logs_dir, &mut out)?;
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+fn discover_reflog_files_recursive(
+    root: &Path,
+    current: &Path,
+    out: &mut Vec<(PathBuf, String)>,
+) -> Result<(), GitAiError> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            discover_reflog_files_recursive(root, &path, out)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let reference = relative.to_string_lossy().replace('\\', "/");
+        if reference == "HEAD" || reference.starts_with("refs/") {
+            out.push((path, reference));
+        }
+    }
+    Ok(())
+}
+
+fn consume_reflog_ref_changes(
+    runtime: &FamilyRuntime,
+    state: &mut FamilyState,
+    seq: u64,
+) -> Result<Vec<RefChange>, GitAiError> {
+    if state.reflog_anchor.is_none() {
+        let _ = ensure_reflog_anchor(runtime, state, seq, true);
+    }
+    let Some(anchor) = state.reflog_anchor.as_mut() else {
+        return Ok(vec![]);
+    };
+
+    let discovered = discover_reflog_files(&runtime.store.common_dir)?;
+    let mut known_paths: HashSet<String> = anchor.cursors.iter().map(|c| c.path.clone()).collect();
+    for (path, reference) in discovered {
+        let path_str = path.to_string_lossy().to_string();
+        if known_paths.insert(path_str.clone()) {
+            anchor.cursors.push(ReflogCursorState {
+                path: path_str,
+                reference,
+                offset: 0,
+            });
+        }
+    }
+    anchor.cursors.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let mut raw_changes: Vec<RefChange> = Vec::new();
+    for cursor in &mut anchor.cursors {
+        let path = PathBuf::from(&cursor.path);
+        if !path.exists() {
+            continue;
+        }
+        let metadata = fs::metadata(&path)?;
+        let file_len = metadata.len();
+        if file_len < cursor.offset {
+            state.reflog_drifted = true;
+            state.last_error = Some(format!(
+                "reflog cursor rewound for {} (offset {} > len {})",
+                cursor.path, cursor.offset, file_len
+            ));
+            return Ok(vec![]);
+        }
+        if file_len == cursor.offset {
+            continue;
+        }
+        let mut file = OpenOptions::new().read(true).open(&path)?;
+        file.seek(SeekFrom::Start(cursor.offset))?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            if let Some(change) = parse_reflog_line(&cursor.reference, &line) {
+                raw_changes.push(change);
+            }
+        }
+        cursor.offset = file_len;
+    }
+
+    if raw_changes.is_empty() {
+        return Ok(vec![]);
+    }
+
+    anchor.at_seq = seq;
+    Ok(raw_changes)
+}
+
+fn parse_reflog_line(reference: &str, line: &str) -> Option<RefChange> {
+    let head = line.split('\t').next().unwrap_or_default();
+    let mut parts = head.split_whitespace();
+    let old = parts.next()?.to_string();
+    let new = parts.next()?.to_string();
+    if !is_valid_oid(&old) || !is_valid_oid(&new) || old == new {
+        return None;
+    }
+    Some(RefChange {
+        reference: reference.to_string(),
+        old,
+        new,
+    })
+}
+
+fn apply_ref_changes_to_snapshot(pre: &RepoSnapshot, ref_changes: &[RefChange]) -> RepoSnapshot {
+    let mut post = pre.clone();
+    for change in ref_changes {
+        if change.reference == "HEAD" {
+            if is_valid_oid(&change.new) && !is_zero_oid(&change.new) {
+                post.head = Some(change.new.clone());
+            }
+            continue;
+        }
+        if !change.reference.starts_with("refs/") {
+            continue;
+        }
+        if is_valid_oid(&change.new) && !is_zero_oid(&change.new) {
+            post.refs.insert(change.reference.clone(), change.new.clone());
+        } else {
+            post.refs.remove(&change.reference);
+        }
+        if let Some(branch) = post.branch.as_ref()
+            && change.reference == format!("refs/heads/{}", branch)
+            && is_valid_oid(&change.new)
+            && !is_zero_oid(&change.new)
+        {
+            post.head = Some(change.new.clone());
+        }
+    }
+    if let Some(branch) = post.branch.as_ref() {
+        let branch_ref = format!("refs/heads/{}", branch);
+        if let Some(oid) = post.refs.get(&branch_ref)
+            && is_valid_oid(oid)
+            && !is_zero_oid(oid)
+        {
+            post.head = Some(oid.clone());
+        }
+    }
+    post
+}
+
+fn update_snapshot_head_from_branch(snapshot: &mut RepoSnapshot) {
+    let Some(branch) = snapshot.branch.clone() else {
         return;
+    };
+    let branch_ref = format!("refs/heads/{}", branch);
+    if let Some(oid) = snapshot.refs.get(&branch_ref)
+        && is_valid_oid(oid)
+        && !is_zero_oid(oid)
+    {
+        snapshot.head = Some(oid.clone());
     }
+}
 
-    match trace_event {
-        "start" | "cmd_name" => {
-            if payload.get("pre_snapshot").is_none()
-                && trace_payload_is_tracked_command(payload)
-                && let Some(snapshot) = snapshot_for_trace_payload(common_dir, payload)
-            {
-                set_payload_snapshot(payload, "pre_snapshot", snapshot);
-            }
-        }
-        "exit" => {
-            if payload.get("post_snapshot").is_none()
-                && let Some(snapshot) = snapshot_for_trace_payload(common_dir, payload)
-            {
-                set_payload_snapshot(payload, "post_snapshot", snapshot);
-            }
-        }
-        _ => {}
+fn infer_branch_after_command(name: &str, argv: &[String], pre_branch: Option<&str>) -> Option<String> {
+    match name {
+        "switch" => infer_switch_branch(argv).or_else(|| pre_branch.map(ToString::to_string)),
+        "checkout" => infer_checkout_branch(argv).or_else(|| pre_branch.map(ToString::to_string)),
+        _ => pre_branch.map(ToString::to_string),
     }
+}
+
+fn infer_switch_branch(argv: &[String]) -> Option<String> {
+    let args = args_after_subcommand(argv, "switch");
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "-c" || arg == "-C" {
+            return args.get(i + 1).cloned();
+        }
+        if arg.starts_with('-') {
+            i = i.saturating_add(1);
+            continue;
+        }
+        return Some(args[i].clone());
+    }
+    None
+}
+
+fn infer_checkout_branch(argv: &[String]) -> Option<String> {
+    let args = args_after_subcommand(argv, "checkout");
+    if args.iter().any(|arg| arg == "--detach") {
+        return None;
+    }
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "-b" || arg == "-B" {
+            return args.get(i + 1).cloned();
+        }
+        if arg.starts_with('-') {
+            i = i.saturating_add(1);
+            continue;
+        }
+        return Some(args[i].clone());
+    }
+    None
 }
 
 fn parse_checkpoint_id(payload: &Value, seq: u64) -> String {
@@ -1796,6 +2091,33 @@ fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
     }
 }
 
+fn apply_push_side_effect(worktree: &str, argv: &[String]) -> Result<(), GitAiError> {
+    let repo = find_repository_in_path(worktree)?;
+    let parsed = parse_git_cli_args(trace_argv_invocation_tokens(argv));
+    push_hooks::run_pre_push_hook_managed(&parsed, &repo);
+    Ok(())
+}
+
+fn apply_pull_fast_forward_working_log_side_effect(
+    worktree: &str,
+    old_head: &str,
+    new_head: &str,
+) -> Result<(), GitAiError> {
+    let repo = find_repository_in_path(worktree)?;
+    repo.storage.rename_working_log(old_head, new_head)?;
+    Ok(())
+}
+
+fn apply_pull_fast_forward_working_log_side_effect_from_common_dir(
+    common_dir: &Path,
+    old_head: &str,
+    new_head: &str,
+) -> Result<(), GitAiError> {
+    let repo = from_bare_repository(common_dir)?;
+    repo.storage.rename_working_log(old_head, new_head)?;
+    Ok(())
+}
+
 fn apply_rewrite_side_effect(
     worktree: &str,
     rewrite_event: RewriteLogEvent,
@@ -1805,6 +2127,9 @@ fn apply_rewrite_side_effect(
     let author = repo.git_author_identity().name_or_unknown();
     if let RewriteLogEvent::Reset { reset } = &rewrite_event {
         apply_reset_working_log_side_effect(&repo, reset, &author)?;
+    }
+    if let RewriteLogEvent::Stash { stash } = &rewrite_event {
+        apply_stash_rewrite_side_effect(&mut repo, stash)?;
     }
     apply_env_overrides_to_working_log(&repo, &rewrite_event, env_overrides)?;
     repo.handle_rewrite_log_event(rewrite_event, author, true, true);
@@ -1821,6 +2146,54 @@ fn apply_rewrite_side_effect_from_common_dir(
     apply_env_overrides_to_working_log(&repo, &rewrite_event, env_overrides)?;
     repo.handle_rewrite_log_event(rewrite_event, author, true, true);
     Ok(())
+}
+
+fn apply_stash_rewrite_side_effect(
+    repo: &mut Repository,
+    stash_event: &StashEvent,
+) -> Result<(), GitAiError> {
+    use crate::commands::git_handlers::CommandHooksContext;
+
+    let mut args = vec!["stash".to_string()];
+    match stash_event.operation {
+        StashOperation::Create => args.push("push".to_string()),
+        StashOperation::Apply => args.push("apply".to_string()),
+        StashOperation::Pop => args.push("pop".to_string()),
+        StashOperation::Drop => args.push("drop".to_string()),
+        StashOperation::List => args.push("list".to_string()),
+    }
+    if matches!(
+        stash_event.operation,
+        StashOperation::Apply | StashOperation::Pop
+    ) && let Some(stash_ref) = stash_event.stash_ref.as_ref()
+    {
+        args.push(stash_ref.clone());
+    }
+
+    let parsed = parse_git_cli_args(&args);
+    let context = CommandHooksContext {
+        pre_commit_hook_result: None,
+        rebase_original_head: None,
+        rebase_onto: None,
+        fetch_authorship_handle: None,
+        stash_sha: stash_event.stash_sha.clone(),
+        push_authorship_handle: None,
+        stashed_va: None,
+    };
+    stash_hooks::post_stash_hook(&context, &parsed, repo, success_exit_status());
+    Ok(())
+}
+
+#[cfg(unix)]
+fn success_exit_status() -> std::process::ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::ExitStatus::from_raw(0)
+}
+
+#[cfg(windows)]
+fn success_exit_status() -> std::process::ExitStatus {
+    use std::os::windows::process::ExitStatusExt;
+    std::process::ExitStatus::from_raw(0)
 }
 
 fn apply_env_overrides_to_working_log(
@@ -1966,8 +2339,66 @@ fn worktree_from_argv(argv: &[String]) -> Option<String> {
 fn is_tracked_command_name(name: &str) -> bool {
     matches!(
         name,
-        "commit" | "switch" | "checkout" | "pull" | "stash" | "reset" | "rebase" | "cherry-pick"
+        "commit"
+            | "switch"
+            | "checkout"
+            | "pull"
+            | "push"
+            | "stash"
+            | "reset"
+            | "rebase"
+            | "cherry-pick"
+            | "merge"
     )
+}
+
+fn command_may_mutate_refs(name: &str, argv: &[String]) -> bool {
+    if is_tracked_command_name(name) {
+        return true;
+    }
+    if matches!(
+        name,
+        "update-ref" | "commit-tree" | "branch" | "tag" | "worktree"
+    ) {
+        return true;
+    }
+    let primary = argv_primary_command(argv).unwrap_or_default();
+    matches!(
+        primary,
+        "commit"
+            | "switch"
+            | "checkout"
+            | "pull"
+            | "push"
+            | "stash"
+            | "reset"
+            | "rebase"
+            | "cherry-pick"
+            | "merge"
+            | "update-ref"
+            | "commit-tree"
+            | "branch"
+            | "tag"
+            | "worktree"
+    )
+}
+
+fn trace_payload_may_mutate_refs(payload: &Value) -> bool {
+    let name = payload
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let argv = payload
+        .get("argv")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    command_may_mutate_refs(name, &argv)
 }
 
 fn parse_alias_tokens_for_daemon(value: &str) -> Option<Vec<String>> {
@@ -2113,31 +2544,6 @@ fn resolve_command_from_trace_argv(
     )
 }
 
-fn trace_payload_is_tracked_command(payload: &Value) -> bool {
-    if let Some(name) = payload.get("name").and_then(Value::as_str) {
-        return is_tracked_command_name(name);
-    }
-    let argv = payload
-        .get("argv")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let worktree = payload
-        .get("worktree")
-        .and_then(Value::as_str)
-        .or_else(|| payload.get("repo_working_dir").and_then(Value::as_str));
-    resolve_command_from_trace_argv(&argv, worktree)
-        .0
-        .as_deref()
-        .map(is_tracked_command_name)
-        .unwrap_or(false)
-}
-
 fn is_internal_cmd_name(name: &str) -> bool {
     name.starts_with("_run_") || name == "_parse_opt_" || name == "_run_git_alias_"
 }
@@ -2157,28 +2563,64 @@ fn branch_ref_name(snapshot: &RepoSnapshot) -> Option<String> {
         .map(|branch| format!("refs/heads/{}", branch))
 }
 
-fn preferred_branch_ref_change<'a>(
+fn ref_change_bounds_for_reference(
+    reference: &str,
+    ref_changes: &[RefChange],
+) -> Option<(String, String)> {
+    let mut first_old: Option<String> = None;
+    let mut last_new: Option<String> = None;
+    for change in ref_changes.iter().filter(|c| c.reference == reference) {
+        if !is_valid_oid(&change.old)
+            || !is_valid_oid(&change.new)
+            || is_zero_oid(&change.old)
+            || is_zero_oid(&change.new)
+        {
+            continue;
+        }
+        if first_old.is_none() {
+            first_old = Some(change.old.clone());
+        }
+        last_new = Some(change.new.clone());
+    }
+    match (first_old, last_new) {
+        (Some(old), Some(new)) => Some((old, new)),
+        _ => None,
+    }
+}
+
+fn preferred_branch_ref_change_bounds(
     pre: &RepoSnapshot,
     post: &RepoSnapshot,
-    ref_changes: &'a [RefChange],
-) -> Option<&'a RefChange> {
+    ref_changes: &[RefChange],
+) -> Option<(String, String)> {
     if let Some(branch_ref) = branch_ref_name(post)
-        && let Some(change) = ref_changes.iter().find(|c| c.reference == branch_ref)
+        && let Some(bounds) = ref_change_bounds_for_reference(&branch_ref, ref_changes)
     {
-        return Some(change);
+        return Some(bounds);
     }
     if let Some(branch_ref) = branch_ref_name(pre)
-        && let Some(change) = ref_changes.iter().find(|c| c.reference == branch_ref)
+        && let Some(bounds) = ref_change_bounds_for_reference(&branch_ref, ref_changes)
     {
-        return Some(change);
+        return Some(bounds);
     }
-    ref_changes.iter().find(|change| {
+    let mut first_old: Option<String> = None;
+    let mut last_new: Option<String> = None;
+    for change in ref_changes.iter().filter(|change| {
         change.reference.starts_with("refs/heads/")
             && is_valid_oid(&change.old)
             && is_valid_oid(&change.new)
             && !is_zero_oid(&change.old)
             && !is_zero_oid(&change.new)
-    })
+    }) {
+        if first_old.is_none() {
+            first_old = Some(change.old.clone());
+        }
+        last_new = Some(change.new.clone());
+    }
+    match (first_old, last_new) {
+        (Some(old), Some(new)) => Some((old, new)),
+        _ => None,
+    }
 }
 
 fn resolve_command_heads(
@@ -2188,13 +2630,9 @@ fn resolve_command_heads(
 ) -> (Option<String>, Option<String>) {
     let mut old_head = pre.head.clone();
     let mut new_head = post.head.clone();
-    if let Some(change) = preferred_branch_ref_change(pre, post, ref_changes) {
-        if is_valid_oid(&change.old) && !is_zero_oid(&change.old) {
-            old_head = Some(change.old.clone());
-        }
-        if is_valid_oid(&change.new) && !is_zero_oid(&change.new) {
-            new_head = Some(change.new.clone());
-        }
+    if let Some((old, new)) = preferred_branch_ref_change_bounds(pre, post, ref_changes) {
+        old_head = Some(old);
+        new_head = Some(new);
     }
     (old_head, new_head)
 }
@@ -2215,16 +2653,40 @@ fn build_rebase_mappings_best_effort(
         }
 
         if !original_commits.is_empty() {
-            let new_commits = if new_commits.is_empty() {
-                vec![new_head.to_string()]
-            } else {
-                new_commits
-            };
             return (original_commits, new_commits);
         }
     }
 
     (vec![original_head.to_string()], vec![new_head.to_string()])
+}
+
+fn build_pull_rebase_mappings_best_effort(
+    worktree: Option<&str>,
+    original_head: &str,
+    new_head: &str,
+) -> (Vec<String>, Vec<String>) {
+    if let Some(worktree) = worktree
+        && let Ok(repo) = find_repository_in_path(worktree)
+    {
+        let onto_head = repo
+            .revparse_single("@{upstream}")
+            .and_then(|obj| obj.peel_to_commit())
+            .map(|commit| commit.id())
+            .ok();
+        if let Ok((original_commits, mut new_commits)) =
+            build_rebase_commit_mappings(&repo, original_head, new_head, onto_head.as_deref())
+        {
+            if !original_commits.is_empty() && new_commits.len() > original_commits.len() {
+                let keep = original_commits.len();
+                new_commits = new_commits.split_off(new_commits.len().saturating_sub(keep));
+            }
+            if !original_commits.is_empty() {
+                return (original_commits, new_commits);
+            }
+        }
+    }
+
+    build_rebase_mappings_best_effort(worktree, original_head, new_head)
 }
 
 fn args_after_subcommand<'a>(argv: &'a [String], command: &str) -> &'a [String] {
@@ -2420,6 +2882,7 @@ fn should_synthesize_rewrite_from_snapshots(
     post: &RepoSnapshot,
 ) -> bool {
     let head_changed = pre.head.is_some() && post.head.is_some() && pre.head != post.head;
+    let rebase_operation = name == "rebase";
     let commit_operation = name == "commit";
     let pull_rebase_operation = name == "pull" && argv.iter().any(|arg| arg == "--rebase");
     let explicit_abort =
@@ -2427,13 +2890,16 @@ fn should_synthesize_rewrite_from_snapshots(
     let explicit_continue =
         matches!(name, "rebase" | "cherry-pick") && argv.iter().any(|arg| arg == "--continue");
     let stash_operation = name == "stash";
+    let merge_squash_operation = name == "merge" && argv.iter().any(|arg| arg == "--squash");
     let reset_without_pathspec = name == "reset" && !is_reset_pathspec_command(argv);
     head_changed
+        || rebase_operation
         || commit_operation
         || pull_rebase_operation
         || explicit_abort
         || explicit_continue
         || stash_operation
+        || merge_squash_operation
         || reset_without_pathspec
 }
 
@@ -2502,26 +2968,53 @@ fn synthesize_rewrite_event(
                 let new_head = new_head.unwrap_or_default();
                 let (original_commits, new_commits) =
                     if !original_head.is_empty() && !new_head.is_empty() {
-                        build_rebase_mappings_best_effort(worktree, &original_head, &new_head)
+                        build_pull_rebase_mappings_best_effort(worktree, &original_head, &new_head)
                     } else {
                         (vec![], vec![])
                     };
+                let original_commits = if original_commits.is_empty() && !original_head.is_empty() {
+                    vec![original_head.clone()]
+                } else {
+                    original_commits
+                };
                 Some(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
                     original_head.clone(),
                     new_head.clone(),
                     argv.iter().any(|a| a == "-i" || a == "--interactive"),
-                    if original_commits.is_empty() {
-                        vec![original_head]
-                    } else {
-                        original_commits
-                    },
-                    if new_commits.is_empty() {
-                        vec![new_head]
-                    } else {
-                        new_commits
-                    },
+                    original_commits,
+                    new_commits,
                 )))
             }
+        }
+        "merge" => {
+            if !argv.iter().any(|arg| arg == "--squash") {
+                return None;
+            }
+            let source_branch = merge_squash_source_spec_from_argv(argv)?;
+            let source_head =
+                resolve_commit_specs_to_oids(worktree, std::slice::from_ref(&source_branch))
+                    .into_iter()
+                    .last()
+                    .unwrap_or_default();
+            let base_head = pre
+                .head
+                .clone()
+                .or_else(|| post.head.clone())
+                .unwrap_or_default();
+            if source_head.is_empty() || base_head.is_empty() {
+                return None;
+            }
+            let base_branch = pre
+                .branch
+                .clone()
+                .or_else(|| post.branch.clone())
+                .unwrap_or_else(|| "HEAD".to_string());
+            Some(RewriteLogEvent::merge_squash(MergeSquashEvent::new(
+                source_branch,
+                source_head,
+                base_branch,
+                base_head,
+            )))
         }
         "cherry-pick" => {
             if cherry_pick_abort_flag(argv) {
@@ -2583,16 +3076,19 @@ fn synthesize_rewrite_event(
         }
         "stash" => {
             let (operation, stash_ref) = stash_operation_and_ref_from_argv(argv);
+            let stash_sha =
+                stash_sha_from_pre_snapshot(&operation, stash_ref.as_deref(), pre, worktree);
             Some(RewriteLogEvent::stash(StashEvent::new(
                 operation,
                 stash_ref,
+                stash_sha,
                 true,
                 vec![],
             )))
         }
         "pull" => {
             let (old_head, new_head) = resolve_command_heads(pre, post, ref_changes);
-            if !argv.iter().any(|arg| arg == "--rebase") {
+            if !pull_uses_rebase(argv, worktree) {
                 None
             } else {
                 let original_head = old_head.unwrap_or_default();
@@ -2606,20 +3102,17 @@ fn synthesize_rewrite_event(
                     } else {
                         (vec![], vec![])
                     };
+                let original_commits = if original_commits.is_empty() && !original_head.is_empty() {
+                    vec![original_head.clone()]
+                } else {
+                    original_commits
+                };
                 Some(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
                     original_head.clone(),
                     new_head.clone(),
                     false,
-                    if original_commits.is_empty() {
-                        vec![original_head]
-                    } else {
-                        original_commits
-                    },
-                    if new_commits.is_empty() {
-                        vec![new_head]
-                    } else {
-                        new_commits
-                    },
+                    original_commits,
+                    new_commits,
                 )))
             }
         }
@@ -2654,22 +3147,104 @@ fn stash_operation_and_ref_from_argv(argv: &[String]) -> (StashOperation, Option
     (operation, stash_ref)
 }
 
-fn snapshot_repo(worktree: &str) -> Result<RepoSnapshot, GitAiError> {
-    let head = run_git_capture(worktree, &["rev-parse", "HEAD"]).ok();
-    let branch = run_git_capture(worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
-    let refs_raw = run_git_capture(
-        worktree,
-        &["for-each-ref", "--format=%(refname) %(objectname)"],
-    )
-    .unwrap_or_default();
-    let mut refs = HashMap::new();
-    for line in refs_raw.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() == 2 {
-            refs.insert(parts[0].to_string(), parts[1].to_string());
-        }
+fn stash_sha_from_pre_snapshot(
+    operation: &StashOperation,
+    stash_ref: Option<&str>,
+    pre: &RepoSnapshot,
+    worktree: Option<&str>,
+) -> Option<String> {
+    if !matches!(operation, StashOperation::Apply | StashOperation::Pop) {
+        return None;
     }
-    Ok(RepoSnapshot { head, branch, refs })
+
+    if let Some(sha) = pre.refs.get("refs/stash")
+        && is_valid_oid(sha)
+        && !is_zero_oid(sha)
+    {
+        return Some(sha.clone());
+    }
+
+    let Some(stash_ref) = stash_ref else {
+        return None;
+    };
+    if is_valid_oid(stash_ref) && !is_zero_oid(stash_ref) {
+        return Some(stash_ref.to_string());
+    }
+    let Some(worktree) = worktree else {
+        return None;
+    };
+    let resolved = run_git_capture(worktree, &["rev-parse", stash_ref]).ok()?;
+    if is_valid_oid(&resolved) && !is_zero_oid(&resolved) {
+        Some(resolved)
+    } else {
+        None
+    }
+}
+
+fn pull_uses_rebase(argv: &[String], worktree: Option<&str>) -> bool {
+    if argv
+        .iter()
+        .any(|arg| arg == "--no-rebase" || arg.starts_with("--no-rebase="))
+    {
+        return false;
+    }
+    if argv
+        .iter()
+        .any(|arg| arg == "--rebase" || arg == "-r" || arg.starts_with("--rebase="))
+    {
+        return true;
+    }
+    let Some(worktree) = worktree else {
+        return false;
+    };
+    let Ok(repo) = find_repository_in_path(worktree) else {
+        return false;
+    };
+    let config = repo
+        .config_get_regexp(r"^(pull\.rebase)$")
+        .unwrap_or_default();
+    config
+        .get("pull.rebase")
+        .map(|value| value.to_ascii_lowercase() != "false")
+        .unwrap_or(false)
+}
+
+fn merge_squash_source_spec_from_argv(argv: &[String]) -> Option<String> {
+    let args = args_after_subcommand(argv, "merge");
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            return args.get(i + 1).cloned();
+        }
+        if arg.starts_with('-') {
+            if merge_option_consumes_value(arg) {
+                i = i.saturating_add(2);
+            } else {
+                i = i.saturating_add(1);
+            }
+            continue;
+        }
+        return Some(args[i].clone());
+    }
+    None
+}
+
+fn merge_option_consumes_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "-m" | "--message"
+            | "-F"
+            | "--file"
+            | "-X"
+            | "--strategy-option"
+            | "-s"
+            | "--strategy"
+            | "--into-name"
+            | "--cleanup"
+            | "-S"
+            | "--gpg-sign"
+    )
 }
 
 fn snapshot_common_dir(common_dir: &Path) -> Result<RepoSnapshot, GitAiError> {
@@ -3255,7 +3830,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
     async fn test_worker_crash_recovery_replays_remaining_events() {
+        use tokio::time::{Duration, timeout};
+
         let dir = tempdir().unwrap();
         let repo = dir.path().join("repo");
         init_repo(&repo);
@@ -3286,7 +3864,9 @@ mod tests {
         let worker1_runtime = runtime1.clone();
         let worker1 = tokio::spawn(async move { family_worker_loop(worker1_runtime, rx1).await });
         let _ = runtime1.notify_tx.send(());
-        runtime1.wait_for_applied(3).await;
+        timeout(Duration::from_secs(10), runtime1.wait_for_applied(3))
+            .await
+            .expect("first worker should apply initial events");
         worker1.abort();
 
         let (tx2, rx2) = mpsc::unbounded_channel();
@@ -3301,7 +3881,9 @@ mod tests {
         let worker2_runtime = runtime2.clone();
         let worker2 = tokio::spawn(async move { family_worker_loop(worker2_runtime, rx2).await });
         let _ = runtime2.notify_tx.send(());
-        runtime2.wait_for_applied(total).await;
+        timeout(Duration::from_secs(10), runtime2.wait_for_applied(total))
+            .await
+            .expect("restarted worker should replay remaining events");
         assert_eq!(store.load_cursor().unwrap(), total);
 
         worker2.abort();
