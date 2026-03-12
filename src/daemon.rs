@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -39,6 +39,8 @@ const COMMAND_INDEX_FILE: &str = "command_index.jsonl";
 const CHECKPOINT_INDEX_FILE: &str = "checkpoint_index.jsonl";
 const PID_META_FILE: &str = "daemon.pid.json";
 const REANCHOR_IDLE_NS: u128 = 5_000_000_000;
+const TRACE_REFLOG_CUT_FIELD: &str = "reflog_cut";
+const DAEMON_API_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -247,8 +249,9 @@ pub struct ReflogAnchorState {
     pub cursors: Vec<ReflogCursorState>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FamilyState {
+    pub api_version: u32,
     pub pending_roots: HashMap<String, PendingRootCommand>,
     #[serde(default)]
     pub deferred_root_exits: HashMap<String, DeferredRootExit>,
@@ -279,9 +282,41 @@ pub struct FamilyState {
     pub last_reanchor_ns: Option<u128>,
 }
 
+impl Default for FamilyState {
+    fn default() -> Self {
+        Self {
+            api_version: DAEMON_API_VERSION,
+            pending_roots: HashMap::new(),
+            deferred_root_exits: HashMap::new(),
+            sid_worktrees: HashMap::new(),
+            worktree_snapshots: HashMap::new(),
+            commands: Vec::new(),
+            checkpoints: HashMap::new(),
+            unresolved_transcripts: BTreeSet::new(),
+            rewrite_events: Vec::new(),
+            active_cherry_pick_by_worktree: HashMap::new(),
+            env_overrides_by_worktree: HashMap::new(),
+            last_snapshot: RepoSnapshot::default(),
+            dedupe_trace: BTreeSet::new(),
+            dedupe_checkpoints: BTreeSet::new(),
+            last_error: None,
+            last_reconcile_ns: None,
+            reflog_anchor: None,
+            reflog_drifted: false,
+            last_event_applied_ns: None,
+            last_reanchor_ns: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct CursorState {
     cursor: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReflogCutState {
+    offsets: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -419,7 +454,7 @@ impl FamilyStore {
 
     pub fn load_cursor(&self) -> Result<u64, GitAiError> {
         let content = fs::read_to_string(&self.cursor_file)?;
-        let parsed: CursorState = serde_json::from_str(&content).unwrap_or_default();
+        let parsed: CursorState = serde_json::from_str(&content)?;
         Ok(parsed.cursor)
     }
 
@@ -431,7 +466,14 @@ impl FamilyStore {
 
     pub fn load_state(&self) -> Result<FamilyState, GitAiError> {
         let content = fs::read_to_string(&self.state_file)?;
-        Ok(serde_json::from_str(&content).unwrap_or_default())
+        let state: FamilyState = serde_json::from_str(&content)?;
+        if state.api_version != DAEMON_API_VERSION {
+            return Err(GitAiError::Generic(format!(
+                "unsupported daemon state api_version {} (expected {})",
+                state.api_version, DAEMON_API_VERSION
+            )));
+        }
+        Ok(state)
     }
 
     pub fn save_state(&self, state: &FamilyState) -> Result<(), GitAiError> {
@@ -711,6 +753,7 @@ impl DaemonCoordinator {
             .get_or_create_family_runtime(family_key.clone(), common_dir)
             .await?;
         let _guard = runtime.append_lock.lock().await;
+        let payload = maybe_attach_reflog_cut(&runtime.store.common_dir, event_type, payload);
         let event = runtime
             .store
             .append_event(&family_key, source, event_type, payload)?;
@@ -1189,7 +1232,7 @@ fn apply_exit_for_pending_root(
         .or_else(|| argv_primary_command(&pending.argv))
         .unwrap_or_default();
     let ref_changes = if command_may_mutate_refs(command_name, &pending.argv) {
-        consume_reflog_ref_changes(runtime, state, exit_seq)?
+        consume_reflog_ref_changes(runtime, state, exit_seq, exit_payload)?
     } else {
         vec![]
     };
@@ -1707,65 +1750,29 @@ fn consume_reflog_ref_changes(
     runtime: &FamilyRuntime,
     state: &mut FamilyState,
     seq: u64,
+    exit_payload: &Value,
 ) -> Result<Vec<RefChange>, GitAiError> {
     if state.reflog_anchor.is_none() {
         let _ = ensure_reflog_anchor(runtime, state, seq, true);
     }
-    let Some(anchor) = state.reflog_anchor.as_mut() else {
+    let Some(mut anchor) = state.reflog_anchor.take() else {
         return Ok(vec![]);
     };
 
-    let discovered = discover_reflog_files(&runtime.store.common_dir)?;
-    let mut known_paths: HashSet<String> = anchor.cursors.iter().map(|c| c.path.clone()).collect();
-    for (path, reference) in discovered {
-        let path_str = path.to_string_lossy().to_string();
-        if known_paths.insert(path_str.clone()) {
-            anchor.cursors.push(ReflogCursorState {
-                path: path_str,
-                reference,
-                offset: 0,
-            });
-        }
+    let cut = parse_reflog_cut_from_payload(exit_payload);
+    let result = if let Some(cut) = cut {
+        consume_reflog_ref_changes_bounded(runtime, state, &mut anchor, seq, &cut)
+    } else {
+        state.last_error = Some("missing reflog_cut for mutating root exit".to_string());
+        state.reflog_drifted = true;
+        Ok(vec![])
+    };
+    if state.reflog_drifted {
+        state.reflog_anchor = None;
+    } else {
+        state.reflog_anchor = Some(anchor);
     }
-    anchor.cursors.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let mut raw_changes: Vec<RefChange> = Vec::new();
-    for cursor in &mut anchor.cursors {
-        let path = PathBuf::from(&cursor.path);
-        if !path.exists() {
-            continue;
-        }
-        let metadata = fs::metadata(&path)?;
-        let file_len = metadata.len();
-        if file_len < cursor.offset {
-            state.reflog_drifted = true;
-            state.last_error = Some(format!(
-                "reflog cursor rewound for {} (offset {} > len {})",
-                cursor.path, cursor.offset, file_len
-            ));
-            return Ok(vec![]);
-        }
-        if file_len == cursor.offset {
-            continue;
-        }
-        let mut file = OpenOptions::new().read(true).open(&path)?;
-        file.seek(SeekFrom::Start(cursor.offset))?;
-        let reader = BufReader::new(file);
-        for line in reader.lines() {
-            let line = line?;
-            if let Some(change) = parse_reflog_line(&cursor.reference, &line) {
-                raw_changes.push(change);
-            }
-        }
-        cursor.offset = file_len;
-    }
-
-    if raw_changes.is_empty() {
-        return Ok(vec![]);
-    }
-
-    anchor.at_seq = seq;
-    Ok(raw_changes)
+    result
 }
 
 fn parse_reflog_line(reference: &str, line: &str) -> Option<RefChange> {
@@ -1783,6 +1790,148 @@ fn parse_reflog_line(reference: &str, line: &str) -> Option<RefChange> {
     })
 }
 
+fn maybe_attach_reflog_cut(common_dir: &Path, event_type: &str, payload: Value) -> Value {
+    if event_type != TRACE_EVENT_TYPE {
+        return payload;
+    }
+    let mut payload = payload;
+    if payload.get("event").and_then(Value::as_str) != Some("exit") {
+        return payload;
+    }
+    let Some(sid) = payload.get("sid").and_then(Value::as_str) else {
+        return payload;
+    };
+    if !is_root_sid(sid) {
+        return payload;
+    }
+    if payload.get(TRACE_REFLOG_CUT_FIELD).is_some() {
+        return payload;
+    }
+    match capture_reflog_cut(common_dir) {
+        Ok(cut) => {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(TRACE_REFLOG_CUT_FIELD.to_string(), cut);
+            }
+        }
+        Err(e) => {
+            debug_log(&format!(
+                "failed to capture reflog cut for root exit: {}; continuing without cut",
+                e
+            ));
+        }
+    }
+    payload
+}
+
+fn capture_reflog_cut(common_dir: &Path) -> Result<Value, GitAiError> {
+    let mut offsets = serde_json::Map::new();
+    for (path, reference) in discover_reflog_files(common_dir)? {
+        let metadata = fs::metadata(path)?;
+        offsets.insert(reference, json!({ "offset": metadata.len() }));
+    }
+    Ok(Value::Object(offsets))
+}
+
+fn parse_reflog_cut_from_payload(payload: &Value) -> Option<ReflogCutState> {
+    let cut = payload.get(TRACE_REFLOG_CUT_FIELD)?;
+    let map = cut.as_object()?;
+    let mut offsets = HashMap::new();
+    for (reference, value) in map {
+        let offset = value.get("offset").and_then(Value::as_u64);
+        if let Some(offset) = offset {
+            offsets.insert(reference.clone(), offset);
+        }
+    }
+    if offsets.is_empty() {
+        None
+    } else {
+        Some(ReflogCutState { offsets })
+    }
+}
+
+fn reflog_path_for_reference(common_dir: &Path, reference: &str) -> PathBuf {
+    common_dir.join("logs").join(reference)
+}
+
+fn consume_reflog_ref_changes_bounded(
+    runtime: &FamilyRuntime,
+    state: &mut FamilyState,
+    anchor: &mut ReflogAnchorState,
+    seq: u64,
+    cut: &ReflogCutState,
+) -> Result<Vec<RefChange>, GitAiError> {
+    let mut known_refs: HashSet<String> =
+        anchor.cursors.iter().map(|c| c.reference.clone()).collect();
+    for reference in cut.offsets.keys() {
+        if known_refs.insert(reference.clone()) {
+            let path = reflog_path_for_reference(&runtime.store.common_dir, reference);
+            anchor.cursors.push(ReflogCursorState {
+                path: path.to_string_lossy().to_string(),
+                reference: reference.clone(),
+                offset: 0,
+            });
+        }
+    }
+    anchor.cursors.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let mut raw_changes: Vec<RefChange> = Vec::new();
+    let mut next_offsets: Vec<u64> = anchor.cursors.iter().map(|c| c.offset).collect();
+    for (idx, cursor) in anchor.cursors.iter().enumerate() {
+        let target_end = cut
+            .offsets
+            .get(&cursor.reference)
+            .copied()
+            .unwrap_or(cursor.offset);
+        if target_end < cursor.offset {
+            state.reflog_drifted = true;
+            state.last_error = Some(format!(
+                "reflog cut offset regressed for {} (cut {} < cursor {})",
+                cursor.reference, target_end, cursor.offset
+            ));
+            return Ok(vec![]);
+        }
+        if target_end == cursor.offset {
+            continue;
+        }
+        let path = PathBuf::from(&cursor.path);
+        if !path.exists() {
+            state.reflog_drifted = true;
+            state.last_error = Some(format!(
+                "reflog file missing for bounded read: {}",
+                cursor.path
+            ));
+            return Ok(vec![]);
+        }
+        let metadata = fs::metadata(&path)?;
+        let file_len = metadata.len();
+        if file_len < target_end {
+            state.reflog_drifted = true;
+            state.last_error = Some(format!(
+                "reflog file shorter than bounded cut for {} (cut {} > len {})",
+                cursor.reference, target_end, file_len
+            ));
+            return Ok(vec![]);
+        }
+        let mut file = OpenOptions::new().read(true).open(&path)?;
+        file.seek(SeekFrom::Start(cursor.offset))?;
+        let reader = BufReader::new(file.take(target_end - cursor.offset));
+        for line in reader.lines() {
+            let line = line?;
+            if let Some(change) = parse_reflog_line(&cursor.reference, &line) {
+                raw_changes.push(change);
+            }
+        }
+        next_offsets[idx] = target_end;
+    }
+    for (idx, offset) in next_offsets.into_iter().enumerate() {
+        if let Some(cursor) = anchor.cursors.get_mut(idx) {
+            cursor.offset = offset;
+        }
+    }
+    anchor.at_seq = seq;
+    Ok(raw_changes)
+}
+
 fn apply_ref_changes_to_snapshot(pre: &RepoSnapshot, ref_changes: &[RefChange]) -> RepoSnapshot {
     let mut post = pre.clone();
     for change in ref_changes {
@@ -1796,7 +1945,8 @@ fn apply_ref_changes_to_snapshot(pre: &RepoSnapshot, ref_changes: &[RefChange]) 
             continue;
         }
         if is_valid_oid(&change.new) && !is_zero_oid(&change.new) {
-            post.refs.insert(change.reference.clone(), change.new.clone());
+            post.refs
+                .insert(change.reference.clone(), change.new.clone());
         } else {
             post.refs.remove(&change.reference);
         }
@@ -1833,7 +1983,11 @@ fn update_snapshot_head_from_branch(snapshot: &mut RepoSnapshot) {
     }
 }
 
-fn infer_branch_after_command(name: &str, argv: &[String], pre_branch: Option<&str>) -> Option<String> {
+fn infer_branch_after_command(
+    name: &str,
+    argv: &[String],
+    pre_branch: Option<&str>,
+) -> Option<String> {
     match name {
         "switch" => infer_switch_branch(argv).or_else(|| pre_branch.map(ToString::to_string)),
         "checkout" => infer_checkout_branch(argv).or_else(|| pre_branch.map(ToString::to_string)),
@@ -3619,6 +3773,33 @@ mod tests {
         );
     }
 
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git command failed: git -C {} {}\nstderr: {}",
+            path.display(),
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn configure_test_identity(path: &Path) {
+        let _ = git(path, &["config", "user.name", "Daemon Test"]);
+        let _ = git(path, &["config", "user.email", "daemon-test@example.com"]);
+    }
+
+    fn empty_commit(path: &Path, message: &str) -> String {
+        let _ = git(path, &["commit", "--allow-empty", "-m", message]);
+        git(path, &["rev-parse", "HEAD"])
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_daemon_lock_is_singleton() {
@@ -4040,7 +4221,9 @@ mod tests {
             .await
             .expect("def_repo ingest should resolve family and flush buffer");
 
-        let applied_seq = def_repo_resp.seq.expect("def_repo should return a sequence");
+        let applied_seq = def_repo_resp
+            .seq
+            .expect("def_repo should return a sequence");
         let barrier = coordinator
             .wait_through_seq(repo.to_string_lossy().to_string(), applied_seq)
             .await
@@ -4060,7 +4243,11 @@ mod tests {
         assert_eq!(command.name, "checkout");
         assert_eq!(
             command.argv,
-            vec!["git".to_string(), "checkout".to_string(), "main".to_string()]
+            vec![
+                "git".to_string(),
+                "checkout".to_string(),
+                "main".to_string()
+            ]
         );
         assert_eq!(
             command.seq, 3,
@@ -4070,6 +4257,68 @@ mod tests {
             command.worktree.as_deref(),
             Some(repo.to_string_lossy().as_ref()),
             "buffered events should inherit resolved worktree before flush"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn test_trace_exit_ingest_stamps_reflog_cut_boundary() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_repo(&repo);
+        let common_dir = repo.join(".git");
+        let daemon_dir = dir.path().join("daemon");
+        let config = DaemonConfig {
+            internal_dir: dir.path().join("internal"),
+            lock_path: daemon_dir.join("daemon.lock"),
+            trace_socket_path: daemon_dir.join("trace2.sock"),
+            control_socket_path: daemon_dir.join("control.sock"),
+            mode: DaemonMode::Shadow,
+        };
+        let coordinator = Arc::new(DaemonCoordinator::new(config));
+        let repo_working_dir = repo.to_string_lossy().to_string();
+
+        let _ = coordinator
+            .ingest_trace_payload(
+                json!({
+                    "event": "start",
+                    "sid": "root-cut",
+                    "argv": ["git", "status"],
+                    "worktree": repo_working_dir,
+                    "repo_working_dir": repo.to_string_lossy().to_string()
+                }),
+                false,
+            )
+            .await
+            .expect("start ingest should succeed");
+        let exit_resp = coordinator
+            .ingest_trace_payload(
+                json!({
+                    "event": "exit",
+                    "sid": "root-cut",
+                    "code": 0,
+                    "worktree": repo.to_string_lossy().to_string(),
+                    "repo_working_dir": repo.to_string_lossy().to_string()
+                }),
+                false,
+            )
+            .await
+            .expect("exit ingest should succeed");
+
+        let exit_seq = exit_resp.seq.expect("exit should append an event");
+        let store = FamilyStore::for_common_dir(&common_dir).unwrap();
+        let events = store.read_events_after(0).unwrap();
+        let exit_event = events
+            .iter()
+            .find(|event| event.seq == exit_seq)
+            .expect("expected exit event in store");
+        assert!(
+            exit_event
+                .payload
+                .get(TRACE_REFLOG_CUT_FIELD)
+                .and_then(Value::as_object)
+                .is_some(),
+            "root exit payload should include reflog_cut captured at ingest time"
         );
     }
 
@@ -4102,5 +4351,485 @@ mod tests {
         };
         apply_reconcile_event(&runtime, &mut state, &event).unwrap();
         assert!(state.last_reconcile_ns.is_some());
+    }
+
+    #[test]
+    fn test_reflog_cursor_scopes_each_commit_when_exits_are_promptly_applied() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_repo(&repo);
+        configure_test_identity(&repo);
+
+        let base_head = empty_commit(&repo, "base");
+        let common_dir = repo.join(".git");
+        let store = FamilyStore::for_common_dir(&common_dir).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = FamilyRuntime {
+            store,
+            mode: DaemonMode::Shadow,
+            append_lock: AsyncMutex::new(()),
+            notify_tx: tx,
+            applied_seq: AtomicU64::new(0),
+            applied_notify: Notify::new(),
+        };
+        let mut state = FamilyState::default();
+        state.last_snapshot = snapshot_common_dir(&common_dir).unwrap();
+        ensure_reflog_anchor(&runtime, &mut state, 0, true).unwrap();
+
+        let worktree = repo.to_string_lossy().to_string();
+        let family = common_dir.to_string_lossy().to_string();
+
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 1,
+                repo_family: family.clone(),
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 1,
+                payload: json!({
+                    "event": "start",
+                    "sid": "s1",
+                    "argv": ["git","commit","--allow-empty","-m","c1"],
+                    "worktree": worktree,
+                    "repo_working_dir": repo.to_string_lossy().to_string()
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 2,
+                repo_family: family.clone(),
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 2,
+                payload: json!({
+                    "event": "cmd_name",
+                    "sid": "s1",
+                    "name": "commit"
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+
+        let commit_1 = empty_commit(&repo, "c1");
+        let cut_after_commit_1 = capture_reflog_cut(&common_dir).unwrap();
+
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 3,
+                repo_family: family.clone(),
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 3,
+                payload: json!({
+                    "event": "exit",
+                    "sid": "s1",
+                    "code": 0,
+                    "name": "commit",
+                    "argv": ["git","commit","--allow-empty","-m","c1"],
+                    "reflog_cut": cut_after_commit_1
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 4,
+                repo_family: family.clone(),
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 4,
+                payload: json!({
+                    "event": "start",
+                    "sid": "s2",
+                    "argv": ["git","commit","--allow-empty","-m","c2"],
+                    "worktree": repo.to_string_lossy().to_string(),
+                    "repo_working_dir": repo.to_string_lossy().to_string()
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 5,
+                repo_family: family.clone(),
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 5,
+                payload: json!({
+                    "event": "cmd_name",
+                    "sid": "s2",
+                    "name": "commit"
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+
+        let commit_2 = empty_commit(&repo, "c2");
+        let cut_after_commit_2 = capture_reflog_cut(&common_dir).unwrap();
+
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 6,
+                repo_family: family,
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 6,
+                payload: json!({
+                    "event": "exit",
+                    "sid": "s2",
+                    "code": 0,
+                    "name": "commit",
+                    "argv": ["git","commit","--allow-empty","-m","c2"],
+                    "reflog_cut": cut_after_commit_2
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.commands.len(), 2);
+        assert_eq!(
+            state.commands[0].pre_head.as_deref(),
+            Some(base_head.as_str())
+        );
+        assert_eq!(
+            state.commands[0].post_head.as_deref(),
+            Some(commit_1.as_str())
+        );
+        assert_eq!(
+            state.commands[1].pre_head.as_deref(),
+            Some(commit_1.as_str())
+        );
+        assert_eq!(
+            state.commands[1].post_head.as_deref(),
+            Some(commit_2.as_str())
+        );
+        assert!(
+            !state.commands[0].ref_changes.is_empty() && !state.commands[1].ref_changes.is_empty(),
+            "both exits should consume their own reflog deltas when worker keeps up"
+        );
+    }
+
+    #[test]
+    fn test_reflog_cursor_backlog_preserves_per_command_commit_boundaries() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_repo(&repo);
+        configure_test_identity(&repo);
+
+        let base_head = empty_commit(&repo, "base");
+        let common_dir = repo.join(".git");
+        let store = FamilyStore::for_common_dir(&common_dir).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = FamilyRuntime {
+            store,
+            mode: DaemonMode::Shadow,
+            append_lock: AsyncMutex::new(()),
+            notify_tx: tx,
+            applied_seq: AtomicU64::new(0),
+            applied_notify: Notify::new(),
+        };
+        let mut state = FamilyState::default();
+        state.last_snapshot = snapshot_common_dir(&common_dir).unwrap();
+        ensure_reflog_anchor(&runtime, &mut state, 0, true).unwrap();
+
+        let family = common_dir.to_string_lossy().to_string();
+        let worktree = repo.to_string_lossy().to_string();
+
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 1,
+                repo_family: family.clone(),
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 1,
+                payload: json!({
+                    "event": "start",
+                    "sid": "b1",
+                    "argv": ["git","commit","--allow-empty","-m","b1"],
+                    "worktree": worktree,
+                    "repo_working_dir": repo.to_string_lossy().to_string()
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 2,
+                repo_family: family.clone(),
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 2,
+                payload: json!({
+                    "event": "cmd_name",
+                    "sid": "b1",
+                    "name": "commit"
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 3,
+                repo_family: family.clone(),
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 3,
+                payload: json!({
+                    "event": "start",
+                    "sid": "b2",
+                    "argv": ["git","commit","--allow-empty","-m","b2"],
+                    "worktree": repo.to_string_lossy().to_string(),
+                    "repo_working_dir": repo.to_string_lossy().to_string()
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 4,
+                repo_family: family.clone(),
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 4,
+                payload: json!({
+                    "event": "cmd_name",
+                    "sid": "b2",
+                    "name": "commit"
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+
+        let commit_1 = empty_commit(&repo, "b1");
+        let cut_after_commit_1 = capture_reflog_cut(&common_dir).unwrap();
+        let commit_2 = empty_commit(&repo, "b2");
+        let cut_after_commit_2 = capture_reflog_cut(&common_dir).unwrap();
+
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 5,
+                repo_family: family.clone(),
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 5,
+                payload: json!({
+                    "event": "exit",
+                    "sid": "b1",
+                    "code": 0,
+                    "name": "commit",
+                    "argv": ["git","commit","--allow-empty","-m","b1"],
+                    "reflog_cut": cut_after_commit_1
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+        apply_trace_event(
+            &runtime,
+            &mut state,
+            &EventEnvelope {
+                seq: 6,
+                repo_family: family,
+                source: "trace2".to_string(),
+                event_type: TRACE_EVENT_TYPE.to_string(),
+                received_at_ns: 6,
+                payload: json!({
+                    "event": "exit",
+                    "sid": "b2",
+                    "code": 0,
+                    "name": "commit",
+                    "argv": ["git","commit","--allow-empty","-m","b2"],
+                    "reflog_cut": cut_after_commit_2
+                }),
+                checksum: "unused".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.commands.len(), 2);
+        assert_eq!(
+            state.commands[0].pre_head.as_deref(),
+            Some(base_head.as_str())
+        );
+        assert_eq!(
+            state.commands[0].post_head.as_deref(),
+            Some(commit_1.as_str())
+        );
+        assert_eq!(
+            state.commands[1].pre_head.as_deref(),
+            Some(commit_1.as_str())
+        );
+        assert_eq!(
+            state.commands[1].post_head.as_deref(),
+            Some(commit_2.as_str())
+        );
+        assert!(
+            !state.commands[0].ref_changes.is_empty() && !state.commands[1].ref_changes.is_empty(),
+            "each exit should consume only its own reflog delta, even under backlog"
+        );
+    }
+
+    #[test]
+    fn test_reflog_cursor_backlog_stress_preserves_all_exit_boundaries() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_repo(&repo);
+        configure_test_identity(&repo);
+
+        let base_head = empty_commit(&repo, "base");
+        let common_dir = repo.join(".git");
+        let store = FamilyStore::for_common_dir(&common_dir).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = FamilyRuntime {
+            store,
+            mode: DaemonMode::Shadow,
+            append_lock: AsyncMutex::new(()),
+            notify_tx: tx,
+            applied_seq: AtomicU64::new(0),
+            applied_notify: Notify::new(),
+        };
+        let mut state = FamilyState::default();
+        state.last_snapshot = snapshot_common_dir(&common_dir).unwrap();
+        ensure_reflog_anchor(&runtime, &mut state, 0, true).unwrap();
+
+        let family = common_dir.to_string_lossy().to_string();
+        let n = 20_u64;
+        for i in 0..n {
+            let sid = format!("stress-{i}");
+            apply_trace_event(
+                &runtime,
+                &mut state,
+                &EventEnvelope {
+                    seq: i * 2 + 1,
+                    repo_family: family.clone(),
+                    source: "trace2".to_string(),
+                    event_type: TRACE_EVENT_TYPE.to_string(),
+                    received_at_ns: (i * 2 + 1) as u128,
+                    payload: json!({
+                        "event": "start",
+                        "sid": sid,
+                        "argv": ["git","commit","--allow-empty","-m", format!("stress-{i}")],
+                        "worktree": repo.to_string_lossy().to_string(),
+                        "repo_working_dir": repo.to_string_lossy().to_string()
+                    }),
+                    checksum: "unused".to_string(),
+                },
+            )
+            .unwrap();
+            apply_trace_event(
+                &runtime,
+                &mut state,
+                &EventEnvelope {
+                    seq: i * 2 + 2,
+                    repo_family: family.clone(),
+                    source: "trace2".to_string(),
+                    event_type: TRACE_EVENT_TYPE.to_string(),
+                    received_at_ns: (i * 2 + 2) as u128,
+                    payload: json!({
+                        "event": "cmd_name",
+                        "sid": format!("stress-{i}"),
+                        "name": "commit"
+                    }),
+                    checksum: "unused".to_string(),
+                },
+            )
+            .unwrap();
+        }
+
+        let mut commit_shas: Vec<String> = Vec::new();
+        let mut reflog_cuts: Vec<Value> = Vec::new();
+        for i in 0..n {
+            commit_shas.push(empty_commit(&repo, &format!("stress-{i}")));
+            reflog_cuts.push(capture_reflog_cut(&common_dir).unwrap());
+        }
+
+        for i in 0..n {
+            apply_trace_event(
+                &runtime,
+                &mut state,
+                &EventEnvelope {
+                    seq: n * 2 + i + 1,
+                    repo_family: family.clone(),
+                    source: "trace2".to_string(),
+                    event_type: TRACE_EVENT_TYPE.to_string(),
+                    received_at_ns: (n * 2 + i + 1) as u128,
+                    payload: json!({
+                        "event": "exit",
+                        "sid": format!("stress-{i}"),
+                        "code": 0,
+                        "name": "commit",
+                        "argv": ["git","commit","--allow-empty","-m", format!("stress-{i}")],
+                        "reflog_cut": reflog_cuts.get(i as usize).cloned().expect("expected reflog cut for each stress commit")
+                    }),
+                    checksum: "unused".to_string(),
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(state.commands.len(), n as usize);
+        for (idx, command) in state.commands.iter().enumerate() {
+            let expected_pre = if idx == 0 {
+                Some(base_head.as_str())
+            } else {
+                Some(
+                    commit_shas
+                        .get(idx - 1)
+                        .expect("expected previous commit")
+                        .as_str(),
+                )
+            };
+            let expected_post = commit_shas.get(idx).expect("expected commit sha");
+            assert_eq!(
+                command.pre_head.as_deref(),
+                expected_pre,
+                "pre_head should chain through each exit in order"
+            );
+            assert_eq!(
+                command.post_head.as_deref(),
+                Some(expected_post.as_str()),
+                "post_head should match the commit produced by this exit"
+            );
+            assert!(
+                !command.ref_changes.is_empty(),
+                "each exit should retain a non-empty reflog delta"
+            );
+        }
     }
 }
