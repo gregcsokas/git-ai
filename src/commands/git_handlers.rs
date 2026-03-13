@@ -114,6 +114,12 @@ pub fn handle_git(args: &[String]) {
         return;
     }
 
+    // Async mode: wrapper should behave as a pure passthrough to git.
+    if config::Config::get().feature_flags().async_mode {
+        let exit_status = proxy_to_git(args, false, None);
+        exit_with_status(exit_status);
+    }
+
     let mut parsed_args = parse_git_cli_args(args);
 
     let mut repository_option = find_repository(&parsed_args.global_args).ok();
