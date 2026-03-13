@@ -51,6 +51,7 @@ fn sync_daemon_repo_if_needed(mode: GitTestMode, test_home: &Path, repo_working_
     let repo_working_dir = repo_working_dir.to_string_lossy().to_string();
     let mut last_latest_seq = 0_u64;
     let mut stable_idle_polls = 0_u8;
+    let mut saw_activity = false;
 
     for _ in 0..800 {
         let status = send_control_request(
@@ -83,6 +84,9 @@ fn sync_daemon_repo_if_needed(mode: GitTestMode, test_home: &Path, repo_working_
             .and_then(|v| v.get("latest_seq"))
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
+        if latest_seq > 0 {
+            saw_activity = true;
+        }
         let backlog = status
             .data
             .as_ref()
@@ -102,39 +106,42 @@ fn sync_daemon_repo_if_needed(mode: GitTestMode, test_home: &Path, repo_working_
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
 
-        let barrier = send_control_request(
-            &socket_path,
-            &ControlRequest::BarrierAppliedThroughSeq {
-                repo_working_dir: repo_working_dir.clone(),
-                seq: latest_seq,
-            },
-        )
-        .unwrap_or_else(|err| {
-            panic!(
-                "daemon barrier request failed for {} via {}: {}",
-                repo_working_dir,
-                socket_path.display(),
-                err
+        if latest_seq > 0 {
+            let barrier = send_control_request(
+                &socket_path,
+                &ControlRequest::BarrierAppliedThroughSeq {
+                    repo_working_dir: repo_working_dir.clone(),
+                    seq: latest_seq,
+                },
             )
-        });
-        assert!(
-            barrier.ok,
-            "daemon barrier failed for {}: {}",
-            repo_working_dir,
-            barrier
-                .error
-                .clone()
-                .unwrap_or_else(|| "unknown daemon barrier error".to_string())
-        );
+            .unwrap_or_else(|err| {
+                panic!(
+                    "daemon barrier request failed for {} via {}: {}",
+                    repo_working_dir,
+                    socket_path.display(),
+                    err
+                )
+            });
+            assert!(
+                barrier.ok,
+                "daemon barrier failed for {}: {}",
+                repo_working_dir,
+                barrier
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "unknown daemon barrier error".to_string())
+            );
 
-        let applied_seq = barrier.applied_seq.unwrap_or(0);
-        if applied_seq < latest_seq {
-            stable_idle_polls = 0;
-            thread::sleep(Duration::from_millis(10));
-            continue;
+            let applied_seq = barrier.applied_seq.unwrap_or(0);
+            if applied_seq < latest_seq {
+                stable_idle_polls = 0;
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
         }
 
-        if backlog == 0
+        if saw_activity
+            && backlog == 0
             && pending_roots == 0
             && deferred_root_exits == 0
             && latest_seq == last_latest_seq
@@ -152,9 +159,10 @@ fn sync_daemon_repo_if_needed(mode: GitTestMode, test_home: &Path, repo_working_
     }
 
     panic!(
-        "daemon did not settle for repo {} via {}",
+        "daemon did not settle for repo {} via {} (saw_activity={})",
         repo_working_dir,
-        socket_path.display()
+        socket_path.display(),
+        saw_activity
     );
 }
 

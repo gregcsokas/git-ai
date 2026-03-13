@@ -1,11 +1,14 @@
 use crate::config;
 use crate::error::GitAiError;
-use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
+use crate::git::cli_parser::{
+    ParsedGitInvocation, extract_clone_target_directory, parse_git_cli_args,
+};
 use crate::git::repository::{Repository, exec_git};
 use crate::git::rewrite_log::{
     CherryPickAbortEvent, CherryPickCompleteEvent, MergeSquashEvent, RebaseAbortEvent,
     RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
 };
+use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
 use crate::git::{find_repository, find_repository_in_path, from_bare_repository};
 use crate::utils::debug_log;
 use crate::{
@@ -343,9 +346,9 @@ impl FamilyStore {
             .unwrap_or_else(|_| common_dir.to_path_buf());
         let key = canonical.to_string_lossy().to_string();
         let memory = {
-            let mut registry = family_store_registry()
-                .lock()
-                .map_err(|_| GitAiError::Generic("family store registry lock poisoned".to_string()))?;
+            let mut registry = family_store_registry().lock().map_err(|_| {
+                GitAiError::Generic("family store registry lock poisoned".to_string())
+            })?;
             registry
                 .entry(key.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(FamilyStoreMemory::default())))
@@ -686,7 +689,11 @@ impl DaemonCoordinator {
             .and_then(Value::as_str)
             .or_else(|| payload.get("repo_working_dir").and_then(Value::as_str))
         {
-            let resolved = self.resolve_family_from_worktree(worktree)?;
+            let Ok(resolved) = self.resolve_family_from_worktree(worktree) else {
+                // Clone and init can emit early def_repo/start frames before the target repo
+                // can be opened. Let the caller buffer and retry on later frames.
+                return Ok(None);
+            };
             if let Some(raw_sid) = sid {
                 let root = Self::root_sid(raw_sid).to_string();
                 self.sid_family_map
@@ -710,6 +717,78 @@ impl DaemonCoordinator {
             }
         }
         Ok(None)
+    }
+
+    fn pending_trace_worktree_hints(&self, root_sid: &str) -> Result<Vec<String>, GitAiError> {
+        let pending_map = self
+            .pending_trace_by_root
+            .lock()
+            .map_err(|_| GitAiError::Generic("pending trace map lock poisoned".to_string()))?;
+        let hints = pending_map
+            .get(root_sid)
+            .map(|events| {
+                events
+                    .iter()
+                    .rev()
+                    .filter_map(|payload| {
+                        payload
+                            .get("worktree")
+                            .and_then(Value::as_str)
+                            .or_else(|| payload.get("repo_working_dir").and_then(Value::as_str))
+                            .map(ToString::to_string)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(hints)
+    }
+
+    async fn flush_buffered_root_sid(
+        self: &Arc<Self>,
+        root_sid: &str,
+        family_key: String,
+        common_dir: PathBuf,
+        resolved_worktree: Option<String>,
+    ) -> Result<Option<(u64, Arc<FamilyRuntime>)>, GitAiError> {
+        let mut pending = self
+            .pending_trace_by_root
+            .lock()
+            .map_err(|_| GitAiError::Generic("pending trace map lock poisoned".to_string()))?
+            .remove(root_sid)
+            .unwrap_or_default();
+
+        if pending.is_empty() {
+            return Ok(None);
+        }
+
+        pending.sort_by(compare_buffered_trace_payloads);
+        let mut last: Option<(u64, Arc<FamilyRuntime>)> = None;
+        for mut buffered_payload in pending {
+            if let Some(worktree) = resolved_worktree.as_ref() {
+                let missing_worktree = buffered_payload.get("worktree").is_none()
+                    && buffered_payload.get("repo_working_dir").is_none();
+                if missing_worktree && let Some(obj) = buffered_payload.as_object_mut() {
+                    obj.insert("worktree".to_string(), Value::String(worktree.clone()));
+                    obj.insert(
+                        "repo_working_dir".to_string(),
+                        Value::String(worktree.clone()),
+                    );
+                }
+            }
+
+            last = Some(
+                self.append_family_event(
+                    family_key.clone(),
+                    common_dir.clone(),
+                    "trace2",
+                    TRACE_EVENT_TYPE,
+                    buffered_payload,
+                )
+                .await?,
+            );
+        }
+
+        Ok(last)
     }
 
     async fn append_family_event(
@@ -751,24 +830,53 @@ impl DaemonCoordinator {
             .and_then(Value::as_str)
             .map(Self::root_sid)
             .map(ToString::to_string);
-        let Some((family_key, common_dir)) = self.resolve_family_for_trace_payload(&payload)?
-        else {
-            if let Some(root_sid) = root_sid {
-                let mut pending_map = self.pending_trace_by_root.lock().map_err(|_| {
-                    GitAiError::Generic("pending trace map lock poisoned".to_string())
-                })?;
-                let entry = pending_map.entry(root_sid).or_insert_with(Vec::new);
-                // Keep memory bounded if a sid never resolves to a family.
-                if entry.len() >= 512 {
-                    entry.remove(0);
+        let mut buffered_current_payload = false;
+        let mut resolved = self.resolve_family_for_trace_payload(&payload)?;
+
+        if resolved.is_none() {
+            if let Some(root_sid) = root_sid.as_deref() {
+                {
+                    let mut pending_map = self.pending_trace_by_root.lock().map_err(|_| {
+                        GitAiError::Generic("pending trace map lock poisoned".to_string())
+                    })?;
+                    let entry = pending_map
+                        .entry(root_sid.to_string())
+                        .or_insert_with(Vec::new);
+                    // Keep memory bounded if a sid never resolves to a family.
+                    if entry.len() >= 512 {
+                        entry.remove(0);
+                    }
+                    entry.push(payload.clone());
                 }
-                entry.push(payload);
-                return Ok(ControlResponse::ok(
-                    None,
-                    None,
-                    Some(json!({ "buffered": true })),
+                buffered_current_payload = true;
+
+                let hints = self.pending_trace_worktree_hints(root_sid)?;
+                for hint in hints {
+                    if let Ok((family_key, common_dir)) = self.resolve_family_from_worktree(&hint) {
+                        self.sid_family_map
+                            .lock()
+                            .map_err(|_| GitAiError::Generic("sid map lock poisoned".to_string()))?
+                            .insert(root_sid.to_string(), family_key.clone());
+                        resolved = Some((family_key, common_dir));
+                        break;
+                    }
+                }
+
+                if resolved.is_none() {
+                    return Ok(ControlResponse::ok(
+                        None,
+                        None,
+                        Some(json!({ "buffered": true })),
+                    ));
+                }
+            } else {
+                return Ok(ControlResponse::err(
+                    "trace payload missing resolvable worktree/family",
                 ));
             }
+        }
+
+        let Some((family_key, common_dir)) = resolved else {
             return Ok(ControlResponse::err(
                 "trace payload missing resolvable worktree/family",
             ));
@@ -779,35 +887,35 @@ impl DaemonCoordinator {
                 .get("worktree")
                 .and_then(Value::as_str)
                 .or_else(|| payload.get("repo_working_dir").and_then(Value::as_str))
-                .map(ToString::to_string);
-            let mut pending = self
-                .pending_trace_by_root
-                .lock()
-                .map_err(|_| GitAiError::Generic("pending trace map lock poisoned".to_string()))?
-                .remove(root_sid)
-                .unwrap_or_default();
-            pending.sort_by(compare_buffered_trace_payloads);
-            for mut buffered_payload in pending {
-                if let Some(worktree) = resolved_worktree.as_ref() {
-                    let missing_worktree = buffered_payload.get("worktree").is_none()
-                        && buffered_payload.get("repo_working_dir").is_none();
-                    if missing_worktree && let Some(obj) = buffered_payload.as_object_mut() {
-                        obj.insert("worktree".to_string(), Value::String(worktree.clone()));
-                        obj.insert(
-                            "repo_working_dir".to_string(),
-                            Value::String(worktree.clone()),
-                        );
+                .map(ToString::to_string)
+                .or_else(|| {
+                    self.pending_trace_worktree_hints(root_sid)
+                        .ok()
+                        .and_then(|hints| hints.into_iter().next())
+                });
+            let flushed = self
+                .flush_buffered_root_sid(
+                    root_sid,
+                    family_key.clone(),
+                    common_dir.clone(),
+                    resolved_worktree,
+                )
+                .await?;
+            if buffered_current_payload {
+                // Current payload was buffered above; nothing left to append in this call.
+                if let Some((seq, runtime)) = flushed {
+                    if wait {
+                        runtime.wait_for_applied(seq).await;
+                        let applied = runtime.applied_seq.load(Ordering::SeqCst);
+                        return Ok(ControlResponse::ok(Some(seq), Some(applied), None));
                     }
+                    return Ok(ControlResponse::ok(Some(seq), None, None));
                 }
-                let _ = self
-                    .append_family_event(
-                        family_key.clone(),
-                        common_dir.clone(),
-                        "trace2",
-                        TRACE_EVENT_TYPE,
-                        buffered_payload,
-                    )
-                    .await?;
+                return Ok(ControlResponse::ok(
+                    None,
+                    None,
+                    Some(json!({ "buffered": true })),
+                ));
             }
         }
 
@@ -1229,20 +1337,15 @@ fn apply_exit_for_pending_root(
         .name
         .as_deref()
         .or_else(|| argv_primary_command(&pending.argv))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_string();
     let start_cut = state
         .reflog_anchor
         .as_ref()
         .map(reflog_cut_from_anchor)
         .or_else(|| pending.start_cut.clone());
-    let ref_changes = if command_may_mutate_refs(command_name, &pending.argv) {
-        consume_reflog_ref_changes(
-            runtime,
-            state,
-            exit_seq,
-            start_cut.as_ref(),
-            exit_payload,
-        )?
+    let ref_changes = if command_may_mutate_refs(command_name.as_str(), &pending.argv) {
+        consume_reflog_ref_changes(runtime, state, exit_seq, start_cut.as_ref(), exit_payload)?
     } else {
         vec![]
     };
@@ -1255,7 +1358,7 @@ fn apply_exit_for_pending_root(
     }
     if exit_code == 0
         && let Some(branch) = infer_branch_after_command(
-            pending.name.as_deref().unwrap_or_default(),
+            command_name.as_str(),
             &pending.argv,
             pre_snapshot.branch.as_deref(),
         )
@@ -1273,7 +1376,7 @@ fn apply_exit_for_pending_root(
     let command = AppliedCommand {
         seq: exit_seq,
         sid: pending.sid.clone(),
-        name: pending.name.clone().unwrap_or_default(),
+        name: command_name.clone(),
         argv: pending.argv.clone(),
         exit_code,
         worktree: pending.worktree.clone(),
@@ -1289,12 +1392,12 @@ fn apply_exit_for_pending_root(
         runtime.store.append_command_index(last)?;
     }
 
-    let cherry_pick_worktree_key = if pending.name.as_deref() == Some("cherry-pick") {
+    let cherry_pick_worktree_key = if command_name == "cherry-pick" {
         Some(cherry_pick_worktree_key(pending.worktree.as_deref()))
     } else {
         None
     };
-    if pending.name.as_deref() == Some("cherry-pick")
+    if command_name == "cherry-pick"
         && !cherry_pick_continue_flag(&pending.argv)
         && !cherry_pick_abort_flag(&pending.argv)
     {
@@ -1321,13 +1424,32 @@ fn apply_exit_for_pending_root(
 
     if exit_code == 0 {
         if runtime.mode.apply_side_effects() && !pending.wrapper_mirror {
-            if pending.name.as_deref() == Some("push")
+            let clone_worktree = clone_notes_worktree_for_pending(&pending);
+            if command_name == "clone"
+                && let Some(worktree) = clone_worktree.as_deref()
+            {
+                let _ = apply_clone_notes_sync_side_effect(worktree);
+            }
+
+            if command_name == "fetch"
+                && let Some(worktree) = pending.worktree.as_deref()
+            {
+                let _ = apply_fetch_notes_sync_side_effect(worktree, &pending.argv);
+            }
+
+            if command_name == "pull"
+                && let Some(worktree) = pending.worktree.as_deref()
+            {
+                let _ = apply_fetch_notes_sync_side_effect(worktree, &pending.argv);
+            }
+
+            if command_name == "push"
                 && let Some(worktree) = pending.worktree.as_deref()
             {
                 let _ = apply_push_side_effect(worktree, &pending.argv);
             }
 
-            if pending.name.as_deref() == Some("pull")
+            if command_name == "pull"
                 && !pull_uses_rebase(&pending.argv, pending.worktree.as_deref())
             {
                 let (old_head, new_head) =
@@ -1368,13 +1490,13 @@ fn apply_exit_for_pending_root(
             .as_ref()
             .and_then(|key| state.active_cherry_pick_by_worktree.get(key).cloned());
         let rewrite_event = if should_synthesize_rewrite_from_snapshots(
-            pending.name.as_deref().unwrap_or_default(),
+            command_name.as_str(),
             &pending.argv,
             &pre_snapshot,
             &post_snapshot,
         ) {
             synthesize_rewrite_event(
-                pending.name.as_deref().unwrap_or_default(),
+                command_name.as_str(),
                 &pending.argv,
                 &pre_snapshot,
                 &post_snapshot,
@@ -1420,22 +1542,18 @@ fn apply_exit_for_pending_root(
             }
         } else if !ref_changes.is_empty()
             && matches!(
-                pending.name.as_deref(),
-                Some("update-ref")
-                    | Some("commit-tree")
-                    | Some("pull")
-                    | Some("checkout")
-                    | Some("switch")
+                command_name.as_str(),
+                "update-ref" | "commit-tree" | "pull" | "checkout" | "switch"
             )
         {
             state.rewrite_events.push(json!({
                 "ref_reconcile": {
-                    "command": pending.name.clone().unwrap_or_default(),
+                    "command": command_name,
                     "ref_changes": ref_changes
                 }
             }));
         }
-    } else if pending.name.as_deref() == Some("cherry-pick")
+    } else if command_name == "cherry-pick"
         && cherry_pick_abort_flag(&pending.argv)
         && let Some(key) = cherry_pick_worktree_key.as_ref()
     {
@@ -1853,7 +1971,10 @@ fn maybe_attach_reflog_cut(
     let cut = capture_reflog_cut(common_dir)?;
     if let Some(obj) = payload.as_object_mut() {
         if is_exit {
-            obj.insert(TRACE_REFLOG_CUT_FIELD.to_string(), serde_json::to_value(cut)?);
+            obj.insert(
+                TRACE_REFLOG_CUT_FIELD.to_string(),
+                serde_json::to_value(cut)?,
+            );
         } else {
             obj.insert(
                 TRACE_REFLOG_START_CUT_FIELD.to_string(),
@@ -2331,6 +2452,40 @@ fn apply_push_side_effect(worktree: &str, argv: &[String]) -> Result<(), GitAiEr
     Ok(())
 }
 
+fn apply_fetch_notes_sync_side_effect(worktree: &str, argv: &[String]) -> Result<(), GitAiError> {
+    let repo = find_repository_in_path(worktree)?;
+    let parsed = parse_git_cli_args(trace_argv_invocation_tokens(argv));
+    let remote = match fetch_remote_from_args(&repo, &parsed) {
+        Ok(remote) => remote,
+        Err(error) => {
+            debug_log(&format!(
+                "daemon notes sync: failed to determine remote for {}: {}",
+                parsed.command.as_deref().unwrap_or("fetch/pull"),
+                error
+            ));
+            return Ok(());
+        }
+    };
+    if let Err(error) = fetch_authorship_notes(&repo, &remote) {
+        debug_log(&format!(
+            "daemon notes sync: failed to fetch authorship notes from {}: {}",
+            remote, error
+        ));
+    }
+    Ok(())
+}
+
+fn apply_clone_notes_sync_side_effect(worktree: &str) -> Result<(), GitAiError> {
+    let repo = find_repository_in_path(worktree)?;
+    if let Err(error) = fetch_authorship_notes(&repo, "origin") {
+        debug_log(&format!(
+            "daemon notes sync: failed to fetch clone authorship notes from origin: {}",
+            error
+        ));
+    }
+    Ok(())
+}
+
 fn apply_pull_fast_forward_working_log_side_effect(
     worktree: &str,
     old_head: &str,
@@ -2569,10 +2724,51 @@ fn worktree_from_argv(argv: &[String]) -> Option<String> {
     None
 }
 
+fn normalize_path_for_comparison(path: &str) -> String {
+    let pathbuf = PathBuf::from(path);
+    let normalized = pathbuf.canonicalize().unwrap_or(pathbuf);
+    normalized.to_string_lossy().to_string()
+}
+
+fn paths_equivalent_for_comparison(left: &str, right: &str) -> bool {
+    normalize_path_for_comparison(left) == normalize_path_for_comparison(right)
+}
+
+fn clone_target_worktree_from_argv(argv: &[String]) -> Option<String> {
+    let parsed = parse_git_cli_args(trace_argv_invocation_tokens(argv));
+    let target = extract_clone_target_directory(&parsed.command_args)?;
+    let target_path = PathBuf::from(target);
+    let resolved = if target_path.is_absolute() {
+        target_path
+    } else if let Some(base_worktree) = worktree_from_argv(argv) {
+        PathBuf::from(base_worktree).join(target_path)
+    } else {
+        target_path
+    };
+    let normalized = resolved.canonicalize().unwrap_or(resolved);
+    Some(normalized.to_string_lossy().to_string())
+}
+
+fn clone_notes_worktree_for_pending(pending: &PendingRootCommand) -> Option<String> {
+    let clone_target = clone_target_worktree_from_argv(&pending.argv);
+    let argv_worktree = worktree_from_argv(&pending.argv);
+    if let Some(pending_worktree) = pending.worktree.as_deref() {
+        if let Some(argv_worktree) = argv_worktree.as_deref()
+            && paths_equivalent_for_comparison(pending_worktree, argv_worktree)
+        {
+            return clone_target.or_else(|| Some(pending_worktree.to_string()));
+        }
+        return Some(pending_worktree.to_string());
+    }
+    clone_target
+}
+
 fn is_tracked_command_name(name: &str) -> bool {
     matches!(
         name,
-        "commit"
+        "clone"
+            | "fetch"
+            | "commit"
             | "switch"
             | "checkout"
             | "pull"
@@ -2598,7 +2794,9 @@ fn command_may_mutate_refs(name: &str, argv: &[String]) -> bool {
     let primary = argv_primary_command(argv).unwrap_or_default();
     matches!(
         primary,
-        "commit"
+        "clone"
+            | "fetch"
+            | "commit"
             | "switch"
             | "checkout"
             | "pull"
@@ -3866,6 +4064,64 @@ mod tests {
     fn empty_commit(path: &Path, message: &str) -> String {
         let _ = git(path, &["commit", "--allow-empty", "-m", message]);
         git(path, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn test_clone_notes_worktree_prefers_pending_when_it_differs_from_argv_worktree() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+
+        let pending = PendingRootCommand {
+            argv: vec![
+                "git".to_string(),
+                "-C".to_string(),
+                source.to_string_lossy().to_string(),
+                "clone".to_string(),
+                "https://example.com/repo.git".to_string(),
+                "target".to_string(),
+            ],
+            worktree: Some(target.to_string_lossy().to_string()),
+            ..PendingRootCommand::default()
+        };
+
+        let selected =
+            clone_notes_worktree_for_pending(&pending).expect("clone worktree should resolve");
+        assert!(
+            paths_equivalent_for_comparison(&selected, target.to_string_lossy().as_ref()),
+            "pending worktree should win when it differs from argv -C worktree"
+        );
+    }
+
+    #[test]
+    fn test_clone_notes_worktree_uses_clone_target_when_pending_matches_argv_worktree() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let clone_target = source.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&clone_target).unwrap();
+
+        let pending = PendingRootCommand {
+            argv: vec![
+                "git".to_string(),
+                "-C".to_string(),
+                source.to_string_lossy().to_string(),
+                "clone".to_string(),
+                "https://example.com/repo.git".to_string(),
+                "target".to_string(),
+            ],
+            worktree: Some(source.to_string_lossy().to_string()),
+            ..PendingRootCommand::default()
+        };
+
+        let selected =
+            clone_notes_worktree_for_pending(&pending).expect("clone worktree should resolve");
+        assert!(
+            paths_equivalent_for_comparison(&selected, clone_target.to_string_lossy().as_ref()),
+            "clone target should win when pending worktree still points at argv -C source"
+        );
     }
 
     #[cfg(unix)]
