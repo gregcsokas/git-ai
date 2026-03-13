@@ -42,6 +42,26 @@ const REANCHOR_IDLE_NS: u128 = 5_000_000_000;
 const TRACE_REFLOG_CUT_FIELD: &str = "reflog_cut";
 const TRACE_REFLOG_START_CUT_FIELD: &str = "reflog_start_cut";
 const DAEMON_API_VERSION: u32 = 1;
+static DAEMON_PROCESS_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn daemon_process_active() -> bool {
+    DAEMON_PROCESS_ACTIVE.load(Ordering::SeqCst)
+}
+
+struct DaemonProcessActiveGuard;
+
+impl DaemonProcessActiveGuard {
+    fn enter() -> Self {
+        DAEMON_PROCESS_ACTIVE.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for DaemonProcessActiveGuard {
+    fn drop(&mut self) {
+        DAEMON_PROCESS_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -3952,6 +3972,7 @@ fn handle_trace_connection(
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     config.ensure_parent_dirs()?;
     let _lock = DaemonLock::acquire(&config.lock_path)?;
+    let _active_guard = DaemonProcessActiveGuard::enter();
     write_pid_metadata(&config)?;
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;

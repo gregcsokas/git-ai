@@ -16,6 +16,10 @@ use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
+fn running_inside_daemon_process() -> bool {
+    crate::daemon::daemon_process_active()
+}
+
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
 const STATS_SKIP_MAX_HUNKS: usize = 1000;
@@ -134,13 +138,21 @@ pub fn post_commit(
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
-    // Use a fresh config snapshot so long-lived daemon mode picks up runtime
-    // config changes (e.g. prompt sharing exclusions) before post-commit runs.
-    let config = Config::fresh();
-
-    // Handle prompts based on effective prompt storage mode for this repository.
-    // The effective mode considers include/exclude lists and fallback settings.
-    let effective_storage = config.effective_prompt_storage(&Some(repo.clone()));
+    // Long-lived daemon processes should read a fresh config snapshot.
+    // Wrapper/hooks mode can use the process-global cached config.
+    let (effective_storage, using_custom_api) = if running_inside_daemon_process() {
+        let config = Config::fresh();
+        (
+            config.effective_prompt_storage(&Some(repo.clone())),
+            config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
+        )
+    } else {
+        let config = Config::get();
+        (
+            config.effective_prompt_storage(&Some(repo.clone())),
+            config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
+        )
+    };
 
     match effective_storage {
         PromptStorageMode::Local => {
@@ -160,7 +172,6 @@ pub fn post_commit(
             // - user is logged in OR using custom API URL
             let context = ApiContext::new(None);
             let client = ApiClient::new(context);
-            let using_custom_api = config.api_base_url() != crate::config::DEFAULT_API_BASE_URL;
             let should_enqueue_cas = client.is_logged_in() || using_custom_api;
 
             if should_enqueue_cas {

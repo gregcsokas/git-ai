@@ -271,6 +271,75 @@ worktree_test_wrappers! {
 }
 
 worktree_test_wrappers! {
+    fn notes_sync_clone_relative_target_from_external_cwd_fetches_authorship_notes() {
+        if TestRepo::git_mode() != GitTestMode::Daemon {
+            return;
+        }
+
+        let (local, upstream) = TestRepo::new_with_remote();
+
+        fs::write(local.path().join("clone-relative-seed.txt"), "seed\n")
+            .expect("failed to write clone-relative seed file");
+        local
+            .git_og(&["add", "clone-relative-seed.txt"])
+            .expect("add should succeed");
+        local
+            .git_og(&["commit", "-m", "seed commit"])
+            .expect("seed commit should succeed");
+
+        let seed_sha = local
+            .git_og(&["rev-parse", "HEAD"])
+            .expect("rev-parse should succeed")
+            .trim()
+            .to_string();
+
+        local
+            .git_og(&[
+                "notes",
+                "--ref=ai",
+                "add",
+                "-m",
+                "clone-relative-seed-note",
+                seed_sha.as_str(),
+            ])
+            .expect("adding notes should succeed");
+        local
+            .git_og(&["push", "-u", "origin", "HEAD"])
+            .expect("pushing branch should succeed");
+        local
+            .git_og(&["push", "origin", "refs/notes/ai"])
+            .expect("pushing notes should succeed");
+
+        let external_cwd = unique_temp_path("notes-sync-clone-relative-cwd");
+        let _ = fs::remove_dir_all(&external_cwd);
+        fs::create_dir_all(&external_cwd).expect("failed to create external cwd");
+
+        let relative_target = "nested/relative-clone";
+        let upstream_str = upstream.path().to_string_lossy().to_string();
+
+        local
+            .git_from_working_dir(&external_cwd, &["clone", upstream_str.as_str(), relative_target])
+            .expect("clone from external cwd should succeed");
+
+        let clone_dir = external_cwd.join(relative_target);
+        assert!(
+            clone_dir.exists(),
+            "relative clone target should exist at {}",
+            clone_dir.display()
+        );
+
+        sync_daemon_repo_if_needed(TestRepo::git_mode(), local.test_home_path(), &clone_dir);
+
+        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha);
+        assert!(
+            cloned_note.is_some(),
+            "cloned repository should have fetched authorship notes for commit {}",
+            seed_sha
+        );
+    }
+}
+
+worktree_test_wrappers! {
     fn notes_sync_fetch_imports_authorship_notes_from_remote() {
         if TestRepo::git_mode() == GitTestMode::Hooks {
             return;
