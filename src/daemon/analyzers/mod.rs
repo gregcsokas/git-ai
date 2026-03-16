@@ -5,6 +5,9 @@ use std::sync::Arc;
 
 pub mod generic;
 pub mod history;
+pub mod read_only;
+pub mod ref_admin;
+pub mod repo_admin;
 pub mod transport;
 pub mod workspace;
 
@@ -53,6 +56,43 @@ impl AnalyzerRegistry {
         let transport: Arc<dyn CommandAnalyzer> = Arc::new(transport::TransportAnalyzer);
         for command in ["fetch", "pull", "push", "clone", "ls-remote"] {
             registry.register_command(command, transport.clone());
+        }
+
+        let ref_admin: Arc<dyn CommandAnalyzer> = Arc::new(ref_admin::RefAdminAnalyzer);
+        for command in [
+            "branch",
+            "tag",
+            "update-ref",
+            "symbolic-ref",
+            "notes",
+            "replace",
+            "pack-refs",
+            "reflog",
+        ] {
+            registry.register_command(command, ref_admin.clone());
+        }
+
+        let repo_admin: Arc<dyn CommandAnalyzer> = Arc::new(repo_admin::RepoAdminAnalyzer);
+        for command in ["init", "worktree", "config", "credential", "gc", "maintenance", "fsck", "prune"]
+        {
+            registry.register_command(command, repo_admin.clone());
+        }
+
+        let read_only: Arc<dyn CommandAnalyzer> = Arc::new(read_only::ReadOnlyAnalyzer);
+        for command in [
+            "status",
+            "diff",
+            "log",
+            "show",
+            "rev-parse",
+            "for-each-ref",
+            "cat-file",
+            "blame",
+            "grep",
+            "help",
+            "version",
+        ] {
+            registry.register_command(command, read_only.clone());
         }
 
         registry
