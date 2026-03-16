@@ -298,3 +298,61 @@ pub struct GlobalState {
     pub applied_seq: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyAck {
+    pub seq: u64,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyStatus {
+    pub family_key: FamilyKey,
+    pub applied_seq: u64,
+    pub recent_command_count: usize,
+    pub unresolved_transcripts: usize,
+    pub effect_queue_depth: usize,
+    pub last_error: Option<String>,
+    pub last_reconcile_ns: Option<u128>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilySnapshot {
+    pub family_key: FamilyKey,
+    pub refs: HashMap<String, String>,
+    pub worktrees: HashMap<PathBuf, WorktreeState>,
+    pub recent_commands: Vec<AppliedCommand>,
+    pub checkpoints: HashMap<String, CheckpointSummary>,
+    pub unresolved_transcripts: Vec<String>,
+    pub active_cherry_pick: HashMap<PathBuf, ActiveCherryPickState>,
+    pub env_overrides: HashMap<PathBuf, HashMap<String, String>>,
+    pub last_error: Option<String>,
+    pub last_reconcile_ns: Option<u128>,
+    pub applied_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalSnapshot {
+    pub recent_commands: Vec<AppliedCommand>,
+    pub applied_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointObserved {
+    pub repo_working_dir: PathBuf,
+    pub id: String,
+    pub author: String,
+    pub timestamp_ns: u128,
+    pub file_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvOverrideSet {
+    pub repo_working_dir: PathBuf,
+    pub overrides: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileSnapshot {
+    pub refs: HashMap<String, String>,
+    pub timestamp_ns: u128,
+}

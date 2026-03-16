@@ -36,6 +36,9 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 pub mod domain;
 pub mod git_backend;
 pub mod trace_normalizer;
+pub mod global_actor;
+pub mod family_actor;
+pub mod coordinator;
 
 const TRACE_EVENT_TYPE: &str = "trace2_raw";
 const CHECKPOINT_EVENT_TYPE: &str = "checkpoint";
