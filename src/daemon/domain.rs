@@ -45,7 +45,7 @@ pub struct RefChange {
     pub new: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceFingerprint {
     pub raw_hash: String,
     pub staged_count: u32,

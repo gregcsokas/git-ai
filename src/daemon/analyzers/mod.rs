@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod generic;
+pub mod history;
+pub mod transport;
+pub mod workspace;
 
 #[derive(Debug, Clone)]
 pub struct AnalysisView<'a> {
@@ -32,10 +35,27 @@ impl Default for AnalyzerRegistry {
 
 impl AnalyzerRegistry {
     pub fn new() -> Self {
-        Self {
+        let mut registry = Self {
             generic: Arc::new(generic::GenericAnalyzer::default()),
             by_command: HashMap::new(),
+        };
+
+        let history: Arc<dyn CommandAnalyzer> = Arc::new(history::HistoryAnalyzer);
+        for command in ["commit", "reset", "rebase", "cherry-pick", "merge"] {
+            registry.register_command(command, history.clone());
         }
+
+        let workspace: Arc<dyn CommandAnalyzer> = Arc::new(workspace::WorkspaceAnalyzer);
+        for command in ["stash", "checkout", "switch", "restore", "clean"] {
+            registry.register_command(command, workspace.clone());
+        }
+
+        let transport: Arc<dyn CommandAnalyzer> = Arc::new(transport::TransportAnalyzer);
+        for command in ["fetch", "pull", "push", "clone", "ls-remote"] {
+            registry.register_command(command, transport.clone());
+        }
+
+        registry
     }
 
     pub fn register_command(
@@ -61,4 +81,3 @@ impl AnalyzerRegistry {
         self.generic.analyze(cmd, state)
     }
 }
-
