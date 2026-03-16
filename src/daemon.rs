@@ -1,4 +1,5 @@
 use crate::config;
+use crate::daemon::git_backend::GitBackend;
 use crate::error::GitAiError;
 use crate::git::cli_parser::{
     ParsedGitInvocation, extract_clone_target_directory, parse_git_cli_args,
@@ -33,15 +34,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 
-pub mod domain;
-pub mod git_backend;
-pub mod trace_normalizer;
-pub mod global_actor;
-pub mod family_actor;
-pub mod coordinator;
-pub mod reducer;
 pub mod analyzers;
+pub mod coordinator;
+pub mod domain;
 pub mod effects;
+pub mod family_actor;
+pub mod git_backend;
+pub mod global_actor;
+pub mod reducer;
+pub mod trace_normalizer;
 
 const TRACE_EVENT_TYPE: &str = "trace2_raw";
 const CHECKPOINT_EVENT_TYPE: &str = "checkpoint";
@@ -586,6 +587,7 @@ pub struct FamilyStatus {
     pub latest_seq: u64,
     pub cursor: u64,
     pub backlog: u64,
+    pub effect_queue_depth: usize,
     pub unresolved_transcripts: Vec<String>,
     pub pending_roots: usize,
     pub deferred_root_exits: usize,
@@ -1037,6 +1039,7 @@ impl DaemonCoordinator {
             latest_seq,
             cursor,
             backlog,
+            effect_queue_depth: 0,
             unresolved_transcripts: state.unresolved_transcripts.iter().cloned().collect(),
             pending_roots: state.pending_roots.len(),
             deferred_root_exits: state.deferred_root_exits.len(),
@@ -1112,12 +1115,10 @@ impl DaemonCoordinator {
         let result = match request {
             ControlRequest::TraceIngest {
                 repo_working_dir,
-                mut payload,
+                payload,
                 wait,
             } => {
-                if payload.get("repo_working_dir").is_none() {
-                    payload["repo_working_dir"] = Value::String(repo_working_dir);
-                }
+                let _ = repo_working_dir;
                 self.ingest_trace_payload(payload, wait.unwrap_or(false))
                     .await
             }
@@ -2543,7 +2544,10 @@ fn commit_replay_context_from_rewrite_event(
             let base_commit = commit
                 .base_commit
                 .as_deref()
-                .filter(|sha| !sha.trim().is_empty())
+                .filter(|sha| {
+                    let trimmed = sha.trim();
+                    !trimmed.is_empty() && !is_zero_oid(trimmed)
+                })
                 .unwrap_or("initial")
                 .to_string();
             Some((base_commit, commit.commit_sha.clone()))
@@ -2601,10 +2605,12 @@ fn latest_checkpoint_file_content(
     file_path: &str,
 ) -> Option<String> {
     let checkpoints = working_log.read_all_checkpoints().ok()?;
-    let entry = checkpoints
-        .iter()
-        .rev()
-        .find_map(|checkpoint| checkpoint.entries.iter().find(|entry| entry.file == file_path))?;
+    let entry = checkpoints.iter().rev().find_map(|checkpoint| {
+        checkpoint
+            .entries
+            .iter()
+            .find(|entry| entry.file == file_path)
+    })?;
     working_log.get_file_version(&entry.blob_sha).ok()
 }
 
@@ -2674,7 +2680,8 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     rewrite_event: &RewriteLogEvent,
     author: &str,
 ) -> Result<(), GitAiError> {
-    let Some((base_commit, target_commit)) = commit_replay_context_from_rewrite_event(rewrite_event)
+    let Some((base_commit, target_commit)) =
+        commit_replay_context_from_rewrite_event(rewrite_event)
     else {
         return Ok(());
     };
@@ -2684,13 +2691,8 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     let (changed_files, dirty_files) =
         build_commit_replay_file_snapshot(repo, &base_commit, &target_commit)?;
     let working_log = repo.storage.working_log_for_base_commit(&base_commit);
-    let (changed_files, dirty_files) = filter_commit_replay_files(
-        repo,
-        &working_log,
-        &base_commit,
-        changed_files,
-        dirty_files,
-    );
+    let (changed_files, dirty_files) =
+        filter_commit_replay_files(repo, &working_log, &base_commit, changed_files, dirty_files);
     if changed_files.is_empty() {
         return Ok(());
     }
@@ -2704,7 +2706,7 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         false,
         true,
         Some(replay_agent_result),
-        true,
+        base_commit != "initial",
         Some(base_commit.as_str()),
     )
     .map(|_| ())
@@ -2716,6 +2718,14 @@ fn apply_rewrite_side_effect(
     env_overrides: Option<&HashMap<String, String>>,
 ) -> Result<(), GitAiError> {
     let mut repo = find_repository_in_path(worktree)?;
+    if !rewrite_event_needs_authorship_processing(&repo, &rewrite_event)? {
+        let _ = repo.storage.append_rewrite_event(rewrite_event);
+        return Ok(());
+    }
+    if matches!(rewrite_event, RewriteLogEvent::Stash { .. }) && !repo_head_has_ai_state(&repo)? {
+        let _ = repo.storage.append_rewrite_event(rewrite_event);
+        return Ok(());
+    }
     let author = repo.git_author_identity().name_or_unknown();
     if let RewriteLogEvent::Reset { reset } = &rewrite_event {
         apply_reset_working_log_side_effect(&repo, reset, &author)?;
@@ -2735,11 +2745,61 @@ fn apply_rewrite_side_effect_from_common_dir(
     env_overrides: Option<&HashMap<String, String>>,
 ) -> Result<(), GitAiError> {
     let mut repo = from_bare_repository(common_dir)?;
+    if !rewrite_event_needs_authorship_processing(&repo, &rewrite_event)? {
+        let _ = repo.storage.append_rewrite_event(rewrite_event);
+        return Ok(());
+    }
+    if matches!(rewrite_event, RewriteLogEvent::Stash { .. }) && !repo_head_has_ai_state(&repo)? {
+        let _ = repo.storage.append_rewrite_event(rewrite_event);
+        return Ok(());
+    }
     let author = repo.git_author_identity().name_or_unknown();
     sync_pre_commit_checkpoint_for_daemon_commit(&repo, &rewrite_event, &author)?;
     apply_env_overrides_to_working_log(&repo, &rewrite_event, env_overrides)?;
     repo.handle_rewrite_log_event(rewrite_event, author, true, true);
     Ok(())
+}
+
+fn rewrite_event_needs_authorship_processing(
+    repo: &Repository,
+    rewrite_event: &RewriteLogEvent,
+) -> Result<bool, GitAiError> {
+    // Full wrapper parity requires authorship notes for every commit, even when the commit is
+    // entirely human-authored.
+    if matches!(
+        rewrite_event,
+        RewriteLogEvent::Commit { .. } | RewriteLogEvent::CommitAmend { .. }
+    ) {
+        return Ok(true);
+    }
+
+    let Some((base_commit, _)) = commit_replay_context_from_rewrite_event(rewrite_event) else {
+        return Ok(true);
+    };
+    let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+    let has_initial = !working_log.read_initial_attributions().files.is_empty();
+    if has_initial {
+        return Ok(true);
+    }
+    let has_ai_checkpoints = working_log
+        .read_all_checkpoints()?
+        .iter()
+        .any(|checkpoint| checkpoint.kind != CheckpointKind::Human);
+    Ok(has_ai_checkpoints)
+}
+
+fn repo_head_has_ai_state(repo: &Repository) -> Result<bool, GitAiError> {
+    let head = repo.head().and_then(|reference| reference.target())?;
+    let working_log = repo.storage.working_log_for_base_commit(&head);
+    let has_initial = !working_log.read_initial_attributions().files.is_empty();
+    if has_initial {
+        return Ok(true);
+    }
+    let has_ai_checkpoints = working_log
+        .read_all_checkpoints()?
+        .iter()
+        .any(|checkpoint| checkpoint.kind != CheckpointKind::Human);
+    Ok(has_ai_checkpoints)
 }
 
 fn apply_stash_rewrite_side_effect(
@@ -4054,6 +4114,862 @@ fn read_json_line(reader: &mut BufReader<LocalSocketStream>) -> Result<Option<St
     Ok(Some(line))
 }
 
+struct ActorDaemonCoordinator {
+    mode: DaemonMode,
+    backend: Arc<crate::daemon::git_backend::SystemGitBackend>,
+    coordinator:
+        Arc<crate::daemon::coordinator::Coordinator<crate::daemon::git_backend::SystemGitBackend>>,
+    normalizer: AsyncMutex<
+        crate::daemon::trace_normalizer::TraceNormalizer<
+            crate::daemon::git_backend::SystemGitBackend,
+        >,
+    >,
+    latest_seq_by_family: Mutex<HashMap<String, u64>>,
+    rewrite_events_by_family: Mutex<HashMap<String, Vec<Value>>>,
+    inflight_effects_by_family: Mutex<HashMap<String, usize>>,
+    shutting_down: AtomicBool,
+    shutdown_notify: Notify,
+}
+
+impl ActorDaemonCoordinator {
+    fn new(mode: DaemonMode) -> Self {
+        let backend = Arc::new(crate::daemon::git_backend::SystemGitBackend::new());
+        Self {
+            mode,
+            coordinator: Arc::new(crate::daemon::coordinator::Coordinator::new(
+                backend.clone(),
+            )),
+            normalizer: AsyncMutex::new(crate::daemon::trace_normalizer::TraceNormalizer::new(
+                backend.clone(),
+            )),
+            backend,
+            latest_seq_by_family: Mutex::new(HashMap::new()),
+            rewrite_events_by_family: Mutex::new(HashMap::new()),
+            inflight_effects_by_family: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
+            shutdown_notify: Notify::new(),
+        }
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+    }
+
+    fn request_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.shutdown_notify.notify_waiters();
+    }
+
+    async fn wait_for_shutdown(&self) {
+        if self.is_shutting_down() {
+            return;
+        }
+        self.shutdown_notify.notified().await;
+    }
+
+    fn update_latest_family_seq(&self, family: &str, seq: u64) -> Result<(), GitAiError> {
+        let mut map = self
+            .latest_seq_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("latest seq map lock poisoned".to_string()))?;
+        let entry = map.entry(family.to_string()).or_insert(0);
+        if seq > *entry {
+            *entry = seq;
+        }
+        Ok(())
+    }
+
+    fn bump_latest_family_seq(&self, family: &str) -> Result<u64, GitAiError> {
+        let mut map = self
+            .latest_seq_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("latest seq map lock poisoned".to_string()))?;
+        let entry = map.entry(family.to_string()).or_insert(0);
+        *entry = entry.saturating_add(1);
+        Ok(*entry)
+    }
+
+    fn latest_family_seq(&self, family: &str) -> Result<u64, GitAiError> {
+        let map = self
+            .latest_seq_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("latest seq map lock poisoned".to_string()))?;
+        Ok(*map.get(family).unwrap_or(&0))
+    }
+
+    fn begin_family_effect(&self, family: &str) -> Result<(), GitAiError> {
+        let mut map = self.inflight_effects_by_family.lock().map_err(|_| {
+            GitAiError::Generic("inflight effects map lock poisoned".to_string())
+        })?;
+        let entry = map.entry(family.to_string()).or_insert(0);
+        *entry = entry.saturating_add(1);
+        Ok(())
+    }
+
+    fn end_family_effect(&self, family: &str) -> Result<(), GitAiError> {
+        let mut map = self.inflight_effects_by_family.lock().map_err(|_| {
+            GitAiError::Generic("inflight effects map lock poisoned".to_string())
+        })?;
+        if let Some(entry) = map.get_mut(family) {
+            if *entry <= 1 {
+                map.remove(family);
+            } else {
+                *entry -= 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn inflight_effect_depth(&self, family: &str) -> Result<usize, GitAiError> {
+        let map = self.inflight_effects_by_family.lock().map_err(|_| {
+            GitAiError::Generic("inflight effects map lock poisoned".to_string())
+        })?;
+        Ok(*map.get(family).unwrap_or(&0))
+    }
+
+    fn resolve_family_from_payload(&self, payload: &Value) -> Option<String> {
+        let worktree = payload
+            .get("repo_working_dir")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("worktree").and_then(Value::as_str))
+            .or_else(|| payload.get("repo").and_then(Value::as_str))?;
+        self.backend
+            .resolve_family(Path::new(worktree))
+            .ok()
+            .map(|family| family.0)
+    }
+
+    async fn pending_counts(&self) -> Result<(u64, u64), GitAiError> {
+        let normalizer = self.normalizer.lock().await;
+        Ok((
+            normalizer.state().pending.len() as u64,
+            normalizer.state().deferred_exits.len() as u64,
+        ))
+    }
+
+    fn append_rewrite_event_for_family(
+        &self,
+        family: &str,
+        event: Value,
+    ) -> Result<(), GitAiError> {
+        let mut map = self
+            .rewrite_events_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("rewrite events map lock poisoned".to_string()))?;
+        let entries = map.entry(family.to_string()).or_insert_with(Vec::new);
+        entries.push(event);
+        if entries.len() > 1024 {
+            let extra = entries.len() - 1024;
+            entries.drain(0..extra);
+        }
+        Ok(())
+    }
+
+    fn rewrite_events_for_family(&self, family: &str) -> Result<Vec<Value>, GitAiError> {
+        let map = self
+            .rewrite_events_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("rewrite events map lock poisoned".to_string()))?;
+        Ok(map.get(family).cloned().unwrap_or_default())
+    }
+
+    fn resolve_heads_for_command(
+        cmd: &crate::daemon::domain::NormalizedCommand,
+    ) -> (String, String) {
+        let old = cmd
+            .ref_changes
+            .iter()
+            .find(|change| change.reference == "HEAD")
+            .map(|change| change.old.clone())
+            .or_else(|| {
+                cmd.ref_changes
+                    .iter()
+                    .find(|change| change.reference.starts_with("refs/heads/"))
+                    .map(|change| change.old.clone())
+            })
+            .or_else(|| cmd.ref_changes.first().map(|change| change.old.clone()))
+            .or_else(|| cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
+            .unwrap_or_default();
+        let new = cmd
+            .ref_changes
+            .iter()
+            .rfind(|change| change.reference == "HEAD")
+            .map(|change| change.new.clone())
+            .or_else(|| {
+                cmd.ref_changes
+                    .iter()
+                    .rfind(|change| change.reference.starts_with("refs/heads/"))
+                    .map(|change| change.new.clone())
+            })
+            .or_else(|| cmd.ref_changes.last().map(|change| change.new.clone()))
+            .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
+            .unwrap_or_default();
+        (old, new)
+    }
+
+    fn args_without_git(argv: &[String]) -> &[String] {
+        if argv.first().map(|v| v == "git").unwrap_or(false) {
+            &argv[1..]
+        } else {
+            argv
+        }
+    }
+
+    fn args_after_command(argv: &[String], command: &str) -> Vec<String> {
+        let args = Self::args_without_git(argv);
+        let mut seen = false;
+        let mut out = Vec::new();
+        for token in args {
+            if !seen {
+                if token == command {
+                    seen = true;
+                }
+                continue;
+            }
+            out.push(token.clone());
+        }
+        out
+    }
+
+    fn args_have_rebase(args: &[String]) -> bool {
+        args.iter().any(|arg| {
+            arg == "--rebase"
+                || arg == "--rebase=merges"
+                || arg == "--rebase-merges"
+                || arg == "--rebase=true"
+        })
+    }
+
+    fn infer_stash_operation(args: &[String]) -> StashOperation {
+        match args.first().map(String::as_str).unwrap_or("push") {
+            "push" | "save" => StashOperation::Create,
+            "apply" => StashOperation::Apply,
+            "pop" => StashOperation::Pop,
+            "drop" => StashOperation::Drop,
+            "list" => StashOperation::List,
+            _ => StashOperation::Create,
+        }
+    }
+
+    fn rewrite_event_from_command(
+        cmd: &crate::daemon::domain::NormalizedCommand,
+    ) -> Option<RewriteLogEvent> {
+        if cmd.exit_code != 0 {
+            return None;
+        }
+
+        let name = cmd.primary_command.as_deref().unwrap_or_default();
+        let args = Self::args_after_command(&cmd.raw_argv, name);
+        let (old_head, new_head) = Self::resolve_heads_for_command(cmd);
+
+        match name {
+            "commit" => {
+                let is_amend = args.iter().any(|arg| arg == "--amend");
+                let worktree = cmd
+                    .worktree
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string());
+                let resolved_new = if new_head.is_empty() {
+                    worktree
+                        .as_deref()
+                        .and_then(|path| run_git_capture(path, &["rev-parse", "HEAD"]).ok())
+                        .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
+                        .unwrap_or_default()
+                } else {
+                    new_head.clone()
+                };
+                if resolved_new.is_empty() {
+                    return None;
+                }
+
+                if is_amend {
+                    let resolved_old = if old_head.is_empty()
+                        || old_head == resolved_new
+                        || is_zero_oid(&old_head)
+                    {
+                        worktree
+                            .as_deref()
+                            .and_then(|path| run_git_capture(path, &["rev-parse", "HEAD@{1}"]).ok())
+                            .unwrap_or_default()
+                    } else {
+                        old_head.clone()
+                    };
+                    if resolved_old.is_empty() || resolved_old == resolved_new {
+                        return None;
+                    }
+                    Some(RewriteLogEvent::commit_amend(resolved_old, resolved_new))
+                } else {
+                    let base =
+                        if old_head.is_empty() || old_head == resolved_new || is_zero_oid(&old_head)
+                        {
+                        worktree
+                            .as_deref()
+                            .and_then(|path| run_git_capture(path, &["rev-parse", "HEAD^"]).ok())
+                            .filter(|parent| !parent.is_empty() && parent != &resolved_new)
+                    } else {
+                        Some(old_head.clone())
+                    };
+                    Some(RewriteLogEvent::commit(base, resolved_new))
+                }
+            }
+            "reset" => {
+                if old_head.is_empty() || new_head.is_empty() {
+                    return None;
+                }
+                let kind = if args.iter().any(|arg| arg == "--hard") {
+                    ResetKind::Hard
+                } else if args.iter().any(|arg| arg == "--soft") {
+                    ResetKind::Soft
+                } else {
+                    ResetKind::Mixed
+                };
+                Some(RewriteLogEvent::reset(ResetEvent::new(
+                    kind,
+                    args.iter().any(|arg| arg == "--keep"),
+                    args.iter().any(|arg| arg == "--merge"),
+                    new_head,
+                    old_head,
+                )))
+            }
+            "rebase" => {
+                if args.iter().any(|arg| arg == "--abort") {
+                    let original = if old_head.is_empty() {
+                        new_head
+                    } else {
+                        old_head
+                    };
+                    if original.is_empty() {
+                        None
+                    } else {
+                        Some(RewriteLogEvent::rebase_abort(RebaseAbortEvent::new(
+                            original,
+                        )))
+                    }
+                } else if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
+                    let worktree = cmd
+                        .worktree
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string());
+                    let (original_commits, new_commits) =
+                        build_rebase_mappings_best_effort(
+                            worktree.as_deref(),
+                            &old_head,
+                            &new_head,
+                        );
+                    let original_commits = if original_commits.is_empty() {
+                        vec![old_head.clone()]
+                    } else {
+                        original_commits
+                    };
+                    Some(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
+                        old_head,
+                        new_head,
+                        args.iter().any(|arg| arg == "-i" || arg == "--interactive"),
+                        original_commits,
+                        new_commits,
+                    )))
+                } else {
+                    None
+                }
+            }
+            "pull" => {
+                if Self::args_have_rebase(&args)
+                    && !old_head.is_empty()
+                    && !new_head.is_empty()
+                    && old_head != new_head
+                {
+                    let worktree = cmd
+                        .worktree
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string());
+                    let (original_commits, new_commits) = build_pull_rebase_mappings_best_effort(
+                        worktree.as_deref(),
+                        &old_head,
+                        &new_head,
+                    );
+                    let original_commits = if original_commits.is_empty() {
+                        vec![old_head.clone()]
+                    } else {
+                        original_commits
+                    };
+                    Some(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
+                        old_head,
+                        new_head,
+                        false,
+                        original_commits,
+                        new_commits,
+                    )))
+                } else {
+                    None
+                }
+            }
+            "cherry-pick" => {
+                if args.iter().any(|arg| arg == "--abort") {
+                    let original = if old_head.is_empty() {
+                        new_head
+                    } else {
+                        old_head
+                    };
+                    if original.is_empty() {
+                        None
+                    } else {
+                        Some(RewriteLogEvent::cherry_pick_abort(
+                            CherryPickAbortEvent::new(original),
+                        ))
+                    }
+                } else if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
+                    let worktree = cmd
+                        .worktree
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string());
+                    let source_specs = cherry_pick_source_specs_from_argv(&cmd.raw_argv);
+                    let mut source_commits =
+                        resolve_commit_specs_to_oids(worktree.as_deref(), &source_specs);
+                    if source_commits.is_empty()
+                        && is_valid_oid(&old_head)
+                        && !is_zero_oid(&old_head)
+                    {
+                        source_commits.push(old_head.clone());
+                    }
+
+                    let mut new_commits = cherry_pick_created_commits_best_effort(
+                        worktree.as_deref(),
+                        &old_head,
+                        &new_head,
+                    );
+                    if new_commits.is_empty() {
+                        new_commits.push(new_head.clone());
+                    }
+                    let (source_commits, new_commits) =
+                        align_cherry_pick_commits(source_commits, new_commits);
+
+                    Some(RewriteLogEvent::cherry_pick_complete(
+                        CherryPickCompleteEvent::new(
+                            old_head,
+                            new_head,
+                            source_commits,
+                            new_commits,
+                        ),
+                    ))
+                } else {
+                    None
+                }
+            }
+            "merge" => {
+                if args.iter().any(|arg| arg == "--squash") {
+                    let base_branch = cmd
+                        .pre_repo
+                        .as_ref()
+                        .and_then(|repo| repo.branch.clone())
+                        .unwrap_or_else(|| "HEAD".to_string());
+                    let source_branch = args.last().cloned().unwrap_or_default();
+                    let source_head = old_head.clone();
+                    Some(RewriteLogEvent::merge_squash(MergeSquashEvent::new(
+                        source_branch,
+                        source_head,
+                        base_branch,
+                        old_head,
+                    )))
+                } else {
+                    None
+                }
+            }
+            "stash" => {
+                let stash_ref = args.iter().find(|arg| arg.starts_with("stash@{")).cloned();
+                Some(RewriteLogEvent::stash(StashEvent::new(
+                    Self::infer_stash_operation(&args),
+                    stash_ref,
+                    None,
+                    true,
+                    Vec::new(),
+                )))
+            }
+            _ => None,
+        }
+    }
+
+    fn maybe_apply_side_effects_for_command(
+        &self,
+        family: Option<&str>,
+        cmd: &crate::daemon::domain::NormalizedCommand,
+    ) {
+        if !self.mode.apply_side_effects() || cmd.wrapper_mirror || cmd.exit_code != 0 {
+            if let Some(family) = family
+                && cmd.primary_command.as_deref() == Some("pull")
+                && !cmd.ref_changes.is_empty()
+            {
+                let _ = self.append_rewrite_event_for_family(
+                    family,
+                    json!({
+                        "ref_reconcile": {
+                            "command": "pull",
+                            "ref_changes": cmd.ref_changes,
+                        }
+                    }),
+                );
+            }
+            return;
+        }
+
+        let name = cmd.primary_command.as_deref().unwrap_or_default();
+        if let Some(worktree) = cmd.worktree.as_ref() {
+            let worktree = worktree.to_string_lossy().to_string();
+            match name {
+                "clone" => {
+                    let _ = apply_clone_notes_sync_side_effect(&worktree);
+                }
+                "fetch" => {
+                    let _ = apply_fetch_notes_sync_side_effect(&worktree, &cmd.raw_argv);
+                }
+                "pull" => {
+                    let _ = apply_fetch_notes_sync_side_effect(&worktree, &cmd.raw_argv);
+                }
+                "push" => {
+                    let _ = apply_push_side_effect(&worktree, &cmd.raw_argv);
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(event) = Self::rewrite_event_from_command(cmd) {
+            if let Some(worktree) = cmd.worktree.as_ref() {
+                let worktree = worktree.to_string_lossy().to_string();
+                let _ = apply_rewrite_side_effect(&worktree, event.clone(), None);
+            }
+            if let Some(family) = family {
+                let _ = self.append_rewrite_event_for_family(
+                    family,
+                    serde_json::to_value(event).unwrap_or_else(|_| json!({"rewrite_error": true})),
+                );
+            }
+        } else if let Some(family) = family
+            && name == "pull"
+            && !cmd.ref_changes.is_empty()
+        {
+            let _ = self.append_rewrite_event_for_family(
+                family,
+                json!({
+                    "ref_reconcile": {
+                        "command": "pull",
+                        "ref_changes": cmd.ref_changes,
+                    }
+                }),
+            );
+        }
+
+        if name == "pull"
+            && !Self::args_have_rebase(&Self::args_after_command(&cmd.raw_argv, name))
+            && let Some(worktree) = cmd.worktree.as_ref()
+        {
+            let (old_head, new_head) = Self::resolve_heads_for_command(cmd);
+            if !old_head.is_empty()
+                && !new_head.is_empty()
+                && old_head != new_head
+                && let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy())
+                && repo_is_ancestor(&repo, &old_head, &new_head)
+            {
+                let _ = apply_pull_fast_forward_working_log_side_effect(
+                    &worktree.to_string_lossy(),
+                    &old_head,
+                    &new_head,
+                );
+            }
+        }
+    }
+
+    async fn ingest_trace_payload(
+        &self,
+        payload: Value,
+        wait: bool,
+    ) -> Result<ControlResponse, GitAiError> {
+        if !is_relevant_trace_payload(&payload) {
+            return Ok(ControlResponse::ok(
+                None,
+                None,
+                Some(json!({ "ignored": true })),
+            ));
+        }
+
+        let hinted_family = self.resolve_family_from_payload(&payload);
+        if let Some(family) = hinted_family.as_deref() {
+            let _ = self.bump_latest_family_seq(family)?;
+        }
+
+        let emitted = {
+            let mut normalizer = self.normalizer.lock().await;
+            normalizer.ingest_payload(&payload)?
+        };
+
+        let Some(command) = emitted else {
+            return Ok(ControlResponse::ok(
+                None,
+                None,
+                Some(json!({ "buffered": true })),
+            ));
+        };
+
+        let family_key = command.family_key.as_ref().map(|key| key.0.clone());
+        let worktree = command.worktree.clone();
+        let ack = self.coordinator.route_command(command.clone()).await?;
+        if let Some(family) = family_key.as_deref() {
+            self.update_latest_family_seq(family, ack.seq)?;
+        }
+        if let Some(family) = family_key.as_deref() {
+            let _ = self.begin_family_effect(family);
+        }
+        self.maybe_apply_side_effects_for_command(family_key.as_deref(), &command);
+        if let Some(family) = family_key.as_deref() {
+            let _ = self.end_family_effect(family);
+        }
+
+        if wait && let Some(worktree) = worktree.as_ref() {
+            let _ = self.coordinator.barrier_family(worktree, ack.seq).await;
+        }
+
+        Ok(ControlResponse::ok(
+            Some(ack.seq),
+            if wait { Some(ack.seq) } else { None },
+            None,
+        ))
+    }
+
+    async fn ingest_checkpoint_payload(
+        &self,
+        repo_working_dir: String,
+        payload: Value,
+        wait: bool,
+    ) -> Result<ControlResponse, GitAiError> {
+        let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
+        let id = payload
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("cp-{}", short_hash_json(&payload)));
+        let author = payload
+            .get("author")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+
+        let observed = crate::daemon::domain::CheckpointObserved {
+            repo_working_dir: PathBuf::from(&repo_working_dir),
+            id,
+            author,
+            timestamp_ns: now_unix_nanos(),
+            file_count: 0,
+        };
+        let ack = self.coordinator.apply_checkpoint(observed).await?;
+        self.update_latest_family_seq(&family.0, ack.seq)?;
+
+        if self.mode.apply_side_effects() {
+            let _ = apply_checkpoint_side_effect(&payload);
+        }
+
+        if wait {
+            self.coordinator
+                .barrier_family(Path::new(&repo_working_dir), ack.seq)
+                .await?;
+            return Ok(ControlResponse::ok(Some(ack.seq), Some(ack.seq), None));
+        }
+        Ok(ControlResponse::ok(Some(ack.seq), None, None))
+    }
+
+    async fn ingest_env_override(
+        &self,
+        repo_working_dir: String,
+        env: HashMap<String, String>,
+        wait: bool,
+    ) -> Result<ControlResponse, GitAiError> {
+        let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
+        let observed = crate::daemon::domain::EnvOverrideSet {
+            repo_working_dir: PathBuf::from(&repo_working_dir),
+            overrides: env,
+        };
+        let ack = self.coordinator.apply_env_override(observed).await?;
+        self.update_latest_family_seq(&family.0, ack.seq)?;
+        if wait {
+            self.coordinator
+                .barrier_family(Path::new(&repo_working_dir), ack.seq)
+                .await?;
+            return Ok(ControlResponse::ok(Some(ack.seq), Some(ack.seq), None));
+        }
+        Ok(ControlResponse::ok(Some(ack.seq), None, None))
+    }
+
+    async fn status_for_family(
+        &self,
+        repo_working_dir: String,
+    ) -> Result<FamilyStatus, GitAiError> {
+        let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
+        let status = self
+            .coordinator
+            .status_family(Path::new(&repo_working_dir))
+            .await?;
+        let latest_seq = self.latest_family_seq(&family.0)?.max(status.applied_seq);
+        let (pending_roots, deferred_root_exits) = self.pending_counts().await?;
+        let pending_total = pending_roots.saturating_add(deferred_root_exits);
+        let cursor = latest_seq.saturating_sub(pending_total);
+        let backlog = latest_seq.saturating_sub(cursor);
+        let inflight_effects = self.inflight_effect_depth(&family.0)?;
+        Ok(FamilyStatus {
+            family_key: family.0,
+            mode: self.mode,
+            latest_seq,
+            cursor,
+            backlog,
+            effect_queue_depth: status.effect_queue_depth.saturating_add(inflight_effects),
+            unresolved_transcripts: Vec::new(),
+            pending_roots: pending_roots as usize,
+            deferred_root_exits: deferred_root_exits as usize,
+            last_error: status.last_error,
+            last_reconcile_ns: status.last_reconcile_ns,
+        })
+    }
+
+    async fn snapshot_for_family(
+        &self,
+        repo_working_dir: String,
+    ) -> Result<ControlResponse, GitAiError> {
+        let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
+        let snapshot = self
+            .coordinator
+            .snapshot_family(Path::new(&repo_working_dir))
+            .await?;
+        let latest_seq = self.latest_family_seq(&family.0)?.max(snapshot.applied_seq);
+        let rewrite_events = self.rewrite_events_for_family(&family.0)?;
+        let commands = snapshot
+            .recent_commands
+            .iter()
+            .map(|command| {
+                json!({
+                    "seq": command.seq,
+                    "sid": command.command.root_sid,
+                    "name": command.command.primary_command.clone().unwrap_or_default(),
+                    "argv": command.command.raw_argv,
+                    "exit_code": command.command.exit_code,
+                    "worktree": command.command.worktree.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    "pre_head": command.command.pre_repo.as_ref().and_then(|r| r.head.clone()),
+                    "post_head": command.command.post_repo.as_ref().and_then(|r| r.head.clone()),
+                    "ref_changes": command.command.ref_changes,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(ControlResponse::ok(
+            None,
+            None,
+            Some(json!({
+                "family_key": family.0,
+                "latest_seq": latest_seq,
+                "cursor": snapshot.applied_seq,
+                "state": {
+                    "commands": commands,
+                    "checkpoints": snapshot.checkpoints,
+                    "rewrite_events": rewrite_events,
+                    "unresolved_transcripts": snapshot.unresolved_transcripts,
+                    "last_error": snapshot.last_error,
+                    "last_reconcile_ns": snapshot.last_reconcile_ns,
+                }
+            })),
+        ))
+    }
+
+    async fn wait_through_seq(
+        &self,
+        repo_working_dir: String,
+        seq: u64,
+    ) -> Result<ControlResponse, GitAiError> {
+        let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
+        for _ in 0..400 {
+            let latest = self.latest_family_seq(&family.0)?;
+            let (pending_roots, deferred_root_exits) = self.pending_counts().await?;
+            if latest >= seq && pending_roots == 0 && deferred_root_exits == 0 {
+                return Ok(ControlResponse::ok(Some(seq), Some(latest), None));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let latest = self.latest_family_seq(&family.0)?;
+        Ok(ControlResponse::ok(Some(seq), Some(latest), None))
+    }
+
+    async fn reconcile_family(
+        &self,
+        repo_working_dir: String,
+    ) -> Result<ControlResponse, GitAiError> {
+        let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
+        let refs = self.backend.ref_snapshot(&family)?;
+        let ack = self
+            .coordinator
+            .reconcile_family(
+                Path::new(&repo_working_dir),
+                crate::daemon::domain::ReconcileSnapshot {
+                    refs,
+                    timestamp_ns: now_unix_nanos(),
+                },
+            )
+            .await?;
+        self.update_latest_family_seq(&family.0, ack.seq)?;
+        Ok(ControlResponse::ok(Some(ack.seq), Some(ack.seq), None))
+    }
+
+    async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
+        let result = match request {
+            ControlRequest::TraceIngest {
+                repo_working_dir,
+                payload,
+                wait,
+            } => {
+                let _ = repo_working_dir;
+                self.ingest_trace_payload(payload, wait.unwrap_or(false))
+                    .await
+            }
+            ControlRequest::CheckpointRun {
+                repo_working_dir,
+                payload,
+                wait,
+            } => {
+                self.ingest_checkpoint_payload(repo_working_dir, payload, wait.unwrap_or(false))
+                    .await
+            }
+            ControlRequest::EnvOverride {
+                repo_working_dir,
+                env,
+                wait,
+            } => {
+                self.ingest_env_override(repo_working_dir, env, wait.unwrap_or(false))
+                    .await
+            }
+            ControlRequest::StatusFamily { repo_working_dir } => self
+                .status_for_family(repo_working_dir)
+                .await
+                .and_then(|status| {
+                    serde_json::to_value(status)
+                        .map(|v| ControlResponse::ok(None, None, Some(v)))
+                        .map_err(GitAiError::from)
+                }),
+            ControlRequest::SnapshotFamily { repo_working_dir } => {
+                self.snapshot_for_family(repo_working_dir).await
+            }
+            ControlRequest::BarrierAppliedThroughSeq {
+                repo_working_dir,
+                seq,
+            } => self.wait_through_seq(repo_working_dir, seq).await,
+            ControlRequest::ReconcileFamily { repo_working_dir } => {
+                self.reconcile_family(repo_working_dir).await
+            }
+            ControlRequest::Shutdown => {
+                self.request_shutdown();
+                Ok(ControlResponse::ok(None, None, None))
+            }
+        };
+
+        match result {
+            Ok(response) => response,
+            Err(error) => ControlResponse::err(error.to_string()),
+        }
+    }
+}
+
 fn control_listener_loop(
     control_socket_path: PathBuf,
     coordinator: Arc<DaemonCoordinator>,
@@ -4081,9 +4997,62 @@ fn control_listener_loop(
     Ok(())
 }
 
+fn control_listener_loop_actor(
+    control_socket_path: PathBuf,
+    coordinator: Arc<ActorDaemonCoordinator>,
+    runtime_handle: tokio::runtime::Handle,
+) -> Result<(), GitAiError> {
+    remove_socket_if_exists(&control_socket_path)?;
+    let listener = LocalSocketListener::bind(control_socket_path.to_string_lossy().as_ref())
+        .map_err(|e| GitAiError::Generic(format!("failed binding control socket: {}", e)))?;
+    set_socket_owner_only(&control_socket_path)?;
+    for stream in listener.incoming() {
+        if coordinator.is_shutting_down() {
+            break;
+        }
+        let Ok(stream) = stream else {
+            continue;
+        };
+        let coord = coordinator.clone();
+        let handle = runtime_handle.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = handle_control_connection_actor(stream, coord, handle) {
+                debug_log(&format!("daemon control connection error: {}", e));
+            }
+        });
+    }
+    Ok(())
+}
+
 fn handle_control_connection(
     stream: LocalSocketStream,
     coordinator: Arc<DaemonCoordinator>,
+    runtime_handle: tokio::runtime::Handle,
+) -> Result<(), GitAiError> {
+    let mut reader = BufReader::new(stream);
+    while let Some(line) = read_json_line(&mut reader)? {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parsed = serde_json::from_str::<ControlRequest>(trimmed);
+        let response = match parsed {
+            Ok(req) => {
+                runtime_handle.block_on(async { coordinator.handle_control_request(req).await })
+            }
+            Err(e) => ControlResponse::err(format!("invalid control request: {}", e)),
+        };
+        let raw = serde_json::to_string(&response)?;
+        reader.get_mut().write_all(raw.as_bytes())?;
+        reader.get_mut().write_all(b"\n")?;
+        reader.get_mut().flush()?;
+    }
+    Ok(())
+}
+
+fn handle_control_connection_actor(
+    stream: LocalSocketStream,
+    coordinator: Arc<ActorDaemonCoordinator>,
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
     let mut reader = BufReader::new(stream);
@@ -4134,9 +5103,77 @@ fn trace_listener_loop(
     Ok(())
 }
 
+fn trace_listener_loop_actor(
+    trace_socket_path: PathBuf,
+    coordinator: Arc<ActorDaemonCoordinator>,
+    runtime_handle: tokio::runtime::Handle,
+) -> Result<(), GitAiError> {
+    remove_socket_if_exists(&trace_socket_path)?;
+    let listener = LocalSocketListener::bind(trace_socket_path.to_string_lossy().as_ref())
+        .map_err(|e| GitAiError::Generic(format!("failed binding trace socket: {}", e)))?;
+    set_socket_owner_only(&trace_socket_path)?;
+    for stream in listener.incoming() {
+        if coordinator.is_shutting_down() {
+            break;
+        }
+        let Ok(stream) = stream else {
+            continue;
+        };
+        let coord = coordinator.clone();
+        let handle = runtime_handle.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = handle_trace_connection_actor(stream, coord, handle) {
+                debug_log(&format!("daemon trace connection error: {}", e));
+            }
+        });
+    }
+    Ok(())
+}
+
 fn handle_trace_connection(
     stream: LocalSocketStream,
     coordinator: Arc<DaemonCoordinator>,
+    runtime_handle: tokio::runtime::Handle,
+) -> Result<(), GitAiError> {
+    let mut reader = BufReader::new(stream);
+    while let Some(line) = read_json_line(&mut reader)? {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parsed: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let result = runtime_handle
+            .block_on(async { coordinator.ingest_trace_payload(parsed, false).await });
+        if let Ok(path) = std::env::var("GIT_AI_TRACE_DEBUG_FILE")
+            && !path.is_empty()
+            && let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+        {
+            match result {
+                Ok(response) => {
+                    let _ = writeln!(
+                        file,
+                        "__RESP__ {}",
+                        serde_json::to_string(&response).unwrap_or_default()
+                    );
+                }
+                Err(err) => {
+                    let _ = writeln!(file, "__RESP_ERR__ {}", err);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_trace_connection_actor(
+    stream: LocalSocketStream,
+    coordinator: Arc<ActorDaemonCoordinator>,
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
     let mut reader = BufReader::new(stream);
@@ -4174,7 +5211,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
 
-    let coordinator = Arc::new(DaemonCoordinator::new(config.clone()));
+    let coordinator = Arc::new(ActorDaemonCoordinator::new(config.mode));
     let rt_handle = tokio::runtime::Handle::current();
     let control_socket_path = config.control_socket_path.clone();
     let trace_socket_path = config.trace_socket_path.clone();
@@ -4183,7 +5220,9 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     let control_shutdown_coord = coordinator.clone();
     let control_handle = rt_handle.clone();
     let control_thread = std::thread::spawn(move || {
-        if let Err(e) = control_listener_loop(control_socket_path, control_coord, control_handle) {
+        if let Err(e) =
+            control_listener_loop_actor(control_socket_path, control_coord, control_handle)
+        {
             debug_log(&format!("daemon control listener exited with error: {}", e));
             // Ensure the daemon exits instead of waiting forever if listener bind/loop fails.
             control_shutdown_coord.request_shutdown();
@@ -4194,7 +5233,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     let trace_shutdown_coord = coordinator.clone();
     let trace_handle = rt_handle.clone();
     let trace_thread = std::thread::spawn(move || {
-        if let Err(e) = trace_listener_loop(trace_socket_path, trace_coord, trace_handle) {
+        if let Err(e) = trace_listener_loop_actor(trace_socket_path, trace_coord, trace_handle) {
             debug_log(&format!("daemon trace listener exited with error: {}", e));
             trace_shutdown_coord.request_shutdown();
         }
@@ -4258,9 +5297,12 @@ mod tests {
     }
 
     fn git(path: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = Command::new(raw_git_binary_path_for_tests())
+            .arg("-c")
+            .arg("core.hooksPath=/dev/null")
             .arg("-C")
             .arg(path)
+            .env(crate::commands::git_hook_handlers::ENV_SKIP_ALL_HOOKS, "1")
             .args(args)
             .output()
             .expect("git command should run");
@@ -4272,6 +5314,20 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn raw_git_binary_path_for_tests() -> &'static str {
+        const CANDIDATES: &[&str] = &[
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+            "/usr/bin/git",
+            "/bin/git",
+        ];
+        CANDIDATES
+            .iter()
+            .copied()
+            .find(|path| std::path::Path::new(path).is_file())
+            .unwrap_or("git")
     }
 
     fn configure_test_identity(path: &Path) {
@@ -4327,7 +5383,12 @@ mod tests {
             .iter()
             .rev()
             .find(|checkpoint| checkpoint.kind == CheckpointKind::Human)
-            .and_then(|checkpoint| checkpoint.entries.iter().find(|entry| entry.file == file_path))?;
+            .and_then(|checkpoint| {
+                checkpoint
+                    .entries
+                    .iter()
+                    .find(|entry| entry.file == file_path)
+            })?;
         working_log.get_file_version(&entry.blob_sha).ok()
     }
 
@@ -4361,7 +5422,8 @@ mod tests {
         let rewrite_event = RewriteLogEvent::commit(Some(base_commit.clone()), commit_one);
         sync_pre_commit_checkpoint_for_daemon_commit(&repo, &rewrite_event, "Daemon Test").unwrap();
 
-        let checkpoint_content = latest_human_checkpoint_file_content(&repo, &base_commit, file_rel);
+        let checkpoint_content =
+            latest_human_checkpoint_file_content(&repo, &base_commit, file_rel);
         assert_eq!(
             checkpoint_content.as_deref(),
             Some("ai-change\n"),
@@ -4396,7 +5458,8 @@ mod tests {
         let rewrite_event = RewriteLogEvent::commit(Some(base_commit.clone()), commit_one);
         sync_pre_commit_checkpoint_for_daemon_commit(&repo, &rewrite_event, "Daemon Test").unwrap();
 
-        let checkpoint_content = latest_human_checkpoint_file_content(&repo, &base_commit, file_rel);
+        let checkpoint_content =
+            latest_human_checkpoint_file_content(&repo, &base_commit, file_rel);
         assert_eq!(
             checkpoint_content.as_deref(),
             Some("ai-change\n"),
@@ -4429,7 +5492,8 @@ mod tests {
         let rewrite_event = RewriteLogEvent::commit(Some(base_commit.clone()), commit_one);
         sync_pre_commit_checkpoint_for_daemon_commit(&repo, &rewrite_event, "Daemon Test").unwrap();
 
-        let checkpoint_content = latest_human_checkpoint_file_content(&repo, &base_commit, file_rel);
+        let checkpoint_content =
+            latest_human_checkpoint_file_content(&repo, &base_commit, file_rel);
         assert!(
             checkpoint_content.is_none(),
             "replay should skip files whose tracked state is newer than this commit snapshot"
@@ -4706,6 +5770,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial_test::serial]
+    #[ignore = "obsolete: daemon actor mode is intentionally in-memory with no replay"]
     async fn test_worker_crash_recovery_replays_remaining_events() {
         use tokio::time::{Duration, timeout};
 
