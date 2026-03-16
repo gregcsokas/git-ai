@@ -33,6 +33,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 
+pub mod domain;
+pub mod git_backend;
+
 const TRACE_EVENT_TYPE: &str = "trace2_raw";
 const CHECKPOINT_EVENT_TYPE: &str = "checkpoint";
 const RECONCILE_EVENT_TYPE: &str = "reconcile";

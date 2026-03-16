@@ -1,0 +1,300 @@
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FamilyKey(pub String);
+
+impl FamilyKey {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+impl std::fmt::Display for FamilyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandScope {
+    Family(FamilyKey),
+    Global,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AliasResolution {
+    None,
+    DirectAlias { alias: String, expansion: String },
+    ShellAlias { alias: String, expansion: String },
+    Unknown { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefChange {
+    pub reference: String,
+    pub old: String,
+    pub new: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceFingerprint {
+    pub raw_hash: String,
+    pub staged_count: u32,
+    pub unstaged_count: u32,
+    pub untracked_count: u32,
+    pub conflicted_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoContext {
+    pub head: Option<String>,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub workspace_fingerprint: Option<WorkspaceFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedCommand {
+    pub scope: CommandScope,
+    pub family_key: Option<FamilyKey>,
+    pub worktree: Option<PathBuf>,
+    pub root_sid: String,
+    pub raw_argv: Vec<String>,
+    pub primary_command: Option<String>,
+    pub alias_resolution: AliasResolution,
+    pub observed_child_commands: Vec<String>,
+    pub exit_code: i32,
+    pub started_at_ns: u128,
+    pub finished_at_ns: u128,
+    pub pre_repo: Option<RepoContext>,
+    pub post_repo: Option<RepoContext>,
+    pub ref_changes: Vec<RefChange>,
+    pub confidence: Confidence,
+    pub wrapper_mirror: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandClass {
+    HistoryRewrite,
+    RefMutation,
+    WorkspaceMutation,
+    Transport,
+    RepoAdmin,
+    ReadOnly,
+    Opaque,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResetKind {
+    Soft,
+    Mixed,
+    Hard,
+    Merge,
+    Keep,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PullStrategy {
+    Merge,
+    Rebase,
+    RebaseMerges,
+    FastForwardOnly,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StashOpKind {
+    Push,
+    Apply,
+    Pop,
+    Drop,
+    List,
+    Branch,
+    Show,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticEvent {
+    CommitCreated {
+        base: Option<String>,
+        new_head: String,
+    },
+    CommitAmended {
+        old_head: String,
+        new_head: String,
+    },
+    Reset {
+        kind: ResetKind,
+        old_head: String,
+        new_head: String,
+    },
+    RebaseComplete {
+        old_head: String,
+        new_head: String,
+        interactive: bool,
+    },
+    RebaseAbort {
+        head: String,
+    },
+    CherryPickComplete {
+        original_head: String,
+        new_head: String,
+    },
+    CherryPickAbort {
+        head: String,
+    },
+    MergeSquash {
+        base_branch: Option<String>,
+        base_head: String,
+        source: String,
+    },
+    RefUpdated {
+        reference: String,
+        old: String,
+        new: String,
+    },
+    BranchCreated {
+        name: String,
+        target: String,
+    },
+    BranchDeleted {
+        name: String,
+        old: String,
+    },
+    BranchRenamed {
+        old_name: String,
+        new_name: String,
+        target: Option<String>,
+    },
+    TagCreated {
+        name: String,
+        target: String,
+    },
+    TagDeleted {
+        name: String,
+        old: String,
+    },
+    SymbolicRefUpdated {
+        reference: String,
+        old_target: Option<String>,
+        new_target: Option<String>,
+    },
+    NotesUpdated,
+    ReplaceUpdated,
+    WorkspaceChanged {
+        before: WorkspaceFingerprint,
+        after: WorkspaceFingerprint,
+    },
+    IndexChanged {
+        before: WorkspaceFingerprint,
+        after: WorkspaceFingerprint,
+    },
+    CheckoutPaths,
+    RestorePaths,
+    CleanedWorkspace,
+    StashOperation {
+        kind: StashOpKind,
+        stash_ref: Option<String>,
+    },
+    FetchCompleted {
+        remote: Option<String>,
+    },
+    PullCompleted {
+        remote: Option<String>,
+        strategy: PullStrategy,
+    },
+    PushCompleted {
+        remote: Option<String>,
+    },
+    CloneCompleted {
+        target: PathBuf,
+    },
+    LsRemoteCompleted,
+    RepoInitialized {
+        path: PathBuf,
+    },
+    WorktreeAdded {
+        path: PathBuf,
+    },
+    WorktreeRemoved {
+        path: PathBuf,
+    },
+    RemoteConfigChanged,
+    ConfigChanged,
+    MaintenanceRun,
+    GcRun,
+    PackRefsRun,
+    ReflogExpireRun,
+    ReadOnlyCommand,
+    OpaqueCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisResult {
+    pub class: CommandClass,
+    pub events: Vec<SemanticEvent>,
+    pub confidence: Confidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedCommand {
+    pub seq: u64,
+    pub command: NormalizedCommand,
+    pub analysis: AnalysisResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeState {
+    pub head: Option<String>,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub workspace_fingerprint: Option<WorkspaceFingerprint>,
+    pub last_updated_ns: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointSummary {
+    pub id: String,
+    pub author: String,
+    pub timestamp_ns: u128,
+    pub file_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveCherryPickState {
+    pub original_head: Option<String>,
+    pub started_at_ns: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyState {
+    pub family_key: FamilyKey,
+    pub refs: HashMap<String, String>,
+    pub worktrees: HashMap<PathBuf, WorktreeState>,
+    pub recent_commands: VecDeque<AppliedCommand>,
+    pub checkpoints: HashMap<String, CheckpointSummary>,
+    pub unresolved_transcripts: BTreeSet<String>,
+    pub active_cherry_pick: HashMap<PathBuf, ActiveCherryPickState>,
+    pub env_overrides: HashMap<PathBuf, HashMap<String, String>>,
+    pub last_error: Option<String>,
+    pub last_reconcile_ns: Option<u128>,
+    pub applied_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalState {
+    pub recent_commands: VecDeque<AppliedCommand>,
+    pub applied_seq: u64,
+}
+
