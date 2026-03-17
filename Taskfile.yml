@@ -69,7 +69,7 @@ tasks:
   doc:
     desc: Build documentation
     cmds:
-      - cargo doc
+      - cargo doc --workspace --no-deps
 
   format:
     desc: Format code with rustfmt
