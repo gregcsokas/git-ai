@@ -1,3 +1,4 @@
+use crate::api::client::ApiContext;
 use crate::auth::{AuthState, collect_auth_status, format_unix_timestamp};
 use crate::config;
 
@@ -18,25 +19,37 @@ pub fn handle_whoami(args: &[String]) {
 
     let api_base_url = config::Config::get().api_base_url().to_string();
     let auth = collect_auth_status();
+    let api_ctx = ApiContext::new(None);
 
     println!("API Base URL: {}", api_base_url);
     println!("Credential backend: {}", auth.backend);
 
+    if let Some(api_key) = &api_ctx.api_key {
+        let masked = mask_api_key(api_key);
+        println!("API key: {}", masked);
+    }
+
     match &auth.state {
         AuthState::LoggedOut => {
             println!("Auth state: logged out");
-            std::process::exit(1);
+            if api_ctx.api_key.is_none() {
+                std::process::exit(1);
+            }
         }
         AuthState::LoggedIn => {
             println!("Auth state: logged in");
         }
         AuthState::RefreshExpired => {
             println!("Auth state: credentials expired (refresh token expired)");
-            std::process::exit(1);
+            if api_ctx.api_key.is_none() {
+                std::process::exit(1);
+            }
         }
         AuthState::Error(err) => {
             println!("Auth state: error ({})", err);
-            std::process::exit(1);
+            if api_ctx.api_key.is_none() {
+                std::process::exit(1);
+            }
         }
     }
 
@@ -82,6 +95,16 @@ pub fn handle_whoami(args: &[String]) {
             println!("  - {} ({}) [{}] role={}", org_slug, org_name, org_id, role);
         }
     }
+}
+
+fn mask_api_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 8 {
+        return "*".repeat(chars.len());
+    }
+    let prefix: String = chars[..4].iter().collect();
+    let suffix: String = chars[chars.len() - 4..].iter().collect();
+    format!("{}...{}", prefix, suffix)
 }
 
 fn print_help() {

@@ -6,6 +6,7 @@ use git_ai::authorship::working_log::AgentId;
 use git_ai::git::refs::notes_add;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
+use std::collections::HashMap;
 use std::process::Command;
 
 fn read_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
@@ -165,6 +166,11 @@ fn test_cherry_pick_preserves_prompt_only_commit_note_metadata() {
         "precondition: source commit should not have prompts before test mutation"
     );
 
+    let mut test_attrs = HashMap::new();
+    test_attrs.insert("employee_id".to_string(), "E456".to_string());
+    test_attrs.insert("team".to_string(), "backend".to_string());
+    test_attrs.insert("device_id".to_string(), "MAC-002".to_string());
+
     source_log.metadata.prompts.insert(
         "prompt-only-session".to_string(),
         PromptRecord {
@@ -180,6 +186,7 @@ fn test_cherry_pick_preserves_prompt_only_commit_note_metadata() {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            custom_attributes: Some(test_attrs.clone()),
         },
     );
 
@@ -217,6 +224,11 @@ fn test_cherry_pick_preserves_prompt_only_commit_note_metadata() {
     assert_eq!(prompt.agent_id.model, "test-model");
     assert_eq!(prompt.total_additions, 11);
     assert_eq!(prompt.total_deletions, 2);
+    assert_eq!(
+        prompt.custom_attributes,
+        Some(test_attrs),
+        "custom_attributes should be preserved through cherry-pick"
+    );
 }
 
 /// Test cherry-picking multiple commits in sequence
@@ -570,6 +582,71 @@ fn test_cherry_pick_empty_commits() {
         "Line 1\nFeature line",
         "File content should be preserved after cherry-pick/abort"
     );
+}
+
+/// Test that custom attributes set via config are preserved through a cherry-pick
+/// when the real post-commit pipeline injects them.
+#[test]
+fn test_cherry_pick_preserves_custom_attributes_from_config() {
+    let mut repo = TestRepo::new();
+
+    // Configure custom attributes via config patch
+    let mut attrs = HashMap::new();
+    attrs.insert("employee_id".to_string(), "E101".to_string());
+    attrs.insert("team".to_string(), "frontend".to_string());
+    attrs.insert("device_id".to_string(), "LNX-007".to_string());
+    repo.patch_git_ai_config(|patch| {
+        patch.custom_attributes = Some(attrs.clone());
+    });
+
+    // Create initial commit on default branch
+    let mut file = repo.filename("file.txt");
+    file.set_contents(lines!["Initial content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let main_branch = repo.current_branch();
+
+    // Create feature branch with AI-authored changes
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.insert_at(1, lines!["AI feature line".ai()]);
+    repo.stage_all_and_commit("Add AI feature").unwrap();
+    let feature_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Verify custom attributes were set on the original commit
+    let original_note = read_authorship_note(&repo, &feature_commit)
+        .expect("original commit should have authorship note");
+    let original_log =
+        AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
+    for (_id, prompt) in &original_log.metadata.prompts {
+        assert_eq!(
+            prompt.custom_attributes.as_ref(),
+            Some(&attrs),
+            "precondition: original commit should have custom_attributes from config"
+        );
+    }
+
+    // Switch back to main and cherry-pick the feature commit
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["cherry-pick", &feature_commit]).unwrap();
+
+    // Verify custom attributes survived the cherry-pick
+    let new_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let new_note = read_authorship_note(&repo, &new_commit)
+        .expect("cherry-picked commit should have authorship note");
+    let new_log = AuthorshipLog::deserialize_from_string(&new_note).expect("parse new note");
+    assert!(
+        !new_log.metadata.prompts.is_empty(),
+        "cherry-picked commit should have prompt records"
+    );
+    for (_id, prompt) in &new_log.metadata.prompts {
+        assert_eq!(
+            prompt.custom_attributes.as_ref(),
+            Some(&attrs),
+            "custom_attributes should be preserved through cherry-pick"
+        );
+    }
+
+    // Also verify the AI attribution itself survived
+    file.assert_lines_and_blame(lines!["Initial content".human(), "AI feature line".ai()]);
 }
 
 reuse_tests_in_worktree!(

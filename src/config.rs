@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,6 +81,7 @@ pub struct Config {
     #[serde(serialize_with = "serialize_masked_api_key")]
     api_key: Option<String>,
     quiet: bool,
+    custom_attributes: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
@@ -147,6 +149,8 @@ pub struct FileConfig {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_attributes: Option<HashMap<String, String>>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -169,6 +173,8 @@ pub struct ConfigPatch {
     pub disable_auto_updates: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_storage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_attributes: Option<HashMap<String, String>>,
 }
 
 impl Config {
@@ -393,6 +399,11 @@ impl Config {
     /// Returns true if quiet mode is enabled (suppresses chart output after commits)
     pub fn is_quiet(&self) -> bool {
         self.quiet
+    }
+
+    /// Returns the custom attributes map (from config file + env var override).
+    pub fn custom_attributes(&self) -> &HashMap<String, String> {
+        &self.custom_attributes
     }
 
     /// Serialize the effective runtime config into pretty JSON.
@@ -624,6 +635,9 @@ fn build_config() -> Config {
     // Get quiet setting (defaults to false)
     let quiet = file_cfg.as_ref().and_then(|c| c.quiet).unwrap_or(false);
 
+    // Build custom attributes: file config as base, env var overrides
+    let custom_attributes = build_custom_attributes(&file_cfg);
+
     #[cfg(any(test, feature = "test-support"))]
     {
         let mut config = Config {
@@ -643,6 +657,7 @@ fn build_config() -> Config {
             default_prompt_storage,
             api_key,
             quiet,
+            custom_attributes: custom_attributes.clone(),
         };
         apply_test_config_patch(&mut config);
         config
@@ -666,7 +681,41 @@ fn build_config() -> Config {
         default_prompt_storage,
         api_key,
         quiet,
+        custom_attributes,
     }
+}
+
+/// Build custom attributes from file config and `GIT_AI_CUSTOM_ATTRIBUTES` env var.
+/// Env var keys override file config keys on conflict.
+fn build_custom_attributes(file_cfg: &Option<FileConfig>) -> HashMap<String, String> {
+    let mut attrs = file_cfg
+        .as_ref()
+        .and_then(|c| c.custom_attributes.clone())
+        .unwrap_or_default();
+
+    if let Ok(env_val) = env::var("GIT_AI_CUSTOM_ATTRIBUTES") {
+        if let Ok(env_attrs) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&env_val)
+        {
+            for (k, v) in env_attrs {
+                match v {
+                    serde_json::Value::String(s) => {
+                        attrs.insert(k, s);
+                    }
+                    serde_json::Value::Number(n) => {
+                        attrs.insert(k, n.to_string());
+                    }
+                    serde_json::Value::Bool(b) => {
+                        attrs.insert(k, b.to_string());
+                    }
+                    _ => {} // silently drop arrays, objects, null
+                }
+            }
+        } else {
+            crate::utils::debug_log("GIT_AI_CUSTOM_ATTRIBUTES is not valid JSON, ignoring");
+        }
+    }
+
+    attrs
 }
 
 fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {
@@ -910,6 +959,9 @@ fn apply_test_config_patch(config: &mut Config) {
                 );
             }
         }
+        if let Some(custom_attributes) = patch.custom_attributes {
+            config.custom_attributes = custom_attributes;
+        }
     }
 }
 
@@ -944,6 +996,7 @@ mod tests {
             default_prompt_storage: None,
             api_key: None,
             quiet: false,
+            custom_attributes: HashMap::new(),
         }
     }
 
@@ -1051,6 +1104,7 @@ mod tests {
             default_prompt_storage: None,
             api_key: None,
             quiet: false,
+            custom_attributes: HashMap::new(),
         }
     }
 
@@ -1167,6 +1221,7 @@ mod tests {
             default_prompt_storage: default_prompt_storage.map(|s| s.to_string()),
             api_key: None,
             quiet: false,
+            custom_attributes: HashMap::new(),
         }
     }
 

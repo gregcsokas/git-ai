@@ -1132,7 +1132,7 @@ impl GitAuthorIdentity {
 ///
 /// The output format is: `Name <email> unix-timestamp timezone`
 /// For example: `John Doe <john@example.com> 1234567890 +0000`
-fn parse_git_var_identity(output: &str) -> GitAuthorIdentity {
+pub fn parse_git_var_identity(output: &str) -> GitAuthorIdentity {
     let trimmed = output.trim();
     if trimmed.is_empty() {
         return GitAuthorIdentity::default();

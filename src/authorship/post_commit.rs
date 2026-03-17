@@ -140,19 +140,28 @@ pub fn post_commit(
 
     // Long-lived daemon processes should read a fresh config snapshot.
     // Wrapper/hooks mode can use the process-global cached config.
-    let (effective_storage, using_custom_api) = if running_inside_daemon_process() {
+    let (effective_storage, using_custom_api, custom_attrs) = if running_inside_daemon_process() {
         let config = Config::fresh();
         (
             config.effective_prompt_storage(&Some(repo.clone())),
             config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
+            config.custom_attributes(),
         )
     } else {
         let config = Config::get();
         (
             config.effective_prompt_storage(&Some(repo.clone())),
             config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
+            config.custom_attributes(),
         )
     };
+
+    // Inject custom attributes into all PromptRecords.
+    if !custom_attrs.is_empty() {
+        for pr in authorship_log.metadata.prompts.values_mut() {
+            pr.custom_attributes = Some(custom_attrs.clone());
+        }
+    }
 
     match effective_storage {
         PromptStorageMode::Local => {
@@ -169,10 +178,11 @@ pub fn post_commit(
         PromptStorageMode::Default => {
             // "default" - attempt CAS upload, NEVER keep messages in notes
             // Check conditions for CAS upload:
-            // - user is logged in OR using custom API URL
+            // - user is logged in OR has API key OR using custom API URL
             let context = ApiContext::new(None);
             let client = ApiClient::new(context);
-            let should_enqueue_cas = client.is_logged_in() || using_custom_api;
+            let should_enqueue_cas =
+                client.is_logged_in() || client.has_api_key() || using_custom_api;
 
             if should_enqueue_cas {
                 // Redact secrets before uploading to CAS
@@ -643,6 +653,9 @@ fn record_commit_metrics(
     {
         attrs = attrs.branch(short_branch);
     }
+
+    // Attach custom attributes
+    attrs = attrs.custom_attributes_map(Config::get().custom_attributes());
 
     // Record the metric
     record(values, attrs);

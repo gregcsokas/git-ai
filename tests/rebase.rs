@@ -6,6 +6,7 @@ use git_ai::authorship::working_log::AgentId;
 use git_ai::git::refs::notes_add;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
+use std::collections::HashMap;
 use std::process::Command;
 
 fn read_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
@@ -384,6 +385,10 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
         "precondition: source commit should not have prompts before test mutation"
     );
 
+    let mut test_attrs = HashMap::new();
+    test_attrs.insert("employee_id".to_string(), "E123".to_string());
+    test_attrs.insert("team".to_string(), "platform".to_string());
+
     original_log.metadata.prompts.insert(
         "prompt-only-session".to_string(),
         PromptRecord {
@@ -399,6 +404,7 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            custom_attributes: Some(test_attrs.clone()),
         },
     );
 
@@ -431,6 +437,11 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
     assert_eq!(prompt.agent_id.model, "test-model");
     assert_eq!(prompt.total_additions, 17);
     assert_eq!(prompt.total_deletions, 3);
+    assert_eq!(
+        prompt.custom_attributes,
+        Some(test_attrs),
+        "custom_attributes should be preserved through rebase"
+    );
 }
 
 /// Test empty rebase (fast-forward)
@@ -1447,6 +1458,78 @@ cat {} > "$1"
         "// AI feature 3".ai(),
         "function feature3() {}".ai()
     ]);
+}
+
+/// Test that custom attributes set via config are preserved through a rebase
+/// when the real post-commit pipeline injects them.
+#[test]
+fn test_rebase_preserves_custom_attributes_from_config() {
+    let mut repo = TestRepo::new();
+
+    // Configure custom attributes via config patch
+    let mut attrs = HashMap::new();
+    attrs.insert("employee_id".to_string(), "E789".to_string());
+    attrs.insert("team".to_string(), "infra".to_string());
+    repo.patch_git_ai_config(|patch| {
+        patch.custom_attributes = Some(attrs.clone());
+    });
+
+    // Create initial commit on default branch
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with AI commit
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.set_contents(lines!["// AI feature code".ai()]);
+    repo.stage_all_and_commit("AI feature").unwrap();
+
+    // Verify custom attributes were set on the original commit
+    let original_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let original_note = read_authorship_note(&repo, &original_sha)
+        .expect("original commit should have authorship note");
+    let original_log =
+        AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
+    for (_id, prompt) in &original_log.metadata.prompts {
+        assert_eq!(
+            prompt.custom_attributes.as_ref(),
+            Some(&attrs),
+            "precondition: original commit should have custom_attributes from config"
+        );
+    }
+
+    // Advance default branch (non-conflicting)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut other_file = repo.filename("other.txt");
+    other_file.set_contents(lines!["other content"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+
+    // Rebase feature onto default branch
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Verify custom attributes survived the rebase
+    let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let rebased_note = read_authorship_note(&repo, &rebased_sha)
+        .expect("rebased commit should have authorship note");
+    let rebased_log =
+        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
+    assert!(
+        !rebased_log.metadata.prompts.is_empty(),
+        "rebased commit should have prompt records"
+    );
+    for (_id, prompt) in &rebased_log.metadata.prompts {
+        assert_eq!(
+            prompt.custom_attributes.as_ref(),
+            Some(&attrs),
+            "custom_attributes should be preserved through rebase"
+        );
+    }
+
+    // Also verify the AI attribution itself survived
+    feature_file.assert_lines_and_blame(lines!["// AI feature code".ai()]);
 }
 
 reuse_tests_in_worktree!(

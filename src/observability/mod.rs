@@ -201,8 +201,12 @@ pub fn spawn_background_flush() {
 }
 
 /// Debounce background flushes to avoid process/request storms when checkpoints
-/// run in quick succession.
+/// run in quick succession. In background agents, always flush immediately.
 fn should_spawn_background_flush() -> bool {
+    if crate::utils::is_in_background_agent() {
+        return true;
+    }
+
     const MIN_FLUSH_INTERVAL_SECS: u64 = 60;
 
     let Some(home) = dirs::home_dir() else {

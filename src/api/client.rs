@@ -1,6 +1,7 @@
 use crate::auth::{CredentialStore, OAuthClient};
 use crate::config;
 use crate::error::GitAiError;
+use crate::git::repository::{exec_git, parse_git_var_identity};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use url::Url;
@@ -59,6 +60,24 @@ fn try_load_auth_token() -> Option<String> {
     // Mutex guard is automatically released when _guard is dropped
 }
 
+/// Resolve the git author identity without requiring a Repository instance.
+///
+/// Runs `git var GIT_COMMITTER_IDENT` to get the current user's identity,
+/// respecting the full git precedence chain (env vars > config > system defaults).
+/// Returns `None` if the identity cannot be determined.
+fn resolve_git_identity() -> Option<String> {
+    let args = vec!["var".to_string(), "GIT_COMMITTER_IDENT".to_string()];
+    if let Ok(output) = exec_git(&args)
+        && let Ok(stdout) = String::from_utf8(output.stdout)
+    {
+        let identity = parse_git_var_identity(&stdout);
+        if let Some(formatted) = identity.formatted() {
+            return Some(formatted);
+        }
+    }
+    None
+}
+
 /// API client context with optional authentication
 #[derive(Debug, Clone)]
 pub struct ApiContext {
@@ -68,6 +87,8 @@ pub struct ApiContext {
     pub auth_token: Option<String>,
     /// Optional API key for X-API-Key header
     pub api_key: Option<String>,
+    /// Optional git author identity for X-Author-Identity header (only sent when API key is set)
+    pub author_identity: Option<String>,
     /// Request timeout in seconds
     pub timeout_secs: Option<u64>,
 }
@@ -104,10 +125,17 @@ impl ApiContext {
     /// If base_url is None, uses api_base_url from config (which can be set via config file, env var, or defaults)
     pub fn new(base_url: Option<String>) -> Self {
         let cfg = config::Config::get();
+        let api_key = cfg.api_key().map(|s| s.to_string());
+        let author_identity = if api_key.is_some() {
+            resolve_git_identity()
+        } else {
+            None
+        };
         Self {
             base_url: base_url.unwrap_or_else(Self::default_base_url),
             auth_token: try_load_auth_token(),
-            api_key: cfg.api_key().map(|s| s.to_string()),
+            api_key,
+            author_identity,
             timeout_secs: Some(30),
         }
     }
@@ -117,10 +145,17 @@ impl ApiContext {
     #[allow(dead_code)]
     pub fn without_auth(base_url: Option<String>) -> Self {
         let cfg = config::Config::get();
+        let api_key = cfg.api_key().map(|s| s.to_string());
+        let author_identity = if api_key.is_some() {
+            resolve_git_identity()
+        } else {
+            None
+        };
         Self {
             base_url: base_url.unwrap_or_else(Self::default_base_url),
             auth_token: None,
-            api_key: cfg.api_key().map(|s| s.to_string()),
+            api_key,
+            author_identity,
             timeout_secs: Some(30),
         }
     }
@@ -130,10 +165,17 @@ impl ApiContext {
     #[allow(dead_code)]
     pub fn with_auth(base_url: Option<String>, auth_token: String) -> Self {
         let cfg = config::Config::get();
+        let api_key = cfg.api_key().map(|s| s.to_string());
+        let author_identity = if api_key.is_some() {
+            resolve_git_identity()
+        } else {
+            None
+        };
         Self {
             base_url: base_url.unwrap_or_else(Self::default_base_url),
             auth_token: Some(auth_token),
-            api_key: cfg.api_key().map(|s| s.to_string()),
+            api_key,
+            author_identity,
             timeout_secs: Some(30),
         }
     }
@@ -167,14 +209,14 @@ impl ApiContext {
             .with_header("Content-Type", "application/json")
             .with_body(body_json);
 
-        // Add authentication header if token is present
-        if let Some(token) = &self.auth_token {
-            request = request.with_header("Authorization", format!("Bearer {}", token));
-        }
-
-        // Add API key header if present
         if let Some(api_key) = &self.api_key {
             request = request.with_header("X-API-Key", api_key);
+            if let Some(identity) = &self.author_identity {
+                request = request.with_header("X-Author-Identity", identity);
+            }
+        }
+        if let Some(token) = &self.auth_token {
+            request = request.with_header("Authorization", format!("Bearer {}", token));
         }
 
         // Set timeout if specified
@@ -195,14 +237,14 @@ impl ApiContext {
 
         let mut request = Self::http_get(&url);
 
-        // Add authentication header if token is present
-        if let Some(token) = &self.auth_token {
-            request = request.with_header("Authorization", format!("Bearer {}", token));
-        }
-
-        // Add API key header if present
         if let Some(api_key) = &self.api_key {
             request = request.with_header("X-API-Key", api_key);
+            if let Some(identity) = &self.author_identity {
+                request = request.with_header("X-Author-Identity", identity);
+            }
+        }
+        if let Some(token) = &self.auth_token {
+            request = request.with_header("Authorization", format!("Bearer {}", token));
         }
 
         // Set timeout if specified
@@ -244,6 +286,11 @@ impl ApiClient {
     /// Check if user is logged in (has an auth token)
     pub fn is_logged_in(&self) -> bool {
         self.context.auth_token.is_some()
+    }
+
+    /// Check if an API key is configured
+    pub fn has_api_key(&self) -> bool {
+        self.context.api_key.is_some()
     }
 }
 

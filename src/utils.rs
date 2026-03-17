@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 static DEBUG_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static DEBUG_PERFORMANCE_LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static IS_IN_BACKGROUND_AGENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 fn is_debug_enabled() -> bool {
     *DEBUG_ENABLED.get_or_init(|| {
@@ -194,6 +195,19 @@ pub fn spawn_internal_git_ai_subcommand(
 
 pub fn is_interactive_terminal() -> bool {
     *IS_TERMINAL.get_or_init(|| std::io::stdin().is_terminal())
+}
+
+/// Returns true if the process is running inside a background AI agent environment.
+pub fn is_in_background_agent() -> bool {
+    *IS_IN_BACKGROUND_AGENT.get_or_init(|| {
+        // Claude Code remote agent (Anthropic)
+        std::env::var("CLAUDE_CODE_REMOTE").map(|v| v == "true").unwrap_or(false)
+            // Cursor background agent
+            || std::env::var("CURSOR_AGENT").map(|v| v == "1").unwrap_or(false)
+            // Cloud agent environment (CLOUD_AGENT_* prefix)
+            || std::env::vars().any(|(k, _)| k.starts_with("CLOUD_AGENT_"))
+            || std::path::Path::new("/opt/.devin").is_dir()
+    })
 }
 
 /// A cross-platform exclusive file lock.

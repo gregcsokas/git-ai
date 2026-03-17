@@ -456,7 +456,7 @@ impl MetricsUploader {
 
         let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
 
-        let should_upload = !using_default_api || client.is_logged_in();
+        let should_upload = !using_default_api || client.is_logged_in() || client.has_api_key();
 
         Self {
             client: Some(client),

@@ -1627,7 +1627,8 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
         .tool(&agent_id.tool)
         .model(&agent_id.model)
         .prompt_id(prompt_id)
-        .external_prompt_id(&agent_id.id);
+        .external_prompt_id(&agent_id.id)
+        .custom_attributes_map(crate::config::Config::get().custom_attributes());
 
     let values = crate::metrics::AgentUsageValues::new();
     crate::metrics::record(values, attrs);

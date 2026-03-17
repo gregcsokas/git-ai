@@ -541,6 +541,16 @@ impl TestRepo {
                 serde_json::Value::String(prompt_storage.clone()),
             );
         }
+        if let Some(custom_attributes) = &patch.custom_attributes {
+            let attrs_map: serde_json::Map<String, serde_json::Value> = custom_attributes
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+            config.insert(
+                "custom_attributes".to_string(),
+                serde_json::Value::Object(attrs_map),
+            );
+        }
 
         let config_dir = self.test_home.join(".git-ai");
         fs::create_dir_all(&config_dir).expect("failed to create test HOME config directory");
