@@ -145,14 +145,14 @@ pub fn post_commit(
         (
             config.effective_prompt_storage(&Some(repo.clone())),
             config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
-            config.custom_attributes(),
+            config.custom_attributes().clone(),
         )
     } else {
         let config = Config::get();
         (
             config.effective_prompt_storage(&Some(repo.clone())),
             config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
-            config.custom_attributes(),
+            config.custom_attributes().clone(),
         )
     };
 
