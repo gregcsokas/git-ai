@@ -81,7 +81,7 @@ jobs:
               grep -F "checkpoint gemini" "$HOME/.gemini/settings.json"
               ;;
             opencode)
-              test -f "$HOME/.config/opencode/plugin/git-ai.ts"
+              test -f "$HOME/.config/opencode/plugins/git-ai.ts"
               ;;
           esac
           # Verify ~/.local/bin/git-ai symlink
@@ -224,7 +224,7 @@ jobs:
               if (-not (Select-String -Path $settings -Pattern "checkpoint gemini")) { throw "Gemini hooks not configured" }
             }
             "opencode" {
-              $plugin = Join-Path $env:USERPROFILE ".config\opencode\plugin\git-ai.ts"
+              $plugin = Join-Path $env:USERPROFILE ".config\opencode\plugins\git-ai.ts"
               if (-not (Test-Path -LiteralPath $plugin)) { throw "OpenCode plugin not installed" }
             }
           }
