@@ -22,6 +22,7 @@ const AGENT_EMAIL_MAPPINGS: &[(&str, &str)] = &[
     ),
     ("noreply@anthropic.com", "claude-web"),
     ("noreply@openai.com", "codex-cloud"),
+    ("roomote@roocode.com", "roo-background"),
 ];
 
 /// Known GitHub username mappings: (username, platform)
