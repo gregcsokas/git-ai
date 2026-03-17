@@ -53,7 +53,7 @@ pub(crate) fn fallback_commit_rewrite_event(cmd: &NormalizedCommand) -> Option<R
 }
 
 fn run_git_capture(worktree: &str, args: &[&str]) -> Result<String, GitAiError> {
-    let mut command = std::process::Command::new("/opt/homebrew/bin/git");
+    let mut command = std::process::Command::new(crate::config::Config::get().git_cmd());
     command.arg("-C").arg(worktree);
     command.args(args);
     let output = command.output()?;
@@ -86,7 +86,7 @@ mod tests {
     use std::process::Command;
 
     fn run_git(repo: &Path, args: &[&str]) -> String {
-        let output = Command::new("/opt/homebrew/bin/git")
+        let output = Command::new(crate::config::Config::get().git_cmd())
             .arg("-C")
             .arg(repo)
             .args(args)
