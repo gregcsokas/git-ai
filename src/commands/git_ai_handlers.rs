@@ -999,20 +999,18 @@ fn run_checkpoint_via_daemon_or_local(
     if daemon_checkpoint_delegate_enabled() {
         let repo_working_dir = repo.workdir().map(|p| p.to_string_lossy().to_string()).ok();
         if let Some(repo_working_dir) = repo_working_dir {
-            let payload = serde_json::json!({
-                "kind": checkpoint_kind_to_str(kind),
-                "author": author,
-                "repo_working_dir": repo_working_dir,
-                "show_working_log": show_working_log,
-                "reset": reset,
-                "quiet": quiet,
-                "is_pre_commit": is_pre_commit,
-                "agent_run_result": agent_run_result.clone(),
-            });
             if let Ok(config) = DaemonConfig::from_default_paths() {
                 let request = ControlRequest::CheckpointRun {
-                    repo_working_dir: repo_working_dir.clone(),
-                    payload,
+                    request: crate::daemon::CheckpointRunRequest {
+                        repo_working_dir: repo_working_dir.clone(),
+                        kind: Some(checkpoint_kind_to_str(kind).to_string()),
+                        author: Some(author.to_string()),
+                        show_working_log: Some(show_working_log),
+                        reset: Some(reset),
+                        quiet: Some(quiet),
+                        is_pre_commit: Some(is_pre_commit),
+                        agent_run_result: agent_run_result.clone(),
+                    },
                     wait: Some(true),
                 };
                 match send_control_request(&config.control_socket_path, &request) {

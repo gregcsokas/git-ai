@@ -1,6 +1,6 @@
 use crate::daemon::domain::{
-    ApplyAck, CheckpointObserved, CommandScope, EnvOverrideSet, FamilyKey, FamilySnapshot,
-    FamilyStatus, GlobalSnapshot, NormalizedCommand, ReconcileSnapshot,
+    AppliedCommand, ApplyAck, CheckpointObserved, CommandScope, EnvOverrideSet, FamilyKey,
+    FamilySnapshot, FamilyStatus, GlobalSnapshot, NormalizedCommand, ReconcileSnapshot,
 };
 use crate::daemon::family_actor::{FamilyActorHandle, spawn_family_actor};
 use crate::daemon::git_backend::GitBackend;
@@ -26,7 +26,10 @@ impl<B: GitBackend> Coordinator<B> {
         }
     }
 
-    pub async fn route_command(&self, cmd: NormalizedCommand) -> Result<ApplyAck, GitAiError> {
+    pub async fn route_command(
+        &self,
+        cmd: NormalizedCommand,
+    ) -> Result<AppliedCommand, GitAiError> {
         match &cmd.scope {
             CommandScope::Global => self.global.apply(cmd).await,
             CommandScope::Family(key) => {
@@ -189,6 +192,8 @@ mod tests {
             root_sid: "g1".to_string(),
             raw_argv: vec!["git".to_string(), "help".to_string()],
             primary_command: Some("help".to_string()),
+            invoked_command: Some("help".to_string()),
+            invoked_args: Vec::new(),
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,
@@ -209,6 +214,8 @@ mod tests {
             root_sid: "f1".to_string(),
             raw_argv: vec!["git".to_string(), "status".to_string()],
             primary_command: Some("status".to_string()),
+            invoked_command: Some("status".to_string()),
+            invoked_args: Vec::new(),
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,

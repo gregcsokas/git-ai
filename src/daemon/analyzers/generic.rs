@@ -120,6 +120,8 @@ mod tests {
             root_sid: "r".to_string(),
             raw_argv: vec!["git".to_string(), primary.to_string()],
             primary_command: Some(primary.to_string()),
+            invoked_command: Some(primary.to_string()),
+            invoked_args: Vec::new(),
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,

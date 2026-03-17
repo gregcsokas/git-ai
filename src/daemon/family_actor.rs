@@ -1,17 +1,17 @@
 use crate::daemon::analyzers::AnalyzerRegistry;
 use crate::daemon::domain::{
-    ApplyAck, CheckpointObserved, EnvOverrideSet, FamilyKey, FamilySnapshot, FamilyState,
-    FamilyStatus, NormalizedCommand, ReconcileSnapshot,
+    AppliedCommand, ApplyAck, CheckpointObserved, EnvOverrideSet, FamilyKey, FamilySnapshot,
+    FamilyState, FamilyStatus, NormalizedCommand, ReconcileSnapshot,
 };
 use crate::daemon::reducer;
 use crate::error::GitAiError;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::{mpsc, oneshot};
 
 pub enum FamilyMsg {
     Apply(
         NormalizedCommand,
-        oneshot::Sender<Result<ApplyAck, GitAiError>>,
+        oneshot::Sender<Result<AppliedCommand, GitAiError>>,
     ),
     ApplyCheckpoint(
         CheckpointObserved,
@@ -38,7 +38,7 @@ pub struct FamilyActorHandle {
 }
 
 impl FamilyActorHandle {
-    pub async fn apply(&self, cmd: NormalizedCommand) -> Result<ApplyAck, GitAiError> {
+    pub async fn apply(&self, cmd: NormalizedCommand) -> Result<AppliedCommand, GitAiError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(FamilyMsg::Apply(cmd, tx))
@@ -138,8 +138,6 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
             worktrees: HashMap::new(),
             recent_commands: VecDeque::new(),
             checkpoints: HashMap::new(),
-            unresolved_transcripts: BTreeSet::new(),
-            active_cherry_pick: HashMap::new(),
             env_overrides: HashMap::new(),
             last_error: None,
             last_reconcile_ns: None,
@@ -150,15 +148,11 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
         while let Some(msg) = rx.recv().await {
             match msg {
                 FamilyMsg::Apply(cmd, respond_to) => {
-                    let result = reducer::reduce_family_command(&mut state, cmd, &analyzers).map(
-                        |(applied, _)| ApplyAck {
-                            seq: applied.seq,
-                            applied: true,
-                        },
-                    );
+                    let result = reducer::reduce_family_command(&mut state, cmd, &analyzers)
+                        .map(|(applied, _)| applied);
                     let seq = result
                         .as_ref()
-                        .map(|ack| ack.seq)
+                        .map(|applied| applied.seq)
                         .unwrap_or(state.applied_seq);
                     let _ = respond_to.send(result);
                     satisfy_barriers(seq, &mut waiters);
@@ -192,7 +186,6 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                         family_key: state.family_key.clone(),
                         applied_seq: state.applied_seq,
                         recent_command_count: state.recent_commands.len(),
-                        unresolved_transcripts: state.unresolved_transcripts.len(),
                         last_error: state.last_error.clone(),
                         last_reconcile_ns: state.last_reconcile_ns,
                     }));
@@ -204,12 +197,6 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                         worktrees: state.worktrees.clone(),
                         recent_commands: state.recent_commands.iter().cloned().collect(),
                         checkpoints: state.checkpoints.clone(),
-                        unresolved_transcripts: state
-                            .unresolved_transcripts
-                            .iter()
-                            .cloned()
-                            .collect(),
-                        active_cherry_pick: state.active_cherry_pick.clone(),
                         env_overrides: state.env_overrides.clone(),
                         last_error: state.last_error.clone(),
                         last_reconcile_ns: state.last_reconcile_ns,
@@ -260,6 +247,8 @@ mod tests {
             root_sid: format!("sid-{}", seq),
             raw_argv: vec!["git".to_string(), "status".to_string()],
             primary_command: Some("status".to_string()),
+            invoked_command: Some("status".to_string()),
+            invoked_args: Vec::new(),
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: seq,

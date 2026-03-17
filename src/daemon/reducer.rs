@@ -14,10 +14,10 @@ pub fn reduce_family_command(
     cmd: NormalizedCommand,
     analyzers: &AnalyzerRegistry,
 ) -> Result<(AppliedCommand, AnalysisResult), GitAiError> {
+    // Analyze against pre-command state so history/ref analyzers can infer old->new correctly.
+    let analysis = analyzers.analyze(&cmd, AnalysisView { refs: &state.refs })?;
     apply_ref_changes(state, &cmd);
     apply_worktree_state(state, &cmd);
-
-    let analysis = analyzers.analyze(&cmd, AnalysisView { refs: &state.refs })?;
 
     state.applied_seq = state.applied_seq.saturating_add(1);
     let applied = AppliedCommand {
@@ -124,7 +124,7 @@ mod tests {
     use crate::daemon::domain::{
         CommandScope, Confidence, FamilyKey, FamilyState, GlobalState, RefChange,
     };
-    use std::collections::{BTreeSet, HashMap, VecDeque};
+    use std::collections::{HashMap, VecDeque};
 
     fn family_state() -> FamilyState {
         FamilyState {
@@ -133,8 +133,6 @@ mod tests {
             worktrees: HashMap::new(),
             recent_commands: VecDeque::new(),
             checkpoints: HashMap::new(),
-            unresolved_transcripts: BTreeSet::new(),
-            active_cherry_pick: HashMap::new(),
             env_overrides: HashMap::new(),
             last_error: None,
             last_reconcile_ns: None,
@@ -150,6 +148,8 @@ mod tests {
             root_sid: "sid".to_string(),
             raw_argv: vec!["git".to_string(), "update-ref".to_string()],
             primary_command: Some("update-ref".to_string()),
+            invoked_command: Some("update-ref".to_string()),
+            invoked_args: Vec::new(),
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,

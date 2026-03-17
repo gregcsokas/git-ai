@@ -3,6 +3,7 @@ use crate::daemon::domain::{
     AnalysisResult, CommandClass, Confidence, NormalizedCommand, ResetKind, SemanticEvent,
 };
 use crate::error::GitAiError;
+use std::path::Path;
 
 #[derive(Default)]
 pub struct HistoryAnalyzer;
@@ -14,7 +15,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
         state: AnalysisView<'_>,
     ) -> Result<AnalysisResult, GitAiError> {
         let name = cmd.primary_command.as_deref().unwrap_or_default();
-        let args = normalized_args(&cmd.raw_argv);
+        let args = command_args(cmd);
 
         let mut events = Vec::new();
         match name {
@@ -36,6 +37,17 @@ impl CommandAnalyzer for HistoryAnalyzer {
                         kind: infer_reset_kind(&args),
                         old_head,
                         new_head,
+                    });
+                } else if reset_mode_flag_present(&args)
+                    && let Some(head) = best_effort_head(cmd, state.refs)
+                {
+                    // Trace ingestion can lag behind fast command bursts and miss a
+                    // precise old->new boundary. Preserve explicit reset intent with
+                    // a best-effort head value so rewrite side effects still run.
+                    events.push(SemanticEvent::Reset {
+                        kind: infer_reset_kind(&args),
+                        old_head: head.clone(),
+                        new_head: head,
                     });
                 }
             }
@@ -115,8 +127,19 @@ impl CommandAnalyzer for HistoryAnalyzer {
     }
 }
 
+fn command_args(cmd: &NormalizedCommand) -> Vec<String> {
+    if !cmd.invoked_args.is_empty() {
+        return cmd.invoked_args.clone();
+    }
+    normalized_args(&cmd.raw_argv)
+}
+
 fn normalized_args(argv: &[String]) -> Vec<String> {
-    if argv.first().map(|a| a == "git").unwrap_or(false) {
+    let start = argv
+        .first()
+        .and_then(|arg| Path::new(arg).file_name().and_then(|name| name.to_str()))
+        .is_some_and(|name| name == "git" || name == "git.exe");
+    if start {
         argv[1..].to_vec()
     } else {
         argv.to_vec()
@@ -139,21 +162,69 @@ fn head_change(
     cmd: &NormalizedCommand,
     refs: &std::collections::HashMap<String, String>,
 ) -> Option<(String, String)> {
-    if let Some(change) = cmd.ref_changes.first()
-        && !change.new.trim().is_empty()
-        && change.old != change.new
-    {
+    let preferred_change = cmd
+        .ref_changes
+        .iter()
+        .find(|change| {
+            change.reference == "HEAD"
+                && !change.new.trim().is_empty()
+                && change.old.trim() != change.new.trim()
+        })
+        .or_else(|| {
+            cmd.ref_changes.iter().find(|change| {
+                change.reference.starts_with("refs/heads/")
+                    && !change.new.trim().is_empty()
+                    && change.old.trim() != change.new.trim()
+            })
+        })
+        .or_else(|| {
+            cmd.ref_changes.iter().find(|change| {
+                !change.new.trim().is_empty() && change.old.trim() != change.new.trim()
+            })
+        });
+    if let Some(change) = preferred_change {
         return Some((change.old.clone(), change.new.clone()));
     }
 
     let new_head = non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))?;
 
+    if let Some(orig_head) = cmd
+        .ref_changes
+        .iter()
+        .find(|change| change.reference == "ORIG_HEAD")
+        .and_then(|change| non_empty(change.new.clone()))
+        && orig_head != new_head
+    {
+        return Some((orig_head, new_head));
+    }
+
     let old_head = non_empty_opt(
         cmd.pre_repo
             .as_ref()
             .and_then(|repo| repo.head.clone())
+            .or_else(|| {
+                cmd.pre_repo
+                    .as_ref()
+                    .and_then(|repo| repo.branch.as_deref())
+                    .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
+            })
+            .or_else(|| {
+                cmd.post_repo
+                    .as_ref()
+                    .and_then(|repo| repo.branch.as_deref())
+                    .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
+            })
             .or_else(|| refs.get("HEAD").cloned()),
     )
+    .or_else(|| {
+        refs.iter().find_map(|(reference, oid)| {
+            if reference.starts_with("refs/heads/") {
+                non_empty(oid.clone())
+            } else {
+                None
+            }
+        })
+    })
     .unwrap_or_default();
 
     if old_head == new_head {
@@ -181,6 +252,40 @@ fn infer_reset_kind(args: &[String]) -> ResetKind {
     ResetKind::Mixed
 }
 
+fn reset_mode_flag_present(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--soft" | "--mixed" | "--hard" | "--merge" | "--keep"
+        )
+    })
+}
+
+fn best_effort_head(
+    cmd: &NormalizedCommand,
+    refs: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
+        .or_else(|| non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone())))
+        .or_else(|| non_empty_opt(refs.get("HEAD").cloned()))
+        .or_else(|| {
+            cmd.post_repo
+                .as_ref()
+                .and_then(|repo| repo.branch.as_deref())
+                .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
+                .and_then(non_empty)
+        })
+        .or_else(|| {
+            refs.iter().find_map(|(reference, oid)| {
+                if reference.starts_with("refs/heads/") {
+                    non_empty(oid.clone())
+                } else {
+                    None
+                }
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +299,8 @@ mod tests {
             root_sid: "r".to_string(),
             raw_argv: argv.iter().map(|s| s.to_string()).collect(),
             primary_command: Some(primary.to_string()),
+            invoked_command: Some(primary.to_string()),
+            invoked_args: argv.iter().skip(2).map(|s| s.to_string()).collect(),
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,

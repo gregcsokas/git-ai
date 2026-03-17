@@ -1,5 +1,5 @@
 use crate::daemon::analyzers::AnalyzerRegistry;
-use crate::daemon::domain::{ApplyAck, GlobalSnapshot, GlobalState, NormalizedCommand};
+use crate::daemon::domain::{AppliedCommand, GlobalSnapshot, GlobalState, NormalizedCommand};
 use crate::daemon::reducer;
 use crate::error::GitAiError;
 use std::collections::VecDeque;
@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 pub enum GlobalMsg {
     Apply(
         NormalizedCommand,
-        oneshot::Sender<Result<ApplyAck, GitAiError>>,
+        oneshot::Sender<Result<AppliedCommand, GitAiError>>,
     ),
     Snapshot(oneshot::Sender<Result<GlobalSnapshot, GitAiError>>),
     Barrier(u64, oneshot::Sender<Result<(), GitAiError>>),
@@ -21,7 +21,7 @@ pub struct GlobalActorHandle {
 }
 
 impl GlobalActorHandle {
-    pub async fn apply(&self, cmd: NormalizedCommand) -> Result<ApplyAck, GitAiError> {
+    pub async fn apply(&self, cmd: NormalizedCommand) -> Result<AppliedCommand, GitAiError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(GlobalMsg::Apply(cmd, tx))
@@ -74,15 +74,11 @@ pub fn spawn_global_actor() -> GlobalActorHandle {
         while let Some(msg) = rx.recv().await {
             match msg {
                 GlobalMsg::Apply(cmd, respond_to) => {
-                    let result = reducer::reduce_global_command(&mut state, cmd, &analyzers).map(
-                        |(applied, _)| ApplyAck {
-                            seq: applied.seq,
-                            applied: true,
-                        },
-                    );
+                    let result = reducer::reduce_global_command(&mut state, cmd, &analyzers)
+                        .map(|(applied, _)| applied);
                     let seq = result
                         .as_ref()
-                        .map(|ack| ack.seq)
+                        .map(|applied| applied.seq)
                         .unwrap_or(state.applied_seq);
                     let _ = respond_to.send(result);
                     satisfy_barriers(seq, &mut waiters);
@@ -136,6 +132,8 @@ mod tests {
             root_sid: format!("global-{}", seq),
             raw_argv: vec!["git".to_string(), "help".to_string()],
             primary_command: Some("help".to_string()),
+            invoked_command: Some("help".to_string()),
+            invoked_args: Vec::new(),
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: seq,

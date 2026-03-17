@@ -1139,7 +1139,6 @@ fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
         .expect("hard reset should succeed");
 
     daemon.latest_seq_and_wait_idle();
-
     let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
     let rewrite_log =
         fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after reset modes");
@@ -1151,7 +1150,7 @@ fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
         assert!(
             rewrite_log.contains(kind),
             "pure trace reset flow should include {} rewrite event",
-            kind
+            kind,
         );
     }
 }

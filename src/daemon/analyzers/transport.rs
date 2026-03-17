@@ -3,7 +3,7 @@ use crate::daemon::domain::{
     AnalysisResult, CommandClass, Confidence, NormalizedCommand, PullStrategy, SemanticEvent,
 };
 use crate::error::GitAiError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub struct TransportAnalyzer;
@@ -15,19 +15,19 @@ impl CommandAnalyzer for TransportAnalyzer {
         _state: AnalysisView<'_>,
     ) -> Result<AnalysisResult, GitAiError> {
         let name = cmd.primary_command.as_deref().unwrap_or_default();
-        let args = normalized_args(&cmd.raw_argv);
+        let args = command_args(cmd);
 
         let mut events = Vec::new();
         match name {
             "fetch" => events.push(SemanticEvent::FetchCompleted {
-                remote: args.get(1).cloned().filter(|arg| !arg.starts_with('-')),
+                remote: first_positional(&args),
             }),
             "pull" => events.push(SemanticEvent::PullCompleted {
-                remote: args.get(1).cloned().filter(|arg| !arg.starts_with('-')),
+                remote: first_positional(&args),
                 strategy: infer_pull_strategy(&args),
             }),
             "push" => events.push(SemanticEvent::PushCompleted {
-                remote: args.get(1).cloned().filter(|arg| !arg.starts_with('-')),
+                remote: first_positional(&args),
             }),
             "clone" => events.push(SemanticEvent::CloneCompleted {
                 target: infer_clone_target(&args)
@@ -55,12 +55,27 @@ impl CommandAnalyzer for TransportAnalyzer {
     }
 }
 
+fn command_args(cmd: &NormalizedCommand) -> Vec<String> {
+    if !cmd.invoked_args.is_empty() {
+        return cmd.invoked_args.clone();
+    }
+    normalized_args(&cmd.raw_argv)
+}
+
 fn normalized_args(argv: &[String]) -> Vec<String> {
-    if argv.first().map(|a| a == "git").unwrap_or(false) {
+    let start = argv
+        .first()
+        .and_then(|arg| Path::new(arg).file_name().and_then(|name| name.to_str()))
+        .is_some_and(|name| name == "git" || name == "git.exe");
+    if start {
         argv[1..].to_vec()
     } else {
         argv.to_vec()
     }
+}
+
+fn first_positional(args: &[String]) -> Option<String> {
+    args.iter().find(|arg| !arg.starts_with('-')).cloned()
 }
 
 fn infer_pull_strategy(args: &[String]) -> PullStrategy {
@@ -85,10 +100,7 @@ fn infer_clone_target(args: &[String]) -> Option<PathBuf> {
     }
     let mut filtered = Vec::new();
     let mut skip_next = false;
-    for (idx, arg) in args.iter().enumerate() {
-        if idx == 0 {
-            continue;
-        }
+    for arg in args {
         if skip_next {
             skip_next = false;
             continue;
@@ -118,6 +130,8 @@ mod tests {
             root_sid: "r".to_string(),
             raw_argv: argv.iter().map(|s| s.to_string()).collect(),
             primary_command: Some(primary.to_string()),
+            invoked_command: Some(primary.to_string()),
+            invoked_args: argv.iter().skip(2).map(|s| s.to_string()).collect(),
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,

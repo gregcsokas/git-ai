@@ -3,6 +3,7 @@ use crate::daemon::domain::{
     AnalysisResult, CommandClass, Confidence, NormalizedCommand, SemanticEvent, StashOpKind,
 };
 use crate::error::GitAiError;
+use std::path::Path;
 
 #[derive(Default)]
 pub struct WorkspaceAnalyzer;
@@ -14,7 +15,7 @@ impl CommandAnalyzer for WorkspaceAnalyzer {
         _state: AnalysisView<'_>,
     ) -> Result<AnalysisResult, GitAiError> {
         let name = cmd.primary_command.as_deref().unwrap_or_default();
-        let args = normalized_args(&cmd.raw_argv);
+        let args = command_args(cmd);
 
         let mut events = Vec::new();
         match name {
@@ -66,8 +67,19 @@ impl CommandAnalyzer for WorkspaceAnalyzer {
     }
 }
 
+fn command_args(cmd: &NormalizedCommand) -> Vec<String> {
+    if !cmd.invoked_args.is_empty() {
+        return cmd.invoked_args.clone();
+    }
+    normalized_args(&cmd.raw_argv)
+}
+
 fn normalized_args(argv: &[String]) -> Vec<String> {
-    if argv.first().map(|a| a == "git").unwrap_or(false) {
+    let start = argv
+        .first()
+        .and_then(|arg| Path::new(arg).file_name().and_then(|name| name.to_str()))
+        .is_some_and(|name| name == "git" || name == "git.exe");
+    if start {
         argv[1..].to_vec()
     } else {
         argv.to_vec()
@@ -75,7 +87,7 @@ fn normalized_args(argv: &[String]) -> Vec<String> {
 }
 
 fn infer_stash_kind(args: &[String]) -> StashOpKind {
-    match args.get(1).map(String::as_str).unwrap_or("push") {
+    match args.first().map(String::as_str).unwrap_or("push") {
         "push" | "save" => StashOpKind::Push,
         "apply" => StashOpKind::Apply,
         "pop" => StashOpKind::Pop,
@@ -107,6 +119,8 @@ mod tests {
             root_sid: "r".to_string(),
             raw_argv: argv.iter().map(|s| s.to_string()).collect(),
             primary_command: Some(primary.to_string()),
+            invoked_command: Some(primary.to_string()),
+            invoked_args: argv.iter().skip(2).map(|s| s.to_string()).collect(),
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,

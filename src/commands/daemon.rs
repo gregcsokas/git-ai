@@ -1,4 +1,6 @@
-use crate::daemon::{ControlRequest, DaemonConfig, DaemonMode, send_control_request};
+use crate::daemon::{
+    CheckpointRunRequest, ControlRequest, DaemonConfig, DaemonMode, send_control_request,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -98,12 +100,10 @@ fn handle_shutdown() -> Result<(), String> {
 }
 
 fn handle_trace(args: &[String]) -> Result<(), String> {
-    let repo = parse_repo_arg(args).ok_or_else(|| "--repo is required".to_string())?;
     let payload = parse_json_arg(args)?;
     let wait = has_flag(args, "--wait");
     let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
     let request = ControlRequest::TraceIngest {
-        repo_working_dir: repo,
         payload,
         wait: Some(wait),
     };
@@ -119,11 +119,13 @@ fn handle_trace(args: &[String]) -> Result<(), String> {
 fn handle_checkpoint(args: &[String]) -> Result<(), String> {
     let repo = parse_repo_arg(args).ok_or_else(|| "--repo is required".to_string())?;
     let payload = parse_json_arg(args)?;
+    let mut request: CheckpointRunRequest =
+        serde_json::from_value(payload).map_err(|e| e.to_string())?;
+    request.repo_working_dir = repo;
     let wait = has_flag(args, "--wait");
     let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
     let request = ControlRequest::CheckpointRun {
-        repo_working_dir: repo,
-        payload,
+        request,
         wait: Some(wait),
     };
     let response =
@@ -239,7 +241,7 @@ fn print_help() {
     eprintln!("  git-ai daemon start [--mode shadow|write]");
     eprintln!("  git-ai daemon status [--repo <path>]");
     eprintln!("  git-ai daemon shutdown");
-    eprintln!("  git-ai daemon trace --repo <path> --json '<payload>' [--wait]");
+    eprintln!("  git-ai daemon trace --json '<payload>' [--wait]");
     eprintln!("  git-ai daemon checkpoint --repo <path> --json '<payload>' [--wait]");
     eprintln!("  git-ai daemon barrier --repo <path> --seq <n>");
     eprintln!("  git-ai daemon reconcile [--repo <path>]");

@@ -1,6 +1,7 @@
 use crate::daemon::domain::{CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext};
 use crate::daemon::git_backend::{GitBackend, ReflogCut};
 use crate::error::GitAiError;
+use crate::git::cli_parser::parse_git_cli_args;
 use crate::observability;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -24,7 +25,6 @@ pub struct PendingTraceCommand {
     pub reflog_end_cut: Option<ReflogCut>,
     pub wrapper_mirror: bool,
     pub saw_def_repo: bool,
-    pub saw_root_exec: bool,
     pub capture_repo_context: bool,
 }
 
@@ -38,7 +38,6 @@ pub struct RawExitFrame {
 pub struct TraceNormalizerState {
     pub pending: HashMap<String, PendingTraceCommand>,
     pub deferred_exits: HashMap<String, RawExitFrame>,
-    pub deferred_child_exits: HashMap<String, RawExitFrame>,
     pub sid_to_worktree: HashMap<String, PathBuf>,
     pub sid_to_family: HashMap<String, FamilyKey>,
 }
@@ -79,7 +78,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             "start" => self.handle_start(payload, sid, &root_sid, ts),
             "def_repo" => self.handle_def_repo(payload, sid, &root_sid),
             "cmd_name" => self.handle_cmd_name(payload, sid, &root_sid),
-            "exec" => self.handle_exec(sid, &root_sid),
+            "exec" => Ok(None),
             "exit" => self.handle_exit(payload, sid, &root_sid, ts),
             _ => Ok(None),
         }
@@ -160,7 +159,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             reflog_end_cut: None,
             wrapper_mirror,
             saw_def_repo: false,
-            saw_root_exec: false,
             capture_repo_context,
         };
         self.state.pending.insert(root_sid.to_string(), pending);
@@ -264,22 +262,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
         Ok(None)
     }
 
-    fn handle_exec(
-        &mut self,
-        sid: &str,
-        root_sid: &str,
-    ) -> Result<Option<NormalizedCommand>, GitAiError> {
-        if sid == root_sid
-            && let Some(pending) = self.state.pending.get_mut(root_sid)
-        {
-            pending.saw_root_exec = true;
-            if let Some(exit) = self.state.deferred_child_exits.remove(root_sid) {
-                return self.finalize_root_exit(root_sid, exit.exit_code, exit.finished_at_ns);
-            }
-        }
-        Ok(None)
-    }
-
     fn handle_exit(
         &mut self,
         payload: &Value,
@@ -288,23 +270,8 @@ impl<B: GitBackend> TraceNormalizer<B> {
         finished_at_ns: u128,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
         if sid != root_sid {
-            let exit_code = payload
-                .get("code")
-                .or_else(|| payload.get("exit_code"))
-                .and_then(Value::as_i64)
-                .unwrap_or(0) as i32;
-            if let Some(pending) = self.state.pending.get(root_sid)
-                && pending.saw_root_exec
-            {
-                return self.finalize_root_exit(root_sid, exit_code, finished_at_ns);
-            }
-            self.state.deferred_child_exits.insert(
-                root_sid.to_string(),
-                RawExitFrame {
-                    exit_code,
-                    finished_at_ns,
-                },
-            );
+            let _ = payload;
+            let _ = finished_at_ns;
             return Ok(None);
         }
 
@@ -334,7 +301,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
         exit_code: i32,
         finished_at_ns: u128,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
-        self.state.deferred_child_exits.remove(root_sid);
         let mut pending = self.state.pending.remove(root_sid).ok_or_else(|| {
             GitAiError::Generic("missing pending command at finalize".to_string())
         })?;
@@ -351,6 +317,11 @@ impl<B: GitBackend> TraceNormalizer<B> {
             && let Some(family) = self.state.sid_to_family.get(root_sid)
         {
             pending.family_key = Some(family.clone());
+        }
+        if pending.family_key.is_none()
+            && let Some(worktree) = pending.worktree.as_deref()
+        {
+            pending.family_key = self.backend.resolve_family(worktree).ok();
         }
 
         if pending.capture_repo_context
@@ -371,6 +342,11 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if primary_command.is_none() {
             primary_command = argv_primary_command(&pending.raw_argv);
         }
+        let (invoked_command, invoked_args) =
+            canonical_invocation(&pending.raw_argv, primary_command.as_deref());
+        if primary_command.is_none() {
+            primary_command = invoked_command.clone();
+        }
 
         let mut confidence = Confidence::Low;
         let mut ref_changes = Vec::new();
@@ -378,20 +354,27 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if let Some(family) = pending.family_key.as_ref()
             && may_mutate_refs
         {
-            let start = pending.reflog_start_cut.as_ref().ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "missing reflog start cut for mutating command sid={}",
-                    pending.root_sid
-                ))
-            })?;
-            let end = pending.reflog_end_cut.as_ref().ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "missing reflog end cut for mutating command sid={}",
-                    pending.root_sid
-                ))
-            })?;
-            ref_changes = self.backend.reflog_delta(family, start, end)?;
-            confidence = Confidence::High;
+            if let (Some(start), Some(end)) = (
+                pending.reflog_start_cut.as_ref(),
+                pending.reflog_end_cut.as_ref(),
+            ) {
+                ref_changes = self.backend.reflog_delta(family, start, end)?;
+                confidence = Confidence::High;
+            } else {
+                observability::log_error(
+                    &GitAiError::Generic(format!(
+                        "missing reflog bounds for mutating command sid={}",
+                        pending.root_sid
+                    )),
+                    Some(serde_json::json!({
+                        "component": "trace_normalizer",
+                        "phase": "finalize_missing_reflog_bounds",
+                        "root_sid": pending.root_sid,
+                        "primary_command": primary_command,
+                        "family_key": family,
+                    })),
+                );
+            }
         }
 
         let mut family_key = pending.family_key.clone();
@@ -444,6 +427,8 @@ impl<B: GitBackend> TraceNormalizer<B> {
             root_sid: pending.root_sid,
             raw_argv: pending.raw_argv,
             primary_command,
+            invoked_command,
+            invoked_args,
             observed_child_commands: pending.observed_child_commands,
             exit_code,
             started_at_ns: pending.started_at_ns,
@@ -496,6 +481,51 @@ fn payload_worktree(payload: &Value) -> Option<PathBuf> {
         .or_else(|| payload.get("repo"))
         .and_then(Value::as_str)
         .map(PathBuf::from)
+}
+
+fn trace_argv_has_executable_prefix(argv: &[String]) -> bool {
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    let file_name = std::path::Path::new(first)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(first);
+    file_name.eq_ignore_ascii_case("git") || file_name.eq_ignore_ascii_case("git.exe")
+}
+
+fn trace_argv_invocation_tokens(argv: &[String]) -> &[String] {
+    if trace_argv_has_executable_prefix(argv) {
+        &argv[1..]
+    } else {
+        argv
+    }
+}
+
+fn canonical_invocation(
+    raw_argv: &[String],
+    primary_command: Option<&str>,
+) -> (Option<String>, Vec<String>) {
+    let tokens = trace_argv_invocation_tokens(raw_argv);
+    let parsed = parse_git_cli_args(tokens);
+    if let Some(command) = parsed.command {
+        return (Some(command), parsed.command_args);
+    }
+    if let Some(command) = primary_command.filter(|value| !value.trim().is_empty()) {
+        return (
+            Some(command.to_string()),
+            args_after_command(tokens, command),
+        );
+    }
+    (None, Vec::new())
+}
+
+fn args_after_command(argv: &[String], command: &str) -> Vec<String> {
+    argv.iter()
+        .position(|arg| arg == command)
+        .and_then(|idx| argv.get(idx + 1..))
+        .map(|args| args.to_vec())
+        .unwrap_or_default()
 }
 
 fn root_sid(sid: &str) -> &str {
@@ -606,12 +636,13 @@ fn select_primary_command(
 ) -> Option<String> {
     if let Some(name) = root_cmd_name
         && !is_internal_cmd_name(name)
+        && !is_git_binary(name)
     {
         return Some(name.to_string());
     }
 
     for child in observed_child_commands {
-        if !is_internal_cmd_name(child) {
+        if !is_internal_cmd_name(child) && !is_git_binary(child) {
             return Some(child.clone());
         }
     }
@@ -805,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn root_exec_then_child_exit_finalizes_root_command() {
+    fn child_exit_does_not_finalize_without_root_exit() {
         let backend = Arc::new(MockBackend::default());
         backend.set_family("/repo", "/repo/.git");
         backend.set_context("/repo", "head-a");
@@ -836,22 +867,29 @@ mod tests {
             "ts":4,
             "code":0
         });
+        let root_exit = serde_json::json!({
+            "event":"exit",
+            "sid":"s-exec",
+            "ts":5,
+            "code":0
+        });
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
         assert!(normalizer.ingest_payload(&cmd_name).unwrap().is_none());
         assert!(normalizer.ingest_payload(&exec).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&child_exit).unwrap().is_none());
+        assert_eq!(normalizer.state().pending.len(), 1);
 
-        let cmd = normalizer.ingest_payload(&child_exit).unwrap().unwrap();
+        let cmd = normalizer.ingest_payload(&root_exit).unwrap().unwrap();
         assert_eq!(cmd.root_sid, "s-exec");
         assert_eq!(cmd.primary_command.as_deref(), Some("notes"));
         assert_eq!(cmd.exit_code, 0);
         assert!(normalizer.state().pending.is_empty());
         assert!(normalizer.state().deferred_exits.is_empty());
-        assert!(normalizer.state().deferred_child_exits.is_empty());
     }
 
     #[test]
-    fn child_exit_before_root_exec_is_buffered_then_finalized() {
+    fn child_exit_before_root_exec_is_ignored_until_root_exit() {
         let backend = Arc::new(MockBackend::default());
         backend.set_family("/repo", "/repo/.git");
         backend.set_context("/repo", "head-a");
@@ -882,19 +920,25 @@ mod tests {
             "ts":4,
             "argv":["git","show","def456"]
         });
+        let root_exit = serde_json::json!({
+            "event":"exit",
+            "sid":"s-exec-oop",
+            "ts":5,
+            "code":0
+        });
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
         assert!(normalizer.ingest_payload(&cmd_name).unwrap().is_none());
         assert!(normalizer.ingest_payload(&child_exit).unwrap().is_none());
-        assert_eq!(normalizer.state().deferred_child_exits.len(), 1);
+        assert_eq!(normalizer.state().pending.len(), 1);
 
-        let cmd = normalizer.ingest_payload(&exec).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exec).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&root_exit).unwrap().unwrap();
         assert_eq!(cmd.root_sid, "s-exec-oop");
         assert_eq!(cmd.primary_command.as_deref(), Some("notes"));
         assert_eq!(cmd.exit_code, 0);
         assert!(normalizer.state().pending.is_empty());
         assert!(normalizer.state().deferred_exits.is_empty());
-        assert!(normalizer.state().deferred_child_exits.is_empty());
     }
 
     #[test]
@@ -981,6 +1025,5 @@ mod tests {
 
         assert!(normalizer.state().pending.is_empty());
         assert!(normalizer.state().deferred_exits.is_empty());
-        assert!(normalizer.state().deferred_child_exits.is_empty());
     }
 }

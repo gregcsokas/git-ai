@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -52,6 +52,8 @@ pub struct NormalizedCommand {
     pub root_sid: String,
     pub raw_argv: Vec<String>,
     pub primary_command: Option<String>,
+    pub invoked_command: Option<String>,
+    pub invoked_args: Vec<String>,
     pub observed_child_commands: Vec<String>,
     pub exit_code: i32,
     pub started_at_ns: u128,
@@ -244,20 +246,12 @@ pub struct CheckpointSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActiveCherryPickState {
-    pub original_head: Option<String>,
-    pub started_at_ns: u128,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FamilyState {
     pub family_key: FamilyKey,
     pub refs: HashMap<String, String>,
     pub worktrees: HashMap<PathBuf, WorktreeState>,
     pub recent_commands: VecDeque<AppliedCommand>,
     pub checkpoints: HashMap<String, CheckpointSummary>,
-    pub unresolved_transcripts: BTreeSet<String>,
-    pub active_cherry_pick: HashMap<PathBuf, ActiveCherryPickState>,
     pub env_overrides: HashMap<PathBuf, HashMap<String, String>>,
     pub last_error: Option<String>,
     pub last_reconcile_ns: Option<u128>,
@@ -281,7 +275,6 @@ pub struct FamilyStatus {
     pub family_key: FamilyKey,
     pub applied_seq: u64,
     pub recent_command_count: usize,
-    pub unresolved_transcripts: usize,
     pub last_error: Option<String>,
     pub last_reconcile_ns: Option<u128>,
 }
@@ -293,8 +286,6 @@ pub struct FamilySnapshot {
     pub worktrees: HashMap<PathBuf, WorktreeState>,
     pub recent_commands: Vec<AppliedCommand>,
     pub checkpoints: HashMap<String, CheckpointSummary>,
-    pub unresolved_transcripts: Vec<String>,
-    pub active_cherry_pick: HashMap<PathBuf, ActiveCherryPickState>,
     pub env_overrides: HashMap<PathBuf, HashMap<String, String>>,
     pub last_error: Option<String>,
     pub last_reconcile_ns: Option<u128>,
