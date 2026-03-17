@@ -68,40 +68,12 @@ impl Drop for DaemonProcessActiveGuard {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DaemonMode {
-    Shadow,
-    Write,
-}
-
-impl Default for DaemonMode {
-    fn default() -> Self {
-        Self::Shadow
-    }
-}
-
-impl DaemonMode {
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "shadow" | "phase1" | "1" => Some(Self::Shadow),
-            "write" | "phase2" | "phase3" | "2" | "3" => Some(Self::Write),
-            _ => None,
-        }
-    }
-
-    pub fn apply_side_effects(self) -> bool {
-        self == Self::Write
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub internal_dir: PathBuf,
     pub lock_path: PathBuf,
     pub trace_socket_path: PathBuf,
     pub control_socket_path: PathBuf,
-    pub mode: DaemonMode,
 }
 
 impl DaemonConfig {
@@ -110,16 +82,11 @@ impl DaemonConfig {
             GitAiError::Generic("Unable to determine ~/.git-ai/internal path".to_string())
         })?;
         let daemon_dir = internal_dir.join("daemon");
-        let mode = std::env::var("GIT_AI_DAEMON_MODE")
-            .ok()
-            .and_then(|v| DaemonMode::from_str(v.trim()))
-            .unwrap_or_default();
         Ok(Self {
             internal_dir: internal_dir.clone(),
             lock_path: daemon_dir.join("daemon.lock"),
             trace_socket_path: daemon_dir.join("trace2.sock"),
             control_socket_path: daemon_dir.join("control.sock"),
-            mode,
         })
     }
 
@@ -132,18 +99,12 @@ impl DaemonConfig {
         fs::create_dir_all(&self.internal_dir)?;
         Ok(())
     }
-
-    pub fn with_mode(mut self, mode: DaemonMode) -> Self {
-        self.mode = mode;
-        self
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DaemonPidMeta {
     pid: u32,
     started_at_ns: u128,
-    mode: DaemonMode,
 }
 
 #[derive(Debug)]
@@ -933,7 +894,6 @@ fn write_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     let meta = DaemonPidMeta {
         pid: std::process::id(),
         started_at_ns: now_unix_nanos(),
-        mode: config.mode,
     };
     let path = pid_metadata_path(config);
     fs::write(path, serde_json::to_string_pretty(&meta)?)?;
@@ -971,7 +931,6 @@ struct FamilySideEffectState {
 }
 
 struct ActorDaemonCoordinator {
-    mode: DaemonMode,
     backend: Arc<crate::daemon::git_backend::SystemGitBackend>,
     coordinator:
         Arc<crate::daemon::coordinator::Coordinator<crate::daemon::git_backend::SystemGitBackend>>,
@@ -992,10 +951,9 @@ struct ActorDaemonCoordinator {
 }
 
 impl ActorDaemonCoordinator {
-    fn new(mode: DaemonMode) -> Self {
+    fn new() -> Self {
         let backend = Arc::new(crate::daemon::git_backend::SystemGitBackend::new());
         Self {
-            mode,
             coordinator: Arc::new(crate::daemon::coordinator::Coordinator::new(
                 backend.clone(),
             )),
@@ -1154,9 +1112,7 @@ impl ActorDaemonCoordinator {
                 }
                 OrderedSideEffectEntry::Checkpoint(request) => {
                     let _ = self.begin_family_effect(family);
-                    if self.mode.apply_side_effects() {
-                        let _ = apply_checkpoint_side_effect(request);
-                    }
+                    let _ = apply_checkpoint_side_effect(request);
                     let _ = self.end_family_effect(family);
                 }
                 OrderedSideEffectEntry::Marker => {}
@@ -1674,7 +1630,7 @@ impl ActorDaemonCoordinator {
                 }
             )
         });
-        if !self.mode.apply_side_effects() || cmd.wrapper_mirror || cmd.exit_code != 0 {
+        if cmd.wrapper_mirror || cmd.exit_code != 0 {
             if let Some(family) = family
                 && cmd.primary_command.as_deref() == Some("cherry-pick")
             {
@@ -1961,7 +1917,6 @@ impl ActorDaemonCoordinator {
         let inflight_effects = self.inflight_effect_depth(&family.0)?;
         Ok(FamilyStatus {
             family_key: family.0,
-            mode: self.mode,
             latest_seq,
             cursor,
             backlog,
@@ -2214,7 +2169,9 @@ fn handle_trace_connection_actor(
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Err(error) = runtime_handle.block_on(async { coordinator.ingest_trace_payload(parsed, false).await }) {
+        if let Err(error) =
+            runtime_handle.block_on(async { coordinator.ingest_trace_payload(parsed, false).await })
+        {
             debug_log(&format!("daemon trace ingest error: {}", error));
         }
     }
@@ -2240,7 +2197,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
 
-    let coordinator = Arc::new(ActorDaemonCoordinator::new(config.mode));
+    let coordinator = Arc::new(ActorDaemonCoordinator::new());
     let rt_handle = tokio::runtime::Handle::current();
     let control_socket_path = config.control_socket_path.clone();
     let trace_socket_path = config.trace_socket_path.clone();

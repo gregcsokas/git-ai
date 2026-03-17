@@ -67,9 +67,8 @@ impl<B: GitBackend> TraceNormalizer<B> {
         family_key: Option<&FamilyKey>,
     ) -> Result<Option<String>, GitAiError> {
         let argv_primary = argv_primary_command(raw_argv);
-        let mut primary =
-            select_primary_command(root_cmd_name, observed_child_commands, raw_argv)
-                .or_else(|| argv_primary.clone());
+        let mut primary = select_primary_command(root_cmd_name, observed_child_commands, raw_argv)
+            .or_else(|| argv_primary.clone());
         let should_attempt_alias_resolution =
             primary.is_none() || primary.as_deref() == argv_primary.as_deref();
         if should_attempt_alias_resolution
@@ -476,7 +475,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
         if exit_code == 0 && matches!(primary_command.as_deref(), Some("clone" | "init")) {
             let cwd_hint = pending.worktree.as_deref();
-            let target_from_def_repo = pending.saw_def_repo.then(|| pending.worktree.clone()).flatten();
+            let target_from_def_repo = pending
+                .saw_def_repo
+                .then(|| pending.worktree.clone())
+                .flatten();
             let target_from_argv = if primary_command.as_deref() == Some("clone") {
                 self.backend.clone_target(&pending.raw_argv, cwd_hint)
             } else {
@@ -892,8 +894,7 @@ mod tests {
                 if arg.starts_with('-') {
                     let takes_value = matches!(
                         arg.as_str(),
-                        "-b"
-                            | "--branch"
+                        "-b" | "--branch"
                             | "--origin"
                             | "--upload-pack"
                             | "--template"

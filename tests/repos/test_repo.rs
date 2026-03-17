@@ -111,8 +111,6 @@ impl DaemonProcess {
         command
             .arg("daemon")
             .arg("start")
-            .arg("--mode")
-            .arg("write")
             .current_dir(repo_path)
             .env("HOME", test_home)
             .env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"))

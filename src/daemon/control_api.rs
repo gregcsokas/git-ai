@@ -89,7 +89,6 @@ impl ControlResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FamilyStatus {
     pub family_key: String,
-    pub mode: crate::daemon::DaemonMode,
     pub latest_seq: u64,
     pub cursor: u64,
     pub backlog: u64,

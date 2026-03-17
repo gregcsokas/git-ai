@@ -1,6 +1,4 @@
-use crate::daemon::{
-    CheckpointRunRequest, ControlRequest, DaemonConfig, DaemonMode, send_control_request,
-};
+use crate::daemon::{CheckpointRunRequest, ControlRequest, DaemonConfig, send_control_request};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -63,10 +61,10 @@ pub fn handle_daemon(args: &[String]) {
 }
 
 fn handle_start(args: &[String]) -> Result<(), String> {
-    let mut config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
-    if let Some(mode) = parse_mode_arg(args)? {
-        config = config.with_mode(mode);
+    if has_flag(args, "--mode") {
+        return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
+    let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -204,20 +202,6 @@ fn parse_seq_arg(args: &[String]) -> Result<u64, String> {
     Err("--seq <number> is required".to_string())
 }
 
-fn parse_mode_arg(args: &[String]) -> Result<Option<DaemonMode>, String> {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--mode" && i + 1 < args.len() {
-            let value = args[i + 1].trim();
-            let mode = DaemonMode::from_str(value)
-                .ok_or_else(|| format!("invalid --mode value: {}", value))?;
-            return Ok(Some(mode));
-        }
-        i += 1;
-    }
-    Ok(None)
-}
-
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
 }
@@ -238,7 +222,7 @@ fn print_help() {
     eprintln!("git-ai daemon - run and control git-ai daemon mode");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  git-ai daemon start [--mode shadow|write]");
+    eprintln!("  git-ai daemon start");
     eprintln!("  git-ai daemon status [--repo <path>]");
     eprintln!("  git-ai daemon shutdown");
     eprintln!("  git-ai daemon trace --json '<payload>' [--wait]");

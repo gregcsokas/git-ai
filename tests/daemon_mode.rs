@@ -55,13 +55,11 @@ struct DaemonGuard {
 }
 
 impl DaemonGuard {
-    fn start(repo: &TestRepo, mode: &str) -> Self {
+    fn start(repo: &TestRepo) -> Self {
         let mut command = Command::new(get_binary_path());
         command
             .arg("daemon")
             .arg("start")
-            .arg("--mode")
-            .arg(mode)
             .current_dir(repo.path())
             .env("HOME", repo.test_home_path())
             .env(
@@ -500,7 +498,7 @@ fn checkpoint_delegate_falls_back_when_daemon_is_unavailable() {
 #[serial]
 fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
 
     fs::write(repo.path().join("delegate-write.txt"), "base\n").expect("failed to write base");
     repo.git(&["add", "delegate-write.txt"])
@@ -546,55 +544,9 @@ fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
 
 #[test]
 #[serial]
-fn daemon_shadow_mode_tracks_checkpoint_without_applying_side_effects() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "shadow");
-
-    fs::write(repo.path().join("delegate-shadow.txt"), "base\n").expect("failed to write base");
-    repo.git(&["add", "delegate-shadow.txt"])
-        .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
-        .expect("base commit should succeed");
-
-    fs::write(
-        repo.path().join("delegate-shadow.txt"),
-        "base\ntracked in shadow mode only\n",
-    )
-    .expect("failed to write updated file");
-
-    repo.git_ai_with_env(
-        &["checkpoint", "mock_ai", "delegate-shadow.txt"],
-        &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
-    )
-    .expect("shadow delegated checkpoint should succeed");
-
-    daemon.latest_seq_and_wait_idle();
-
-    let checkpoints = repo
-        .current_working_logs()
-        .read_all_checkpoints()
-        .expect("checkpoints should be readable");
-    assert!(
-        checkpoints.is_empty(),
-        "shadow-mode daemon should not apply checkpoint side effects"
-    );
-
-    let family_state = daemon.family_state_snapshot();
-    let checkpoints_map = family_state
-        .get("checkpoints")
-        .and_then(Value::as_object)
-        .expect("family state should contain checkpoints map");
-    assert!(
-        !checkpoints_map.is_empty(),
-        "shadow-mode daemon should still track checkpoint summaries in state"
-    );
-}
-
-#[test]
-#[serial]
 fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_attribution() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -627,7 +579,7 @@ fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_
 #[serial]
 fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_lines() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -687,7 +639,7 @@ fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_
 #[serial]
 fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_non_adjacent_hunks_survive_split_commits() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -782,7 +734,7 @@ omega body
 #[serial]
 fn daemon_trace_mirror_preserves_amend_rewrite_parity_and_records_command() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let control_socket = daemon_control_socket_path(&repo);
     let control_socket_str = control_socket.to_string_lossy().to_string();
     let daemon_env = [
@@ -840,7 +792,7 @@ fn daemon_trace_mirror_preserves_amend_rewrite_parity_and_records_command() {
 #[serial]
 fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -869,52 +821,9 @@ fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
 
 #[test]
 #[serial]
-fn daemon_pure_trace_socket_shadow_mode_tracks_without_writes() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "shadow");
-    let trace_socket = daemon_trace_socket_path(&repo);
-    let env = git_trace_env(&trace_socket);
-    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
-
-    fs::write(repo.path().join("pure-shadow.txt"), "line 1\n").expect("failed to write file");
-    repo.git_og_with_env(&["add", "pure-shadow.txt"], &env_refs)
-        .expect("add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "shadow commit"], &env_refs)
-        .expect("commit should succeed");
-
-    daemon.latest_seq_and_wait_idle();
-
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    assert!(
-        !rewrite_log_path.exists()
-            || fs::read_to_string(&rewrite_log_path)
-                .unwrap_or_default()
-                .is_empty(),
-        "shadow mode should not apply rewrite side effects from pure trace socket events"
-    );
-
-    let family_state = daemon.family_state_snapshot();
-    let saw_commit = family_state
-        .get("commands")
-        .and_then(Value::as_array)
-        .map(|commands| {
-            commands.iter().any(|command| {
-                command.get("name").and_then(Value::as_str) == Some("commit")
-                    && command.get("exit_code").and_then(Value::as_i64) == Some(0)
-            })
-        })
-        .unwrap_or(false);
-    assert!(
-        saw_commit,
-        "shadow mode should still track commands from pure trace socket events"
-    );
-}
-
-#[test]
-#[serial]
 fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -971,7 +880,7 @@ fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1032,7 +941,7 @@ fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
 #[serial]
 fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1093,7 +1002,7 @@ fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
 #[serial]
 fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1159,7 +1068,7 @@ fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
 #[serial]
 fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = vec![
@@ -1225,7 +1134,7 @@ fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = vec![
@@ -1294,7 +1203,7 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
 #[serial]
 fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1357,7 +1266,7 @@ fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
 #[serial]
 fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1437,7 +1346,7 @@ fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
 #[serial]
 fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command_and_ref_reconcile() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1562,7 +1471,7 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command_and_ref_reconc
 #[serial]
 fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1691,7 +1600,7 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
 #[serial]
 fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_command() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1834,7 +1743,7 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
 #[serial]
 fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blame() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1876,7 +1785,7 @@ fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blam
 #[serial]
 fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attribution() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1949,7 +1858,7 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
 #[serial]
 fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_attribution() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -2002,7 +1911,7 @@ fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_a
 #[serial]
 fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attribution() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo, "write");
+    let daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
