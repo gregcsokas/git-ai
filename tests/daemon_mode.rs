@@ -1731,11 +1731,9 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
         "pull --rebase success should be tracked"
     );
 
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log = fs::read_to_string(&rewrite_log_path)
-        .expect("rewrite log should exist after pull --rebase");
+    let rebase_complete_events = wait_for_rewrite_event_count(&repo, "\"rebase_complete\"", 1);
     assert!(
-        rewrite_log.contains("\"rebase_complete\""),
+        rebase_complete_events >= 1,
         "pull --rebase should result in a rebase_complete rewrite signal"
     );
 }
