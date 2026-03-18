@@ -216,6 +216,12 @@ impl<B: GitBackend> TraceNormalizer<B> {
         } else {
             None
         };
+        let pre_repo =
+            if let (Some(worktree), Some(_family)) = (worktree.as_deref(), family_key.as_ref()) {
+                Some(self.backend.repo_context(worktree)?)
+            } else {
+                None
+            };
 
         let wrapper_mirror = payload
             .get("wrapper_mirror")
@@ -232,7 +238,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             started_at_ns,
             exit_code: None,
             finished_at_ns: None,
-            pre_repo: None,
+            pre_repo,
             post_repo: None,
             reflog_start_cut,
             reflog_end_cut: None,
@@ -295,6 +301,21 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 && pending.family_key.is_none()
             {
                 pending.family_key = Some(family.clone());
+            }
+        }
+        let pre_repo_capture_worktree = self.state.pending.get(root_sid).and_then(|pending| {
+            if pending.pre_repo.is_none() && pending.family_key.is_some() {
+                pending.worktree.clone()
+            } else {
+                None
+            }
+        });
+        if let Some(worktree) = pre_repo_capture_worktree.as_deref() {
+            let pre_repo = self.backend.repo_context(worktree)?;
+            if let Some(pending) = self.state.pending.get_mut(root_sid)
+                && pending.pre_repo.is_none()
+            {
+                pending.pre_repo = Some(pre_repo);
             }
         }
         self.refresh_pending_mutation_capture(root_sid)?;
@@ -392,6 +413,18 @@ impl<B: GitBackend> TraceNormalizer<B> {
             && let Some(worktree) = pending.worktree.as_deref()
         {
             pending.family_key = self.backend.resolve_family(worktree).ok();
+        }
+        if pending.pre_repo.is_none()
+            && pending.family_key.is_some()
+            && let Some(worktree) = pending.worktree.as_deref()
+        {
+            pending.pre_repo = Some(self.backend.repo_context(worktree)?);
+        }
+        if pending.post_repo.is_none()
+            && pending.family_key.is_some()
+            && let Some(worktree) = pending.worktree.as_deref()
+        {
+            pending.post_repo = Some(self.backend.repo_context(worktree)?);
         }
 
         let mut primary_command = self.resolve_primary_hint(
@@ -1441,8 +1474,14 @@ mod tests {
         assert!(normalizer.ingest_payload(&cmd_name).unwrap().is_none());
 
         let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
-        assert!(cmd.pre_repo.is_none());
-        assert!(cmd.post_repo.is_none());
+        assert_eq!(
+            cmd.pre_repo.as_ref().and_then(|repo| repo.head.as_deref()),
+            Some("worker-head")
+        );
+        assert_eq!(
+            cmd.post_repo.as_ref().and_then(|repo| repo.head.as_deref()),
+            Some("worker-head")
+        );
         assert_eq!(cmd.worktree.as_deref(), Some(Path::new("/repo-worker-b")));
     }
 }
