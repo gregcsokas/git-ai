@@ -99,12 +99,6 @@ fn sync_daemon_repo_if_needed(mode: GitTestMode, test_home: &Path, repo_working_
             .and_then(|v| v.get("pending_roots"))
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        let deferred_root_exits = status
-            .data
-            .as_ref()
-            .and_then(|v| v.get("deferred_root_exits"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
 
         if latest_seq > 0 {
             let barrier = send_control_request(
@@ -143,7 +137,6 @@ fn sync_daemon_repo_if_needed(mode: GitTestMode, test_home: &Path, repo_working_
         if saw_activity
             && backlog == 0
             && pending_roots == 0
-            && deferred_root_exits == 0
             && latest_seq == last_latest_seq
         {
             stable_idle_polls = stable_idle_polls.saturating_add(1);

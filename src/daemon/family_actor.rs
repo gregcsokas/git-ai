@@ -1,7 +1,7 @@
 use crate::daemon::analyzers::AnalyzerRegistry;
 use crate::daemon::domain::{
     AppliedCommand, ApplyAck, CheckpointObserved, EnvOverrideSet, FamilyKey, FamilySnapshot,
-    FamilyState, FamilyStatus, NormalizedCommand, ReconcileSnapshot,
+    FamilyState, FamilyStatus, NormalizedCommand,
 };
 use crate::daemon::reducer;
 use crate::error::GitAiError;
@@ -19,10 +19,6 @@ pub enum FamilyMsg {
     ),
     ApplyEnvOverride(
         EnvOverrideSet,
-        oneshot::Sender<Result<ApplyAck, GitAiError>>,
-    ),
-    Reconcile(
-        ReconcileSnapshot,
         oneshot::Sender<Result<ApplyAck, GitAiError>>,
     ),
     Status(oneshot::Sender<Result<FamilyStatus, GitAiError>>),
@@ -73,16 +69,6 @@ impl FamilyActorHandle {
         rx.await.map_err(|_| {
             GitAiError::Generic("family actor env_override receive failed".to_string())
         })?
-    }
-
-    pub async fn reconcile(&self, snapshot: ReconcileSnapshot) -> Result<ApplyAck, GitAiError> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(FamilyMsg::Reconcile(snapshot, tx))
-            .await
-            .map_err(|_| GitAiError::Generic("family actor reconcile send failed".to_string()))?;
-        rx.await
-            .map_err(|_| GitAiError::Generic("family actor reconcile receive failed".to_string()))?
     }
 
     pub async fn status(&self) -> Result<FamilyStatus, GitAiError> {
@@ -140,7 +126,6 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
             checkpoints: HashMap::new(),
             env_overrides: HashMap::new(),
             last_error: None,
-            last_reconcile_ns: None,
             applied_seq: 0,
         };
         let mut waiters: Vec<(u64, oneshot::Sender<Result<(), GitAiError>>)> = Vec::new();
@@ -173,21 +158,12 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                     }));
                     satisfy_barriers(state.applied_seq, &mut waiters);
                 }
-                FamilyMsg::Reconcile(snapshot, respond_to) => {
-                    reducer::reduce_reconcile(&mut state, snapshot);
-                    let _ = respond_to.send(Ok(ApplyAck {
-                        seq: state.applied_seq,
-                        applied: true,
-                    }));
-                    satisfy_barriers(state.applied_seq, &mut waiters);
-                }
                 FamilyMsg::Status(respond_to) => {
                     let _ = respond_to.send(Ok(FamilyStatus {
                         family_key: state.family_key.clone(),
                         applied_seq: state.applied_seq,
                         recent_command_count: state.recent_commands.len(),
                         last_error: state.last_error.clone(),
-                        last_reconcile_ns: state.last_reconcile_ns,
                     }));
                 }
                 FamilyMsg::Snapshot(respond_to) => {
@@ -199,7 +175,6 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                         checkpoints: state.checkpoints.clone(),
                         env_overrides: state.env_overrides.clone(),
                         last_error: state.last_error.clone(),
-                        last_reconcile_ns: state.last_reconcile_ns,
                         applied_seq: state.applied_seq,
                     }));
                 }
@@ -256,6 +231,7 @@ mod tests {
             pre_repo: None,
             post_repo: None,
             ref_changes: Vec::new(),
+            rewrite_hints: Default::default(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         }

@@ -25,8 +25,6 @@ pub enum ControlRequest {
     SnapshotFamily { repo_working_dir: String },
     #[serde(rename = "barrier.applied_through_seq")]
     BarrierAppliedThroughSeq { repo_working_dir: String, seq: u64 },
-    #[serde(rename = "reconcile.family")]
-    ReconcileFamily { repo_working_dir: String },
     #[serde(rename = "shutdown")]
     Shutdown,
 }
@@ -95,7 +93,5 @@ pub struct FamilyStatus {
     pub effect_queue_depth: usize,
     pub active_trace_connections: usize,
     pub pending_roots: usize,
-    pub deferred_root_exits: usize,
     pub last_error: Option<String>,
-    pub last_reconcile_ns: Option<u128>,
 }

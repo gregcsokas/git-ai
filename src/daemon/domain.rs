@@ -37,6 +37,16 @@ pub struct RefChange {
     pub new: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RewriteHints {
+    #[serde(default)]
+    pub rebase_source_commits: Vec<String>,
+    pub rebase_orig_head: Option<String>,
+    pub rebase_onto_head: Option<String>,
+    #[serde(default)]
+    pub cherry_pick_source_commits: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoContext {
     pub head: Option<String>,
@@ -62,6 +72,8 @@ pub struct NormalizedCommand {
     pub pre_repo: Option<RepoContext>,
     pub post_repo: Option<RepoContext>,
     pub ref_changes: Vec<RefChange>,
+    #[serde(default)]
+    pub rewrite_hints: RewriteHints,
     pub confidence: Confidence,
     pub wrapper_mirror: bool,
 }
@@ -255,13 +267,11 @@ pub struct FamilyState {
     pub checkpoints: HashMap<String, CheckpointSummary>,
     pub env_overrides: HashMap<PathBuf, HashMap<String, String>>,
     pub last_error: Option<String>,
-    pub last_reconcile_ns: Option<u128>,
     pub applied_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GlobalState {
-    pub recent_commands: VecDeque<AppliedCommand>,
     pub applied_seq: u64,
 }
 
@@ -277,7 +287,6 @@ pub struct FamilyStatus {
     pub applied_seq: u64,
     pub recent_command_count: usize,
     pub last_error: Option<String>,
-    pub last_reconcile_ns: Option<u128>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,13 +298,6 @@ pub struct FamilySnapshot {
     pub checkpoints: HashMap<String, CheckpointSummary>,
     pub env_overrides: HashMap<PathBuf, HashMap<String, String>>,
     pub last_error: Option<String>,
-    pub last_reconcile_ns: Option<u128>,
-    pub applied_seq: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GlobalSnapshot {
-    pub recent_commands: Vec<AppliedCommand>,
     pub applied_seq: u64,
 }
 
@@ -312,10 +314,4 @@ pub struct CheckpointObserved {
 pub struct EnvOverrideSet {
     pub repo_working_dir: PathBuf,
     pub overrides: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReconcileSnapshot {
-    pub refs: HashMap<String, String>,
-    pub timestamp_ns: u128,
 }

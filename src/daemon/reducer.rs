@@ -1,7 +1,7 @@
 use crate::daemon::analyzers::{AnalysisView, AnalyzerRegistry};
 use crate::daemon::domain::{
     AnalysisResult, AppliedCommand, CheckpointObserved, CheckpointSummary, EnvOverrideSet,
-    FamilyState, GlobalState, NormalizedCommand, ReconcileSnapshot, WorktreeState,
+    FamilyState, GlobalState, NormalizedCommand, WorktreeState,
 };
 use crate::error::GitAiError;
 use std::collections::VecDeque;
@@ -44,8 +44,6 @@ pub fn reduce_global_command(
         command: cmd,
         analysis: analysis.clone(),
     };
-    state.recent_commands.push_back(applied.clone());
-    cap_recent_commands(&mut state.recent_commands);
     Ok((applied, analysis))
 }
 
@@ -69,12 +67,6 @@ pub fn reduce_env_override(state: &mut FamilyState, env: EnvOverrideSet) {
         .canonicalize()
         .unwrap_or(env.repo_working_dir);
     state.env_overrides.insert(key, env.overrides);
-}
-
-pub fn reduce_reconcile(state: &mut FamilyState, reconcile: ReconcileSnapshot) {
-    state.applied_seq = state.applied_seq.saturating_add(1);
-    state.refs = reconcile.refs;
-    state.last_reconcile_ns = Some(reconcile.timestamp_ns);
 }
 
 fn apply_ref_changes(state: &mut FamilyState, cmd: &NormalizedCommand) {
@@ -160,7 +152,6 @@ mod tests {
             checkpoints: HashMap::new(),
             env_overrides: HashMap::new(),
             last_error: None,
-            last_reconcile_ns: None,
             applied_seq: 0,
         }
     }
@@ -186,6 +177,7 @@ mod tests {
                 old: "".to_string(),
                 new: "abc".to_string(),
             }],
+            rewrite_hints: Default::default(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         }
@@ -232,13 +224,12 @@ mod tests {
     #[test]
     fn global_reducer_never_drops_commands() {
         let mut state = GlobalState {
-            recent_commands: VecDeque::new(),
             applied_seq: 0,
         };
         let registry = AnalyzerRegistry::new();
         let (applied, _analysis) =
             reduce_global_command(&mut state, normalized(), &registry).unwrap();
         assert_eq!(applied.seq, 1);
-        assert_eq!(state.recent_commands.len(), 1);
+        assert_eq!(state.applied_seq, 1);
     }
 }

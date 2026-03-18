@@ -25,7 +25,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
                         events.push(SemanticEvent::CommitAmended { old_head, new_head });
                     } else {
                         events.push(SemanticEvent::CommitCreated {
-                            base: non_empty(old_head),
+                            base: sanitize_base(Some(old_head), &new_head),
                             new_head,
                         });
                     }
@@ -47,8 +47,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
                             });
                         }
                     } else {
-                        let base =
-                            old_head_from_refs(cmd, state.refs).filter(|old| old != &new_head);
+                        let base = sanitize_base(old_head_from_refs(cmd, state.refs), &new_head);
                         events.push(SemanticEvent::CommitCreated { base, new_head });
                     }
                 }
@@ -59,17 +58,6 @@ impl CommandAnalyzer for HistoryAnalyzer {
                         kind: infer_reset_kind(&args),
                         old_head,
                         new_head,
-                    });
-                } else if reset_mode_flag_present(&args)
-                    && let Some(head) = best_effort_head(cmd, state.refs)
-                {
-                    // Trace ingestion can lag behind fast command bursts and miss a
-                    // precise old->new boundary. Preserve explicit reset intent with
-                    // a best-effort head value so rewrite side effects still run.
-                    events.push(SemanticEvent::Reset {
-                        kind: infer_reset_kind(&args),
-                        old_head: head.clone(),
-                        new_head: head,
                     });
                 }
             }
@@ -82,7 +70,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
                             .and_then(|repo| repo.head.clone())
                             .unwrap_or_default(),
                     });
-                } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
+                } else if let Some((old_head, new_head)) = rebase_change(cmd, state.refs) {
                     events.push(SemanticEvent::RebaseComplete {
                         old_head,
                         new_head,
@@ -178,6 +166,14 @@ fn non_empty(value: String) -> Option<String> {
 
 fn non_empty_opt(value: Option<String>) -> Option<String> {
     value.and_then(non_empty)
+}
+
+fn is_zero_oid(oid: &str) -> bool {
+    matches!(oid.len(), 40 | 64) && oid.chars().all(|c| c == '0')
+}
+
+fn sanitize_base(base: Option<String>, new_head: &str) -> Option<String> {
+    base.filter(|candidate| candidate != new_head && !is_zero_oid(candidate))
 }
 
 fn head_change(
@@ -279,6 +275,33 @@ fn old_head_from_refs(
     )
 }
 
+fn rebase_change(
+    cmd: &NormalizedCommand,
+    refs: &std::collections::HashMap<String, String>,
+) -> Option<(String, String)> {
+    let from_changes = head_change(cmd, refs);
+    let new_head = from_changes
+        .as_ref()
+        .map(|(_, new_head)| new_head.clone())
+        .or_else(|| non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone())))?;
+
+    if let Some(orig_head) = non_empty_opt(cmd.rewrite_hints.rebase_orig_head.clone())
+        && orig_head != new_head
+    {
+        return Some((orig_head, new_head));
+    }
+
+    if let Some((old_head, new_head_from_changes)) = from_changes {
+        if old_head != new_head_from_changes {
+            return Some((old_head, new_head_from_changes));
+        }
+    }
+
+    non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
+        .filter(|old_head| old_head != &new_head)
+        .map(|old_head| (old_head, new_head))
+}
+
 fn change_span(changes: &[&crate::daemon::domain::RefChange]) -> Option<(String, String)> {
     let first = changes.first()?;
     let last = changes.last()?;
@@ -309,46 +332,6 @@ fn infer_reset_kind(args: &[String]) -> ResetKind {
     ResetKind::Mixed
 }
 
-fn reset_mode_flag_present(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--soft" | "--mixed" | "--hard" | "--merge" | "--keep"
-        )
-    })
-}
-
-fn best_effort_head(
-    cmd: &NormalizedCommand,
-    refs: &std::collections::HashMap<String, String>,
-) -> Option<String> {
-    non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
-        .or_else(|| non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone())))
-        .or_else(|| {
-            cmd.post_repo
-                .as_ref()
-                .and_then(|repo| repo.branch.as_deref())
-                .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
-                .and_then(non_empty)
-        })
-        .or_else(|| {
-            cmd.pre_repo
-                .as_ref()
-                .and_then(|repo| repo.branch.as_deref())
-                .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
-                .and_then(non_empty)
-        })
-        .or_else(|| {
-            refs.iter().find_map(|(reference, oid)| {
-                if reference.starts_with("refs/heads/") {
-                    non_empty(oid.clone())
-                } else {
-                    None
-                }
-            })
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +358,7 @@ mod tests {
                 old: "a".to_string(),
                 new: "b".to_string(),
             }],
+            rewrite_hints: Default::default(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         }

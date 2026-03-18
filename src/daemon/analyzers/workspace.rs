@@ -128,6 +128,7 @@ mod tests {
             pre_repo: None,
             post_repo: None,
             ref_changes: Vec::new(),
+            rewrite_hints: Default::default(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         }

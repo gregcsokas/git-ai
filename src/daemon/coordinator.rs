@@ -1,6 +1,6 @@
 use crate::daemon::domain::{
     AppliedCommand, ApplyAck, CheckpointObserved, CommandScope, EnvOverrideSet, FamilyKey,
-    FamilySnapshot, FamilyStatus, GlobalSnapshot, NormalizedCommand, ReconcileSnapshot,
+    FamilySnapshot, FamilyStatus, NormalizedCommand,
 };
 use crate::daemon::family_actor::{FamilyActorHandle, spawn_family_actor};
 use crate::daemon::git_backend::GitBackend;
@@ -54,16 +54,6 @@ impl<B: GitBackend> Coordinator<B> {
         actor.apply_env_override(env).await
     }
 
-    pub async fn reconcile_family(
-        &self,
-        repo_working_dir: &Path,
-        snapshot: ReconcileSnapshot,
-    ) -> Result<ApplyAck, GitAiError> {
-        let family = self.backend.resolve_family(repo_working_dir)?;
-        let actor = self.get_or_create_family_actor(family).await;
-        actor.reconcile(snapshot).await
-    }
-
     pub async fn status_family(&self, repo_working_dir: &Path) -> Result<FamilyStatus, GitAiError> {
         let family = self.backend.resolve_family(repo_working_dir)?;
         let actor = self.get_or_create_family_actor(family).await;
@@ -87,14 +77,6 @@ impl<B: GitBackend> Coordinator<B> {
         let family = self.backend.resolve_family(repo_working_dir)?;
         let actor = self.get_or_create_family_actor(family).await;
         actor.barrier(seq).await
-    }
-
-    pub async fn snapshot_global(&self) -> Result<GlobalSnapshot, GitAiError> {
-        self.global.snapshot().await
-    }
-
-    pub async fn barrier_global(&self, seq: u64) -> Result<(), GitAiError> {
-        self.global.barrier(seq).await
     }
 
     pub async fn shutdown(&self) -> Result<(), GitAiError> {
@@ -159,10 +141,6 @@ mod tests {
             Err(GitAiError::Generic("unused".to_string()))
         }
 
-        fn ref_snapshot(&self, _family: &FamilyKey) -> Result<HashMap<String, String>, GitAiError> {
-            Ok(HashMap::new())
-        }
-
         fn reflog_cut(&self, _family: &FamilyKey) -> Result<ReflogCut, GitAiError> {
             Err(GitAiError::Generic("unused".to_string()))
         }
@@ -218,6 +196,7 @@ mod tests {
             pre_repo: None,
             post_repo: None,
             ref_changes: Vec::new(),
+            rewrite_hints: Default::default(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         }
@@ -240,6 +219,7 @@ mod tests {
             pre_repo: None,
             post_repo: None,
             ref_changes: Vec::new(),
+            rewrite_hints: Default::default(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         }

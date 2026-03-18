@@ -446,10 +446,12 @@ pub fn rewrite_authorship_after_rebase_v2(
     // Filter out commits that already have authorship logs (these are commits from the target branch).
     // Only process newly created rebased commits.
     let commits_with_logs = commits_with_authorship_notes(repo, new_commits)?;
+    let force_process_existing_notes = original_commits.len() > new_commits.len();
     let commits_to_process: Vec<String> = new_commits
         .iter()
         .filter(|commit| {
-            let has_log = commits_with_logs.contains(commit.as_str());
+            let has_log =
+                !force_process_existing_notes && commits_with_logs.contains(commit.as_str());
             if has_log {
                 debug_log(&format!(
                     "Skipping commit {} (already has authorship log)",

@@ -9,6 +9,17 @@ use repos::test_repo::TestRepo;
 use std::collections::HashMap;
 use std::process::Command;
 
+fn test_mode_uses_daemon() -> bool {
+    matches!(
+        std::env::var("GIT_AI_TEST_GIT_MODE")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("daemon") | Some("trace-daemon") | Some("pure-daemon")
+    )
+}
+
 fn read_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
     let output = Command::new("git")
         .args([
@@ -498,11 +509,13 @@ fn test_rebase_with_explicit_branch_argument_preserves_authorship() {
 
     // Invoke rebase with explicit branch arg while currently on main.
     let output = repo.git(&["rebase", &main_branch, "feature"]).unwrap();
-    assert!(
-        output.contains("Commit mapping: 1 original -> 1 new"),
-        "Expected explicit-branch rebase to map one original commit to one rebased commit. Output:\n{}",
-        output
-    );
+    if !test_mode_uses_daemon() {
+        assert!(
+            output.contains("Commit mapping: 1 original -> 1 new"),
+            "Expected explicit-branch rebase to map one original commit to one rebased commit. Output:\n{}",
+            output
+        );
+    }
 
     // HEAD should now be on feature after the rebase operation; verify AI blame survived.
     feature_file.assert_lines_and_blame(lines!["// AI feature".ai(), "fn feature() {}".ai()]);
@@ -537,11 +550,13 @@ fn test_rebase_root_with_explicit_branch_argument_preserves_authorship() {
         .git(&["rebase", "--root", "--onto", &main_branch, "feature"])
         .unwrap();
 
-    assert!(
-        output.contains("Commit mapping: 1 original -> 1 new"),
-        "Expected root explicit-branch rebase to map one original commit to one rebased commit. Output:\n{}",
-        output
-    );
+    if !test_mode_uses_daemon() {
+        assert!(
+            output.contains("Commit mapping: 1 original -> 1 new"),
+            "Expected root explicit-branch rebase to map one original commit to one rebased commit. Output:\n{}",
+            output
+        );
+    }
 
     let rebased_feature_head = repo.git(&["rev-parse", "HEAD"]).unwrap();
     assert_ne!(

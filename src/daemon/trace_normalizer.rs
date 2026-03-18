@@ -1,10 +1,13 @@
-use crate::daemon::domain::{CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext};
+use crate::daemon::domain::{
+    CommandScope, Confidence, FamilyKey, NormalizedCommand, RefChange, RepoContext, RewriteHints,
+};
 use crate::daemon::git_backend::{GitBackend, ReflogCut};
 use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
 use crate::observability;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,23 +26,20 @@ pub struct PendingTraceCommand {
     pub post_repo: Option<RepoContext>,
     pub reflog_start_cut: Option<ReflogCut>,
     pub reflog_end_cut: Option<ReflogCut>,
+    pub worktree_head_start_offset: Option<u64>,
+    pub worktree_head_end_offset: Option<u64>,
     pub wrapper_mirror: bool,
     pub saw_def_repo: bool,
+    pub rewrite_hints: RewriteHints,
 }
 
-#[derive(Debug, Clone)]
-pub struct RawExitFrame {
-    pub exit_code: i32,
-    pub finished_at_ns: u128,
-}
-
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TraceNormalizerState {
     pub pending: HashMap<String, PendingTraceCommand>,
-    pub deferred_exits: HashMap<String, RawExitFrame>,
+    pub completed_roots: std::collections::HashSet<String>,
     pub sid_to_worktree: HashMap<String, PathBuf>,
     pub sid_to_family: HashMap<String, FamilyKey>,
-    pub last_reflog_cut_by_family: HashMap<String, ReflogCut>,
+    pub prestart_root_cmd_names: HashMap<String, String>,
 }
 
 pub struct TraceNormalizer<B: GitBackend> {
@@ -87,13 +87,13 @@ impl<B: GitBackend> TraceNormalizer<B> {
     }
 
     fn refresh_pending_mutation_capture(&mut self, root_sid: &str) -> Result<(), GitAiError> {
-        let (family, primary_hint, need_reflog_cut) = {
+        let (family, worktree, primary_hint, need_reflog_cut, need_worktree_head_cut) = {
             let pending = match self.state.pending.get(root_sid) {
                 Some(pending) => pending,
                 None => return Ok(()),
             };
 
-            if pending.reflog_start_cut.is_some() {
+            if pending.reflog_start_cut.is_some() && pending.worktree_head_start_offset.is_some() {
                 return Ok(());
             }
 
@@ -113,8 +113,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
             (
                 family.clone(),
+                worktree.to_path_buf(),
                 primary_hint,
                 pending.reflog_start_cut.is_none(),
+                pending.worktree_head_start_offset.is_none(),
             )
         };
         if !command_may_mutate_refs(primary_hint.as_deref()) {
@@ -126,13 +128,103 @@ impl<B: GitBackend> TraceNormalizer<B> {
         } else {
             None
         };
+        let worktree_head_start_offset = if need_worktree_head_cut {
+            worktree_head_reflog_offset(&worktree)
+        } else {
+            None
+        };
 
         if let Some(pending) = self.state.pending.get_mut(root_sid)
             && pending.reflog_start_cut.is_none()
         {
             pending.reflog_start_cut = reflog_start_cut;
+            if pending.worktree_head_start_offset.is_none() {
+                pending.worktree_head_start_offset = worktree_head_start_offset;
+            }
         }
         Ok(())
+    }
+
+    fn refresh_pending_rewrite_hints(&mut self, root_sid: &str) {
+        let worktree = match self.state.pending.get(root_sid) {
+            Some(pending) => pending.worktree.clone(),
+            None => None,
+        };
+        let Some(worktree) = worktree else {
+            return;
+        };
+        let Some(git_dir) = git_dir_for_worktree(&worktree) else {
+            return;
+        };
+
+        let rebase_source_commits = read_rebase_source_commits(&git_dir);
+        let rebase_orig_head = read_oid_file(&git_dir.join("rebase-merge").join("orig-head"))
+            .or_else(|| read_oid_file(&git_dir.join("rebase-apply").join("orig-head")))
+            .or_else(|| read_oid_file(&git_dir.join("ORIG_HEAD")));
+        let rebase_onto_head = read_oid_file(&git_dir.join("rebase-merge").join("onto"))
+            .or_else(|| read_oid_file(&git_dir.join("rebase-apply").join("onto")));
+        let cherry_pick_source_commits = read_cherry_pick_source_commits(&git_dir);
+
+        if let Some(pending) = self.state.pending.get_mut(root_sid) {
+            merge_unique_in_order(
+                &mut pending.rewrite_hints.rebase_source_commits,
+                rebase_source_commits,
+            );
+            if pending.rewrite_hints.rebase_orig_head.is_none() {
+                pending.rewrite_hints.rebase_orig_head = rebase_orig_head;
+            }
+            if pending.rewrite_hints.rebase_onto_head.is_none() {
+                pending.rewrite_hints.rebase_onto_head = rebase_onto_head;
+            }
+            merge_unique_in_order(
+                &mut pending.rewrite_hints.cherry_pick_source_commits,
+                cherry_pick_source_commits,
+            );
+        }
+    }
+
+    fn merge_pending_rewrite_hints(&mut self, root_sid: &str, hints: RewriteHints) {
+        if rewrite_hints_is_empty(&hints) {
+            return;
+        }
+        if let Some(pending) = self.state.pending.get_mut(root_sid) {
+            merge_unique_in_order(
+                &mut pending.rewrite_hints.rebase_source_commits,
+                hints.rebase_source_commits,
+            );
+            if pending.rewrite_hints.rebase_orig_head.is_none() {
+                pending.rewrite_hints.rebase_orig_head = hints.rebase_orig_head;
+            }
+            if pending.rewrite_hints.rebase_onto_head.is_none() {
+                pending.rewrite_hints.rebase_onto_head = hints.rebase_onto_head;
+            }
+            merge_unique_in_order(
+                &mut pending.rewrite_hints.cherry_pick_source_commits,
+                hints.cherry_pick_source_commits,
+            );
+        }
+    }
+
+    fn merge_pending_worktree_head_offsets(
+        &mut self,
+        root_sid: &str,
+        start_offset: Option<u64>,
+        end_offset: Option<u64>,
+    ) {
+        if let Some(pending) = self.state.pending.get_mut(root_sid) {
+            if let Some(start_offset) = start_offset {
+                match pending.worktree_head_start_offset {
+                    Some(existing) if existing <= start_offset => {}
+                    _ => pending.worktree_head_start_offset = Some(start_offset),
+                }
+            }
+            if let Some(end_offset) = end_offset {
+                match pending.worktree_head_end_offset {
+                    Some(existing) if existing >= end_offset => {}
+                    _ => pending.worktree_head_end_offset = Some(end_offset),
+                }
+            }
+        }
     }
 
     pub fn ingest_payload(
@@ -148,7 +240,15 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .and_then(Value::as_str)
             .ok_or_else(|| GitAiError::Generic("trace payload missing sid".to_string()))?;
         let root_sid = root_sid(sid).to_string();
+        if self.state.completed_roots.contains(&root_sid) {
+            return Ok(None);
+        }
         let ts = payload_timestamp_ns(payload)?;
+        self.merge_pending_rewrite_hints(&root_sid, payload_rewrite_hints(payload));
+        let (payload_head_start, payload_head_end) = payload_worktree_head_offsets(payload);
+        self.merge_pending_worktree_head_offsets(&root_sid, payload_head_start, payload_head_end);
+
+        self.maybe_refresh_pending_rewrite_hints_on_frame(&root_sid);
 
         match event {
             "start" => self.handle_start(payload, sid, &root_sid, ts),
@@ -156,6 +256,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             "cmd_name" => self.handle_cmd_name(payload, sid, &root_sid),
             "exec" => Ok(None),
             "exit" => self.handle_exit(payload, sid, &root_sid, ts),
+            "atexit" => self.handle_exit(payload, sid, &root_sid, ts),
             _ => Ok(None),
         }
     }
@@ -168,6 +269,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
         started_at_ns: u128,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
         if sid != root_sid {
+            return Ok(None);
+        }
+        if self.state.completed_roots.contains(root_sid) {
             return Ok(None);
         }
 
@@ -216,6 +320,11 @@ impl<B: GitBackend> TraceNormalizer<B> {
         } else {
             None
         };
+        let worktree_head_start_offset = if should_capture_mutation_state {
+            worktree.as_deref().and_then(worktree_head_reflog_offset)
+        } else {
+            None
+        };
         let pre_repo =
             if let (Some(worktree), Some(_family)) = (worktree.as_deref(), family_key.as_ref()) {
                 Some(self.backend.repo_context(worktree)?)
@@ -242,16 +351,33 @@ impl<B: GitBackend> TraceNormalizer<B> {
             post_repo: None,
             reflog_start_cut,
             reflog_end_cut: None,
+            worktree_head_start_offset,
+            worktree_head_end_offset: None,
             wrapper_mirror,
             saw_def_repo: false,
+            rewrite_hints: RewriteHints::default(),
         };
         self.state.pending.insert(root_sid.to_string(), pending);
-
-        if let Some(exit) = self.state.deferred_exits.remove(root_sid) {
-            return self.finalize_root_exit(root_sid, exit.exit_code, exit.finished_at_ns);
+        if let Some(prestart_cmd_name) = self.state.prestart_root_cmd_names.remove(root_sid)
+            && let Some(pending) = self.state.pending.get_mut(root_sid)
+            && pending.root_cmd_name.is_none()
+        {
+            pending.root_cmd_name = Some(prestart_cmd_name);
         }
+        self.refresh_pending_rewrite_hints(root_sid);
 
         Ok(None)
+    }
+
+    fn maybe_refresh_pending_rewrite_hints_on_frame(&mut self, root_sid: &str) {
+        let should_refresh = self
+            .state
+            .pending
+            .get(root_sid)
+            .is_some_and(pending_may_need_rewrite_hints);
+        if should_refresh {
+            self.refresh_pending_rewrite_hints(root_sid);
+        }
     }
 
     fn handle_def_repo(
@@ -319,6 +445,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             }
         }
         self.refresh_pending_mutation_capture(root_sid)?;
+        self.refresh_pending_rewrite_hints(root_sid);
         Ok(None)
     }
 
@@ -341,8 +468,14 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if sid == root_sid {
             if let Some(pending) = self.state.pending.get_mut(root_sid) {
                 pending.root_cmd_name = Some(cmd);
+            } else {
+                self.state
+                    .prestart_root_cmd_names
+                    .insert(root_sid.to_string(), cmd);
+                return Ok(None);
             }
             self.refresh_pending_mutation_capture(root_sid)?;
+            self.refresh_pending_rewrite_hints(root_sid);
             return Ok(None);
         }
 
@@ -350,6 +483,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             pending.observed_child_commands.push(cmd);
         }
         self.refresh_pending_mutation_capture(root_sid)?;
+        self.refresh_pending_rewrite_hints(root_sid);
         Ok(None)
     }
 
@@ -365,23 +499,38 @@ impl<B: GitBackend> TraceNormalizer<B> {
             let _ = finished_at_ns;
             return Ok(None);
         }
+        if self.state.completed_roots.contains(root_sid) {
+            return Ok(None);
+        }
 
         let exit_code = payload
             .get("code")
             .or_else(|| payload.get("exit_code"))
             .and_then(Value::as_i64)
             .unwrap_or(0) as i32;
+        let payload_hints = payload_rewrite_hints(payload);
+        let (payload_head_start, payload_head_end) = payload_worktree_head_offsets(payload);
 
         if !self.state.pending.contains_key(root_sid) {
-            self.state.deferred_exits.insert(
-                root_sid.to_string(),
-                RawExitFrame {
-                    exit_code,
-                    finished_at_ns,
-                },
+            let error = GitAiError::Generic(format!(
+                "trace lifecycle violation: root exit without root start sid={} code={}",
+                root_sid, exit_code
+            ));
+            observability::log_error(
+                &error,
+                Some(serde_json::json!({
+                    "component": "trace_normalizer",
+                    "phase": "handle_exit",
+                    "root_sid": root_sid,
+                    "exit_code": exit_code,
+                })),
             );
-            return Ok(None);
+            return Err(error);
         }
+
+        self.merge_pending_rewrite_hints(root_sid, payload_hints);
+        self.merge_pending_worktree_head_offsets(root_sid, payload_head_start, payload_head_end);
+        self.refresh_pending_rewrite_hints(root_sid);
 
         self.finalize_root_exit(root_sid, exit_code, finished_at_ns)
     }
@@ -444,29 +593,19 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if may_mutate_refs && let Some(family) = pending.family_key.as_ref() {
             pending.reflog_end_cut = Some(self.backend.reflog_cut(family)?);
         }
+        if may_mutate_refs && let Some(worktree) = pending.worktree.as_deref() {
+            pending.worktree_head_end_offset = worktree_head_reflog_offset(worktree);
+        }
 
         let mut confidence = Confidence::Low;
         let mut ref_changes = Vec::new();
         if let Some(family) = pending.family_key.as_ref()
             && may_mutate_refs
         {
-            let anchor_cut = self.state.last_reflog_cut_by_family.get(&family.0).cloned();
-
             if let Some(end) = pending.reflog_end_cut.as_ref() {
-                let start_cut = pending.reflog_start_cut.as_ref().or(anchor_cut.as_ref());
+                let start_cut = pending.reflog_start_cut.as_ref();
                 if let Some(start_cut) = start_cut {
                     ref_changes = self.backend.reflog_delta(family, start_cut, end)?;
-                    if ref_changes.is_empty()
-                        && exit_code == 0
-                        && let Some(anchor) = anchor_cut.as_ref()
-                        && anchor != start_cut
-                        && anchor != end
-                    {
-                        let anchored_changes = self.backend.reflog_delta(family, anchor, end)?;
-                        if !anchored_changes.is_empty() {
-                            ref_changes = anchored_changes;
-                        }
-                    }
                     confidence = Confidence::High;
                 } else if matches!(primary_command.as_deref(), Some("clone" | "init")) {
                     confidence = Confidence::High;
@@ -488,13 +627,23 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
 
         if may_mutate_refs
-            && exit_code == 0
-            && let (Some(family), Some(end)) =
-                (pending.family_key.as_ref(), pending.reflog_end_cut.as_ref())
+            && let (Some(worktree), Some(start), Some(end)) = (
+                pending.worktree.as_deref(),
+                pending.worktree_head_start_offset,
+                pending.worktree_head_end_offset,
+            )
         {
-            self.state
-                .last_reflog_cut_by_family
-                .insert(family.0.clone(), end.clone());
+            let head_changes = worktree_head_reflog_delta(worktree, start, end)?;
+            for change in head_changes {
+                let duplicate = ref_changes.iter().any(|existing| {
+                    existing.reference == change.reference
+                        && existing.old == change.old
+                        && existing.new == change.new
+                });
+                if !duplicate {
+                    ref_changes.push(change);
+                }
+            }
         }
 
         let mut family_key = pending.family_key.clone();
@@ -579,15 +728,255 @@ impl<B: GitBackend> TraceNormalizer<B> {
             pre_repo: pending.pre_repo,
             post_repo: pending.post_repo,
             ref_changes,
+            rewrite_hints: pending.rewrite_hints,
             confidence,
             wrapper_mirror: pending.wrapper_mirror,
         };
 
+        if self.state.completed_roots.len() > 8_192 {
+            self.state.completed_roots.clear();
+        }
+        self.state.completed_roots.insert(root_sid.to_string());
         let _ = self.state.sid_to_worktree.remove(root_sid);
         let _ = self.state.sid_to_family.remove(root_sid);
+        let _ = self.state.prestart_root_cmd_names.remove(root_sid);
 
         Ok(Some(normalized))
     }
+}
+
+fn merge_unique_in_order(existing: &mut Vec<String>, additions: Vec<String>) {
+    for value in additions {
+        if !existing.iter().any(|seen| seen == &value) {
+            existing.push(value);
+        }
+    }
+}
+
+fn merge_unique_oid(existing: &mut Vec<String>, value: Option<String>) {
+    if let Some(value) = value
+        && is_valid_oid(&value)
+        && !is_zero_oid(&value)
+        && !existing.iter().any(|seen| seen == &value)
+    {
+        existing.push(value);
+    }
+}
+
+fn git_dir_for_worktree(worktree: &Path) -> Option<PathBuf> {
+    let dot_git = worktree.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    if !dot_git.is_file() {
+        return None;
+    }
+    let contents = fs::read_to_string(&dot_git).ok()?;
+    let pointer = contents.strip_prefix("gitdir:")?.trim();
+    let candidate = PathBuf::from(pointer);
+    if candidate.is_absolute() {
+        return Some(candidate);
+    }
+    Some(worktree.join(candidate))
+}
+
+fn read_oid_file(path: &Path) -> Option<String> {
+    let value = fs::read_to_string(path).ok()?;
+    let value = value.trim().to_string();
+    if is_valid_oid(&value) {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn read_rebase_source_commits(git_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let rebase_merge = git_dir.join("rebase-merge");
+    if rebase_merge.exists() {
+        for file in ["git-rebase-todo.backup", "done", "git-rebase-todo"] {
+            let path = rebase_merge.join(file);
+            let content = match fs::read_to_string(path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            merge_unique_in_order(&mut out, parse_todo_commit_lines(&content));
+        }
+        merge_unique_oid(&mut out, read_oid_file(&git_dir.join("REBASE_HEAD")));
+    }
+
+    let rebase_apply = git_dir.join("rebase-apply");
+    if rebase_apply.exists() {
+        merge_unique_oid(&mut out, read_oid_file(&rebase_apply.join("original-commit")));
+        merge_unique_oid(&mut out, read_oid_file(&git_dir.join("REBASE_HEAD")));
+    }
+
+    out
+}
+
+fn read_cherry_pick_source_commits(git_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(head) = read_oid_file(&git_dir.join("CHERRY_PICK_HEAD")) {
+        out.push(head);
+    }
+    let sequencer_todo = git_dir.join("sequencer").join("todo");
+    if let Ok(content) = fs::read_to_string(sequencer_todo) {
+        merge_unique_in_order(&mut out, parse_todo_commit_lines(&content));
+    }
+    out
+}
+
+fn parse_todo_commit_lines(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let op = parts.next().unwrap_or_default();
+        let maybe_oid = parts.next().unwrap_or_default();
+        if !matches!(
+            op,
+            "pick" | "p" | "reword" | "r" | "edit" | "e" | "squash" | "s" | "fixup" | "f"
+        ) {
+            continue;
+        }
+        if is_valid_oid_or_abbrev(maybe_oid) {
+            out.push(maybe_oid.to_string());
+        }
+    }
+    out
+}
+
+fn is_valid_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_zero_oid(value: &str) -> bool {
+    is_valid_oid(value) && value.chars().all(|c| c == '0')
+}
+
+fn is_valid_oid_or_abbrev(value: &str) -> bool {
+    (7..=64).contains(&value.len()) && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn worktree_head_reflog_offset(worktree: &Path) -> Option<u64> {
+    let path = git_dir_for_worktree(worktree)?.join("logs").join("HEAD");
+    fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+fn worktree_head_reflog_delta(
+    worktree: &Path,
+    start_offset: u64,
+    end_offset: u64,
+) -> Result<Vec<RefChange>, GitAiError> {
+    if end_offset < start_offset {
+        return Err(GitAiError::Generic(format!(
+            "worktree HEAD reflog cut regressed ({} < {})",
+            end_offset, start_offset
+        )));
+    }
+    if end_offset == start_offset {
+        return Ok(Vec::new());
+    }
+
+    let path = git_dir_for_worktree(worktree)
+        .ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "missing gitdir for worktree while reading HEAD reflog: {}",
+                worktree.display()
+            ))
+        })?
+        .join("logs")
+        .join("HEAD");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let metadata = fs::metadata(&path)?;
+    if metadata.len() < end_offset {
+        return Err(GitAiError::Generic(format!(
+            "worktree HEAD reflog shorter than cut ({} < {}) at {}",
+            metadata.len(),
+            end_offset,
+            path.display()
+        )));
+    }
+
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+    let mut file = fs::File::open(&path)?;
+    file.seek(SeekFrom::Start(start_offset))?;
+    let reader = BufReader::new(file.take(end_offset.saturating_sub(start_offset)));
+    let mut out = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let head = line.split('\t').next().unwrap_or_default();
+        let mut parts = head.split_whitespace();
+        let Some(old) = parts.next().map(str::trim) else {
+            continue;
+        };
+        let Some(new) = parts.next().map(str::trim) else {
+            continue;
+        };
+        if !is_valid_oid(old) || !is_valid_oid(new) || old == new {
+            continue;
+        }
+        out.push(RefChange {
+            reference: "HEAD".to_string(),
+            old: old.to_string(),
+            new: new.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+fn rewrite_hints_is_empty(hints: &RewriteHints) -> bool {
+    hints.rebase_source_commits.is_empty()
+        && hints.rebase_orig_head.is_none()
+        && hints.rebase_onto_head.is_none()
+        && hints.cherry_pick_source_commits.is_empty()
+}
+
+fn payload_rewrite_hints(payload: &Value) -> RewriteHints {
+    payload
+        .get("git_ai_rewrite_hints")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<RewriteHints>(value).ok())
+        .unwrap_or_default()
+}
+
+fn payload_worktree_head_offsets(payload: &Value) -> (Option<u64>, Option<u64>) {
+    let start = payload
+        .get("git_ai_worktree_head_reflog_start")
+        .and_then(Value::as_u64);
+    let end = payload
+        .get("git_ai_worktree_head_reflog_end")
+        .and_then(Value::as_u64);
+    (start, end)
+}
+
+fn pending_may_need_rewrite_hints(pending: &PendingTraceCommand) -> bool {
+    if pending
+        .root_cmd_name
+        .as_deref()
+        .is_some_and(command_may_need_rewrite_hints)
+    {
+        return true;
+    }
+    if argv_primary_command(&pending.raw_argv)
+        .as_deref()
+        .is_some_and(command_may_need_rewrite_hints)
+    {
+        return true;
+    }
+    pending
+        .observed_child_commands
+        .iter()
+        .any(|value| command_may_need_rewrite_hints(value.as_str()))
+}
+
+fn command_may_need_rewrite_hints(command: &str) -> bool {
+    matches!(command, "rebase" | "cherry-pick" | "pull")
 }
 
 fn payload_timestamp_ns(payload: &Value) -> Result<u128, GitAiError> {
@@ -793,6 +1182,7 @@ mod tests {
     use super::*;
     use crate::daemon::domain::RefChange;
     use std::collections::HashMap;
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -808,7 +1198,6 @@ mod tests {
     struct MockBackend {
         family_by_worktree: Mutex<HashMap<String, FamilyKey>>,
         context_by_worktree: Mutex<HashMap<String, RepoContext>>,
-        refs_by_family: Mutex<HashMap<String, HashMap<String, String>>>,
         alias_by_worktree_command: Mutex<HashMap<String, HashMap<String, String>>>,
     }
 
@@ -859,16 +1248,6 @@ mod tests {
                 .get(&normalize_path_key(worktree))
                 .cloned()
                 .ok_or_else(|| GitAiError::Generic("context not found".to_string()))
-        }
-
-        fn ref_snapshot(&self, family: &FamilyKey) -> Result<HashMap<String, String>, GitAiError> {
-            Ok(self
-                .refs_by_family
-                .lock()
-                .unwrap()
-                .get(&family.0)
-                .cloned()
-                .unwrap_or_default())
         }
 
         fn reflog_cut(&self, _family: &FamilyKey) -> Result<ReflogCut, GitAiError> {
@@ -1057,6 +1436,34 @@ mod tests {
     }
 
     #[test]
+    fn normalizer_uses_atexit_when_exit_is_missing() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_family("/repo", "/repo/.git");
+        backend.set_context("/repo", "head-a");
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"s1-atexit",
+            "ts":1,
+            "argv":["git","status"],
+            "worktree":"/repo"
+        });
+        let atexit = serde_json::json!({
+            "event":"atexit",
+            "sid":"s1-atexit",
+            "ts":2,
+            "code":0
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
+        assert_eq!(cmd.root_sid, "s1-atexit");
+        assert_eq!(cmd.primary_command.as_deref(), Some("status"));
+        assert_eq!(cmd.exit_code, 0);
+    }
+
+    #[test]
     fn alias_commit_captures_mutation_state_at_start() {
         let backend = Arc::new(MockBackend::default());
         backend.set_family("/repo", "/repo/.git");
@@ -1091,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizer_handles_exit_before_start() {
+    fn normalizer_errors_on_exit_without_start() {
         let backend = Arc::new(MockBackend::default());
         backend.set_family("/repo", "/repo/.git");
         backend.set_context("/repo", "head-a");
@@ -1111,10 +1518,8 @@ mod tests {
             "worktree":"/repo"
         });
 
-        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
-        let cmd = normalizer.ingest_payload(&start).unwrap().unwrap();
-        assert_eq!(cmd.root_sid, "s2");
-        assert_eq!(cmd.finished_at_ns, 10);
+        assert!(normalizer.ingest_payload(&exit).is_err());
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
     }
 
     #[test]
@@ -1201,7 +1606,6 @@ mod tests {
         assert_eq!(cmd.primary_command.as_deref(), Some("notes"));
         assert_eq!(cmd.exit_code, 0);
         assert!(normalizer.state().pending.is_empty());
-        assert!(normalizer.state().deferred_exits.is_empty());
     }
 
     #[test]
@@ -1254,7 +1658,6 @@ mod tests {
         assert_eq!(cmd.primary_command.as_deref(), Some("notes"));
         assert_eq!(cmd.exit_code, 0);
         assert!(normalizer.state().pending.is_empty());
-        assert!(normalizer.state().deferred_exits.is_empty());
     }
 
     #[test]
@@ -1432,7 +1835,6 @@ mod tests {
         assert!(matches!(cmd_a.scope, CommandScope::Family(_)));
 
         assert!(normalizer.state().pending.is_empty());
-        assert!(normalizer.state().deferred_exits.is_empty());
     }
 
     #[test]
@@ -1483,5 +1885,58 @@ mod tests {
             Some("worker-head")
         );
         assert_eq!(cmd.worktree.as_deref(), Some(Path::new("/repo-worker-b")));
+    }
+
+    #[test]
+    fn captures_rebase_rewrite_hints_from_intermediate_trace_frames() {
+        let backend = Arc::new(MockBackend::default());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_path = temp.path().to_path_buf();
+        let repo_str = repo_path.to_string_lossy().to_string();
+        backend.set_family(&repo_str, &format!("{}/.git", repo_str));
+        backend.set_context(&repo_str, "1111111111111111111111111111111111111111");
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"s-rewrite-hints",
+            "ts":1,
+            "argv":["git","rebase","main"],
+            "worktree":repo_str,
+        });
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+
+        let rebase_dir = repo_path.join(".git").join("rebase-merge");
+        fs::create_dir_all(&rebase_dir).expect("create rebase dir");
+        fs::write(
+            rebase_dir.join("git-rebase-todo.backup"),
+            "pick aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa msg\npick bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb msg\n",
+        )
+        .expect("write todo");
+
+        let region = serde_json::json!({
+            "event":"region_enter",
+            "sid":"s-rewrite-hints",
+            "ts":2,
+            "category":"index",
+            "label":"refresh"
+        });
+        assert!(normalizer.ingest_payload(&region).unwrap().is_none());
+
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"s-rewrite-hints",
+            "ts":3,
+            "code":0
+        });
+        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+
+        assert_eq!(
+            cmd.rewrite_hints.rebase_source_commits,
+            vec![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            ]
+        );
     }
 }

@@ -18,8 +18,6 @@ pub trait GitBackend: Send + Sync + 'static {
 
     fn repo_context(&self, worktree: &Path) -> Result<RepoContext, GitAiError>;
 
-    fn ref_snapshot(&self, family: &FamilyKey) -> Result<HashMap<String, String>, GitAiError>;
-
     fn reflog_cut(&self, family: &FamilyKey) -> Result<ReflogCut, GitAiError>;
 
     fn reflog_delta(
@@ -91,61 +89,6 @@ impl GitBackend for SystemGitBackend {
             detached,
             cherry_pick_head,
         })
-    }
-
-    fn ref_snapshot(&self, family: &FamilyKey) -> Result<HashMap<String, String>, GitAiError> {
-        let git_dir = PathBuf::from(&family.0);
-        if !git_dir.exists() {
-            return Err(GitAiError::Generic(format!(
-                "family common_dir does not exist: {}",
-                family.0
-            )));
-        }
-
-        let output = run_git_allow_nonzero(
-            [
-                "--git-dir",
-                &family.0,
-                "for-each-ref",
-                "--format=%(refname)%00%(objectname)",
-            ]
-            .as_slice(),
-        )?;
-        if !output.status.success() {
-            return Err(git_error_for(
-                [
-                    "--git-dir",
-                    &family.0,
-                    "for-each-ref",
-                    "--format=%(refname)%00%(objectname)",
-                ]
-                .as_slice(),
-                &output,
-            ));
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut refs = HashMap::new();
-        for line in stdout.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let mut parts = line.splitn(2, '\0');
-            let reference = parts.next().unwrap_or_default().trim();
-            let oid = parts.next().unwrap_or_default().trim();
-            if reference.is_empty() || oid.is_empty() {
-                continue;
-            }
-            refs.insert(reference.to_string(), oid.to_string());
-        }
-
-        if let Ok(head_oid) = run_git_str_allow_nonzero(
-            ["--git-dir", &family.0, "rev-parse", "--verify", "HEAD"].as_slice(),
-        ) && !head_oid.is_empty()
-        {
-            refs.insert("HEAD".to_string(), head_oid);
-        }
-
-        Ok(refs)
     }
 
     fn reflog_cut(&self, family: &FamilyKey) -> Result<ReflogCut, GitAiError> {

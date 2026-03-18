@@ -223,7 +223,6 @@ impl DaemonProcess {
         let mut last_latest_seq = 0_u64;
         let mut last_backlog = 0_u64;
         let mut last_pending_roots = 0_u64;
-        let mut last_deferred_root_exits = 0_u64;
         let mut last_effect_queue_depth = 0_u64;
         let mut stable_idle_polls = 0_u8;
 
@@ -293,12 +292,6 @@ impl DaemonProcess {
                 .and_then(|v| v.get("pending_roots"))
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            let settled_deferred_root_exits = settled
-                .data
-                .as_ref()
-                .and_then(|v| v.get("deferred_root_exits"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
             let settled_effect_queue_depth = settled
                 .data
                 .as_ref()
@@ -307,12 +300,10 @@ impl DaemonProcess {
                 .unwrap_or(0);
             last_backlog = settled_backlog;
             last_pending_roots = settled_pending_roots;
-            last_deferred_root_exits = settled_deferred_root_exits;
             last_effect_queue_depth = settled_effect_queue_depth;
 
             if settled_backlog == 0
                 && settled_pending_roots == 0
-                && settled_deferred_root_exits == 0
                 && settled_effect_queue_depth == 0
                 && settled_latest == last_latest_seq
             {
@@ -329,12 +320,11 @@ impl DaemonProcess {
         }
 
         Err(format!(
-            "daemon did not settle for repo {} (latest seq={}, backlog={}, pending_roots={}, deferred_root_exits={}, effect_queue_depth={})",
+            "daemon did not settle for repo {} (latest seq={}, backlog={}, pending_roots={}, effect_queue_depth={})",
             repo_working_dir,
             last_latest_seq,
             last_backlog,
             last_pending_roots,
-            last_deferred_root_exits,
             last_effect_queue_depth
         ))
     }
