@@ -783,6 +783,32 @@ fn align_cherry_pick_commits(
     (source_commits, new_commits)
 }
 
+fn contiguous_commits_from_head(worktree: Option<&str>, head: &str, count: usize) -> Vec<String> {
+    if count == 0 || head.is_empty() {
+        return Vec::new();
+    }
+    let Some(worktree) = worktree else {
+        return Vec::new();
+    };
+
+    let mut commits = Vec::with_capacity(count);
+    for offset in (0..count).rev() {
+        let spec = if offset == 0 {
+            head.to_string()
+        } else {
+            format!("{}~{}", head, offset)
+        };
+        let Ok(sha) = run_git_capture(worktree, &["rev-parse", spec.as_str()]) else {
+            return Vec::new();
+        };
+        if !is_valid_oid(&sha) || is_zero_oid(&sha) {
+            return Vec::new();
+        }
+        commits.push(sha);
+    }
+    commits
+}
+
 fn repo_is_ancestor(
     repository: &crate::git::repository::Repository,
     ancestor: &str,
@@ -1543,6 +1569,16 @@ impl ActorDaemonCoordinator {
                         original_head,
                         new_head,
                     );
+                    if source_commits.len() > 1 && new_commits.len() != source_commits.len() {
+                        let recovered = contiguous_commits_from_head(
+                            worktree.as_deref(),
+                            new_head,
+                            source_commits.len(),
+                        );
+                        if recovered.len() == source_commits.len() {
+                            new_commits = recovered;
+                        }
+                    }
                     if new_commits.is_empty() {
                         new_commits.push(new_head.clone());
                     }
