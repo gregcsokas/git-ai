@@ -64,14 +64,18 @@ impl<B: GitBackend> TraceNormalizer<B> {
         root_cmd_name: Option<&str>,
         observed_child_commands: &[String],
         raw_argv: &[String],
-        _worktree: Option<&Path>,
-        _family_key: Option<&FamilyKey>,
+        worktree: Option<&Path>,
+        family_key: Option<&FamilyKey>,
     ) -> Result<Option<String>, GitAiError> {
         let argv_primary = argv_primary_command(raw_argv);
-        Ok(
-            select_primary_command(root_cmd_name, observed_child_commands, raw_argv)
-                .or_else(|| argv_primary.clone()),
-        )
+        let selected = select_primary_command(root_cmd_name, observed_child_commands, raw_argv)
+            .or_else(|| argv_primary.clone());
+        if let (Some(worktree), Some(_family)) = (worktree, family_key) {
+            if let Some(resolved) = self.backend.resolve_primary_command(worktree, raw_argv)? {
+                return Ok(Some(resolved));
+            }
+        }
+        Ok(selected)
     }
 
     fn refresh_pending_mutation_capture(&mut self, root_sid: &str) -> Result<(), GitAiError> {
@@ -748,8 +752,16 @@ mod tests {
     use super::*;
     use crate::daemon::domain::RefChange;
     use std::collections::HashMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
+
+    fn normalize_path_key_from_str(path: &str) -> String {
+        PathBuf::from(path).to_string_lossy().replace('\\', "/")
+    }
+
+    fn normalize_path_key(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
 
     #[derive(Default)]
     struct MockBackend {
@@ -761,15 +773,15 @@ mod tests {
 
     impl MockBackend {
         fn set_family(&self, worktree: &str, family: &str) {
-            self.family_by_worktree
-                .lock()
-                .unwrap()
-                .insert(worktree.to_string(), FamilyKey::new(family.to_string()));
+            self.family_by_worktree.lock().unwrap().insert(
+                normalize_path_key_from_str(worktree),
+                FamilyKey::new(family.to_string()),
+            );
         }
 
         fn set_context(&self, worktree: &str, head: &str) {
             self.context_by_worktree.lock().unwrap().insert(
-                worktree.to_string(),
+                normalize_path_key_from_str(worktree),
                 RepoContext {
                     head: Some(head.to_string()),
                     branch: Some("main".to_string()),
@@ -783,7 +795,7 @@ mod tests {
             self.alias_by_worktree_command
                 .lock()
                 .unwrap()
-                .entry(worktree.to_string())
+                .entry(normalize_path_key_from_str(worktree))
                 .or_default()
                 .insert(alias.to_string(), target_command.to_string());
         }
@@ -794,7 +806,7 @@ mod tests {
             self.family_by_worktree
                 .lock()
                 .unwrap()
-                .get(worktree.to_string_lossy().as_ref())
+                .get(&normalize_path_key(worktree))
                 .cloned()
                 .ok_or_else(|| GitAiError::Generic("family not found".to_string()))
         }
@@ -803,7 +815,7 @@ mod tests {
             self.context_by_worktree
                 .lock()
                 .unwrap()
-                .get(worktree.to_string_lossy().as_ref())
+                .get(&normalize_path_key(worktree))
                 .cloned()
                 .ok_or_else(|| GitAiError::Generic("context not found".to_string()))
         }
@@ -842,7 +854,7 @@ mod tests {
             let Some(command) = raw else {
                 return Ok(None);
             };
-            let worktree_key = worktree.to_string_lossy().to_string();
+            let worktree_key = normalize_path_key(worktree);
             let resolved = self
                 .alias_by_worktree_command
                 .lock()
