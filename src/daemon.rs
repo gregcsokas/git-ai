@@ -1827,6 +1827,59 @@ impl ActorDaemonCoordinator {
             rewrite_events.push(fallback);
         }
         if rewrite_events.is_empty() && cmd.exit_code == 0 {
+            if cmd.primary_command.as_deref() == Some("cherry-pick")
+                && cmd.invoked_args.iter().any(|arg| arg == "--continue")
+                && let Some(worktree) = cmd.worktree.as_ref()
+            {
+                let worktree = worktree.to_string_lossy();
+                let new_head = run_git_capture(&worktree, &["rev-parse", "HEAD"]).ok();
+                let original_head = run_git_capture(&worktree, &["rev-parse", "ORIG_HEAD"])
+                    .ok()
+                    .or_else(|| run_git_capture(&worktree, &["rev-parse", "HEAD@{1}"]).ok());
+                if let (Some(original_head), Some(new_head)) = (original_head, new_head)
+                    && is_valid_oid(&original_head)
+                    && is_valid_oid(&new_head)
+                    && !is_zero_oid(&original_head)
+                    && !is_zero_oid(&new_head)
+                    && original_head != new_head
+                {
+                    let mut source_commits = family
+                        .and_then(|key| self.take_pending_cherry_pick_sources_for_family(key).ok())
+                        .unwrap_or_default();
+                    if source_commits.is_empty()
+                        && let Some(source) = run_git_capture(
+                            &worktree,
+                            &["rev-parse", "--verify", "CHERRY_PICK_HEAD"],
+                        )
+                        .ok()
+                        .filter(|sha| is_valid_oid(sha) && !is_zero_oid(sha))
+                    {
+                        source_commits.push(source);
+                    }
+
+                    let mut new_commits = contiguous_commits_from_head(
+                        Some(worktree.as_ref()),
+                        &new_head,
+                        source_commits.len().max(1),
+                    );
+                    if new_commits.is_empty() {
+                        new_commits.push(new_head.clone());
+                    }
+                    let (source_commits, new_commits) =
+                        align_cherry_pick_commits(source_commits, new_commits);
+                    rewrite_events.push(RewriteLogEvent::cherry_pick_complete(
+                        CherryPickCompleteEvent::new(
+                            original_head,
+                            new_head,
+                            source_commits,
+                            new_commits,
+                        ),
+                    ));
+                    if let Some(key) = family {
+                        let _ = self.clear_pending_cherry_pick_sources_for_family(key);
+                    }
+                }
+            }
             if cmd.primary_command.as_deref() == Some("rebase")
                 && cmd.invoked_args.iter().any(|arg| arg == "--continue")
                 && let Some(worktree) = cmd.worktree.as_ref()
