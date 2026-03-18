@@ -1,12 +1,10 @@
 use crate::daemon::domain::NormalizedCommand;
-use crate::error::GitAiError;
 use crate::git::rewrite_log::RewriteLogEvent;
 
 pub(crate) fn fallback_commit_rewrite_event(cmd: &NormalizedCommand) -> Option<RewriteLogEvent> {
     if cmd.exit_code != 0 {
         return None;
     }
-    let worktree = cmd.worktree.as_ref()?.to_string_lossy().to_string();
     let command = cmd
         .primary_command
         .as_deref()
@@ -15,12 +13,28 @@ pub(crate) fn fallback_commit_rewrite_event(cmd: &NormalizedCommand) -> Option<R
         return None;
     }
 
-    let new_head = run_git_capture(&worktree, &["rev-parse", "HEAD"])
-        .ok()
+    let new_head = cmd
+        .post_repo
+        .as_ref()
+        .and_then(|repo| repo.head.clone())
+        .or_else(|| {
+            cmd.ref_changes
+                .iter()
+                .rfind(|change| change.reference == "HEAD")
+                .map(|change| change.new.clone())
+        })
         .filter(|sha| is_valid_oid(sha) && !is_zero_oid(sha))?;
     if cmd.invoked_args.iter().any(|arg| arg == "--amend") {
-        let old_head = run_git_capture(&worktree, &["rev-parse", "HEAD@{1}"])
-            .ok()
+        let old_head = cmd
+            .pre_repo
+            .as_ref()
+            .and_then(|repo| repo.head.clone())
+            .or_else(|| {
+                cmd.ref_changes
+                    .iter()
+                    .find(|change| change.reference == "HEAD")
+                    .map(|change| change.old.clone())
+            })
             .filter(|sha| is_valid_oid(sha) && !is_zero_oid(sha));
         if let Some(old_head) = old_head
             && old_head != new_head
@@ -30,30 +44,22 @@ pub(crate) fn fallback_commit_rewrite_event(cmd: &NormalizedCommand) -> Option<R
         return None;
     }
 
-    let base = run_git_capture(&worktree, &["rev-parse", "HEAD^"])
-        .ok()
+    let base = cmd
+        .pre_repo
+        .as_ref()
+        .and_then(|repo| repo.head.clone())
+        .or_else(|| {
+            cmd.ref_changes
+                .iter()
+                .find(|change| change.reference == "HEAD")
+                .map(|change| change.old.clone())
+        })
         .filter(|sha| is_valid_oid(sha) && !is_zero_oid(sha) && sha != &new_head);
 
     // Root commits on fresh branches do not have a parent commit.
     // Preserve the rewrite event with `base_commit = None` so replay treats
     // the commit as based on `initial`.
     Some(RewriteLogEvent::commit(base, new_head))
-}
-
-fn run_git_capture(worktree: &str, args: &[&str]) -> Result<String, GitAiError> {
-    let mut command = std::process::Command::new(crate::config::Config::get().git_cmd());
-    command.arg("-C").arg(worktree);
-    command.args(args);
-    let output = command.output()?;
-    if !output.status.success() {
-        return Err(GitAiError::Generic(format!(
-            "git {:?} failed in {}: {}",
-            args,
-            worktree,
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn is_valid_oid(oid: &str) -> bool {
@@ -70,48 +76,16 @@ mod tests {
     use crate::daemon::domain::{
         CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext,
     };
-    use std::path::Path;
-    use std::process::Command;
-
-    fn run_git(repo: &Path, args: &[&str]) -> String {
-        let output = Command::new(crate::config::Config::get().git_cmd())
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
 
     #[test]
     fn fallback_prefers_primary_commit_over_invoked_alias() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path();
-
-        run_git(repo, &["init"]);
-        run_git(repo, &["config", "user.name", "Test User"]);
-        run_git(repo, &["config", "user.email", "test@example.com"]);
-
-        std::fs::write(repo.join("file.txt"), "base\n").expect("write base");
-        run_git(repo, &["add", "file.txt"]);
-        run_git(repo, &["commit", "-m", "base"]);
-        let base = run_git(repo, &["rev-parse", "HEAD"]);
-
-        std::fs::write(repo.join("file.txt"), "base\nnext\n").expect("write next");
-        run_git(repo, &["add", "file.txt"]);
-        run_git(repo, &["commit", "-m", "next"]);
-        let head = run_git(repo, &["rev-parse", "HEAD"]);
+        let base = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
 
         let cmd = NormalizedCommand {
             scope: CommandScope::Family(FamilyKey::new("family:/repo")),
             family_key: Some(FamilyKey::new("family:/repo")),
-            worktree: Some(repo.to_path_buf()),
+            worktree: Some(std::path::PathBuf::from("/repo")),
             root_sid: "sid".to_string(),
             raw_argv: vec![
                 "git".to_string(),

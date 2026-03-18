@@ -362,7 +362,7 @@ fn discover_reflog_files(
             Err(_) => continue,
         };
         let reference = relative.to_string_lossy().replace('\\', "/");
-        if reference == "HEAD" || reference.starts_with("refs/") {
+        if reference == "HEAD" || reference == "ORIG_HEAD" || reference.starts_with("refs/") {
             let offset = fs::metadata(&path)?.len();
             out.insert(reference, offset);
         }
@@ -386,7 +386,7 @@ fn parse_reflog_line(reference: &str, line: &str) -> Option<RefChange> {
 }
 
 fn is_valid_oid(value: &str) -> bool {
-    value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
+    matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn is_git_binary(token: &str) -> bool {
