@@ -68,8 +68,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
         _family_key: Option<&FamilyKey>,
     ) -> Result<Option<String>, GitAiError> {
         let argv_primary = argv_primary_command(raw_argv);
-        Ok(select_primary_command(root_cmd_name, observed_child_commands, raw_argv)
-            .or_else(|| argv_primary.clone()))
+        Ok(
+            select_primary_command(root_cmd_name, observed_child_commands, raw_argv)
+                .or_else(|| argv_primary.clone()),
+        )
     }
 
     fn refresh_pending_mutation_capture(&mut self, root_sid: &str) -> Result<(), GitAiError> {
@@ -394,9 +396,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
 
         let may_mutate_refs = command_may_mutate_refs(primary_command.as_deref());
-        if may_mutate_refs
-            && let Some(family) = pending.family_key.as_ref()
-        {
+        if may_mutate_refs && let Some(family) = pending.family_key.as_ref() {
             pending.reflog_end_cut = Some(self.backend.reflog_cut(family)?);
         }
 
@@ -405,17 +405,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if let Some(family) = pending.family_key.as_ref()
             && may_mutate_refs
         {
-            let anchor_cut = self
-                .state
-                .last_reflog_cut_by_family
-                .get(&family.0)
-                .cloned();
+            let anchor_cut = self.state.last_reflog_cut_by_family.get(&family.0).cloned();
 
             if let Some(end) = pending.reflog_end_cut.as_ref() {
-                let start_cut = pending
-                    .reflog_start_cut
-                    .as_ref()
-                    .or(anchor_cut.as_ref());
+                let start_cut = pending.reflog_start_cut.as_ref().or(anchor_cut.as_ref());
                 if let Some(start_cut) = start_cut {
                     ref_changes = self.backend.reflog_delta(family, start_cut, end)?;
                     if ref_changes.is_empty()

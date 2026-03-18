@@ -1026,7 +1026,10 @@ impl ActorDaemonCoordinator {
         let map = self.ordered_side_effects_by_family.lock().map_err(|_| {
             GitAiError::Generic("ordered side effect map lock poisoned".to_string())
         })?;
-        Ok(map.get(family).map(|state| state.pending.len()).unwrap_or(0))
+        Ok(map
+            .get(family)
+            .map(|state| state.pending.len())
+            .unwrap_or(0))
     }
 
     fn trace_connection_opened(&self) {
@@ -1776,7 +1779,9 @@ impl ActorDaemonCoordinator {
 
         let mut rewrite_events =
             if cmd.exit_code == 0 && cmd.primary_command.as_deref() == Some("commit") {
-                fallback_commit_rewrite_event(cmd).into_iter().collect::<Vec<_>>()
+                fallback_commit_rewrite_event(cmd)
+                    .into_iter()
+                    .collect::<Vec<_>>()
             } else {
                 self.rewrite_events_from_semantic_events(family, cmd, events)
             };
