@@ -1792,6 +1792,38 @@ impl ActorDaemonCoordinator {
         }
         if rewrite_events.is_empty() && cmd.exit_code == 0 {
             if cmd.primary_command.as_deref() == Some("rebase")
+                && cmd.invoked_args.iter().any(|arg| arg == "--continue")
+                && let Some(worktree) = cmd.worktree.as_ref()
+            {
+                let worktree = worktree.to_string_lossy();
+                let new_head = run_git_capture(&worktree, &["rev-parse", "HEAD"]).ok();
+                let old_head = run_git_capture(&worktree, &["rev-parse", "ORIG_HEAD"])
+                    .ok()
+                    .or_else(|| run_git_capture(&worktree, &["rev-parse", "HEAD@{1}"]).ok());
+                if let (Some(old_head), Some(new_head)) = (old_head, new_head)
+                    && is_valid_oid(&old_head)
+                    && is_valid_oid(&new_head)
+                    && !is_zero_oid(&old_head)
+                    && !is_zero_oid(&new_head)
+                    && old_head != new_head
+                {
+                    let (original_commits, new_commits) = build_rebase_mappings_best_effort(
+                        Some(worktree.as_ref()),
+                        &old_head,
+                        &new_head,
+                    );
+                    rewrite_events.push(RewriteLogEvent::rebase_complete(
+                        RebaseCompleteEvent::new(
+                            old_head,
+                            new_head,
+                            false,
+                            original_commits,
+                            new_commits,
+                        ),
+                    ));
+                }
+            }
+            if cmd.primary_command.as_deref() == Some("rebase")
                 && cmd.invoked_args.iter().any(|arg| arg == "--abort")
                 && let Some(worktree) = cmd.worktree.as_ref()
                 && let Ok(head) =
