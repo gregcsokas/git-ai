@@ -248,9 +248,7 @@ fn head_change(
                     .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
             }),
     );
-    let Some(old_head) = old_head else {
-        return None;
-    };
+    let old_head = old_head?;
 
     if old_head == new_head {
         if let Some(alternate_old_head) = old_head_from_refs(cmd, refs)

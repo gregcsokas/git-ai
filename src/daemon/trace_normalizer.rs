@@ -113,10 +113,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
             None
         };
 
-        if let Some(pending) = self.state.pending.get_mut(root_sid) {
-            if pending.reflog_start_cut.is_none() {
-                pending.reflog_start_cut = reflog_start_cut;
-            }
+        if let Some(pending) = self.state.pending.get_mut(root_sid)
+            && pending.reflog_start_cut.is_none()
+        {
+            pending.reflog_start_cut = reflog_start_cut;
         }
         Ok(())
     }
@@ -394,10 +394,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
 
         let may_mutate_refs = command_may_mutate_refs(primary_command.as_deref());
-        if may_mutate_refs {
-            if let Some(family) = pending.family_key.as_ref() {
-                pending.reflog_end_cut = Some(self.backend.reflog_cut(family)?);
-            }
+        if may_mutate_refs
+            && let Some(family) = pending.family_key.as_ref()
+        {
+            pending.reflog_end_cut = Some(self.backend.reflog_cut(family)?);
         }
 
         let mut confidence = Confidence::Low;
