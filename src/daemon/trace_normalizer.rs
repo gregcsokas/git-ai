@@ -70,7 +70,15 @@ impl<B: GitBackend> TraceNormalizer<B> {
         let argv_primary = argv_primary_command(raw_argv);
         let selected = select_primary_command(root_cmd_name, observed_child_commands, raw_argv)
             .or_else(|| argv_primary.clone());
-        if let (Some(worktree), Some(_family)) = (worktree, family_key)
+        let should_resolve_alias = match (&selected, &argv_primary) {
+            // Keep child/root-derived command if it differs from the argv command.
+            // Alias resolution should only rewrite the invoked command token.
+            (Some(selected_cmd), Some(argv_cmd)) => selected_cmd == argv_cmd,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if should_resolve_alias
+            && let (Some(worktree), Some(_family)) = (worktree, family_key)
             && let Some(resolved) = self.backend.resolve_primary_command(worktree, raw_argv)?
         {
             return Ok(Some(resolved));
@@ -1043,10 +1051,10 @@ mod tests {
             .pending
             .get("alias-commit")
             .expect("pending alias command");
-        assert!(pending.reflog_start_cut.is_none());
+        assert!(pending.reflog_start_cut.is_some());
 
         let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
-        assert_eq!(cmd.primary_command.as_deref(), Some("ci"));
+        assert_eq!(cmd.primary_command.as_deref(), Some("commit"));
     }
 
     #[test]
