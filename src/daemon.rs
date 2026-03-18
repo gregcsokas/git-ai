@@ -1421,6 +1421,20 @@ impl ActorDaemonCoordinator {
         (old, new)
     }
 
+    fn resolve_pull_rebase_heads_from_worktree(worktree: &str) -> Option<(String, String)> {
+        let old_head = run_git_capture(worktree, &["rev-parse", "ORIG_HEAD"]).ok()?;
+        let new_head = run_git_capture(worktree, &["rev-parse", "HEAD"]).ok()?;
+        if !is_valid_oid(&old_head)
+            || !is_valid_oid(&new_head)
+            || is_zero_oid(&old_head)
+            || is_zero_oid(&new_head)
+            || old_head == new_head
+        {
+            return None;
+        }
+        Some((old_head, new_head))
+    }
+
     fn stash_sha_from_ref_changes(
         cmd: &crate::daemon::domain::NormalizedCommand,
     ) -> Option<String> {
@@ -1647,7 +1661,19 @@ impl ActorDaemonCoordinator {
                     )));
                 }
                 crate::daemon::domain::SemanticEvent::PullCompleted { strategy, .. } => {
-                    let (old_head, new_head) = Self::resolve_heads_for_command(cmd);
+                    let (mut old_head, mut new_head) = Self::resolve_heads_for_command(cmd);
+                    if matches!(
+                        strategy,
+                        crate::daemon::domain::PullStrategy::Rebase
+                            | crate::daemon::domain::PullStrategy::RebaseMerges
+                    ) && (old_head.is_empty() || new_head.is_empty() || old_head == new_head)
+                        && let Some(worktree) = worktree.as_deref()
+                        && let Some((derived_old, derived_new)) =
+                            Self::resolve_pull_rebase_heads_from_worktree(worktree)
+                    {
+                        old_head = derived_old;
+                        new_head = derived_new;
+                    }
                     if old_head.is_empty() || new_head.is_empty() || old_head == new_head {
                         continue;
                     }

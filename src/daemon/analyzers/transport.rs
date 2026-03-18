@@ -24,7 +24,7 @@ impl CommandAnalyzer for TransportAnalyzer {
             }),
             "pull" => events.push(SemanticEvent::PullCompleted {
                 remote: first_positional(&args),
-                strategy: infer_pull_strategy(&args),
+                strategy: infer_pull_strategy(cmd, &args),
             }),
             "push" => events.push(SemanticEvent::PushCompleted {
                 remote: first_positional(&args),
@@ -78,20 +78,47 @@ fn first_positional(args: &[String]) -> Option<String> {
     args.iter().find(|arg| !arg.starts_with('-')).cloned()
 }
 
-fn infer_pull_strategy(args: &[String]) -> PullStrategy {
+fn infer_pull_strategy(cmd: &NormalizedCommand, args: &[String]) -> PullStrategy {
+    if let Some(strategy) = infer_pull_strategy_from_args(args) {
+        return strategy;
+    }
+    let raw_args = normalized_args(&cmd.raw_argv);
+    if let Some(strategy) = infer_pull_strategy_from_args(&raw_args) {
+        return strategy;
+    }
+    if cmd
+        .observed_child_commands
+        .iter()
+        .any(|child| child == "rebase")
+    {
+        return PullStrategy::Rebase;
+    }
+    PullStrategy::Merge
+}
+
+fn infer_pull_strategy_from_args(args: &[String]) -> Option<PullStrategy> {
+    if args
+        .iter()
+        .any(|arg| arg == "--no-rebase" || arg == "--rebase=false")
+    {
+        return Some(PullStrategy::Merge);
+    }
     if args.iter().any(|arg| arg == "--ff-only") {
-        return PullStrategy::FastForwardOnly;
+        return Some(PullStrategy::FastForwardOnly);
     }
     if args
         .iter()
         .any(|arg| arg == "--rebase=merges" || arg == "--rebase-merges")
     {
-        return PullStrategy::RebaseMerges;
+        return Some(PullStrategy::RebaseMerges);
     }
-    if args.iter().any(|arg| arg == "--rebase") {
-        return PullStrategy::Rebase;
+    if args
+        .iter()
+        .any(|arg| arg == "--rebase" || arg == "--rebase=true")
+    {
+        return Some(PullStrategy::Rebase);
     }
-    PullStrategy::Merge
+    None
 }
 
 fn infer_clone_target(args: &[String]) -> Option<PathBuf> {
