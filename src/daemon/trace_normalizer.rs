@@ -412,6 +412,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 if let Some(start_cut) = start_cut {
                     ref_changes = self.backend.reflog_delta(family, start_cut, end)?;
                     if ref_changes.is_empty()
+                        && exit_code == 0
                         && let Some(anchor) = anchor_cut.as_ref()
                         && anchor != start_cut
                         && anchor != end
@@ -442,6 +443,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
 
         if may_mutate_refs
+            && exit_code == 0
             && let (Some(family), Some(end)) =
                 (pending.family_key.as_ref(), pending.reflog_end_cut.as_ref())
         {
