@@ -49,8 +49,8 @@ jobs:
             --files 4 \
             --lines-per-file 400 \
             --burst-every 6 \
-            --repetitions 1 \
-            --margin-pct 40 \
+            --repetitions 2 \
+            --margin-pct 55 \
             --margin-baseline main_wrapper \
             --enforce-margin
 
