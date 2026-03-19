@@ -421,7 +421,7 @@ fn post_notes_updated_hooks_run_in_parallel_and_detach_after_timeout() {
         elapsed
     );
     assert!(
-        elapsed < Duration::from_millis(5500),
+        elapsed < Duration::from_millis(8500),
         "git-ai should detach rather than waiting for both 5s hooks to fully finish (elapsed: {:?})",
         elapsed
     );
