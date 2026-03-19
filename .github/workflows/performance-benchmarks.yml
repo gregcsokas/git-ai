@@ -51,7 +51,7 @@ jobs:
             --burst-every 6 \
             --repetitions 1 \
             --margin-pct 30 \
-            --margin-baseline current_wrapper \
+            --margin-baseline main_wrapper \
             --enforce-margin
 
       - name: Upload smoke benchmark artifacts
