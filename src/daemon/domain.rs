@@ -37,22 +37,11 @@ pub struct RefChange {
     pub new: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct RewriteHints {
-    #[serde(default)]
-    pub rebase_source_commits: Vec<String>,
-    pub rebase_orig_head: Option<String>,
-    pub rebase_onto_head: Option<String>,
-    #[serde(default)]
-    pub cherry_pick_source_commits: Vec<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoContext {
     pub head: Option<String>,
     pub branch: Option<String>,
     pub detached: bool,
-    pub cherry_pick_head: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,9 +60,8 @@ pub struct NormalizedCommand {
     pub finished_at_ns: u128,
     pub pre_repo: Option<RepoContext>,
     pub post_repo: Option<RepoContext>,
+    pub inflight_rebase_original_head: Option<String>,
     pub ref_changes: Vec<RefChange>,
-    #[serde(default)]
-    pub rewrite_hints: RewriteHints,
     pub confidence: Confidence,
     pub wrapper_mirror: bool,
 }

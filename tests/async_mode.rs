@@ -1,6 +1,6 @@
 mod repos;
 
-use git_ai::daemon::{ControlRequest, send_control_request};
+use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};
 use repos::test_repo::{GitTestMode, TestRepo, real_git_executable};
 use std::fs;
 use std::path::PathBuf;
@@ -41,19 +41,11 @@ fn read_global_git_config(repo: &TestRepo, key: &str) -> Option<String> {
 }
 
 fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
-    repo.test_home_path()
-        .join(".git-ai")
-        .join("internal")
-        .join("daemon")
-        .join("trace2.sock")
+    DaemonConfig::from_home(repo.test_home_path()).trace_socket_path
 }
 
 fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
-    repo.test_home_path()
-        .join(".git-ai")
-        .join("internal")
-        .join("daemon")
-        .join("control.sock")
+    DaemonConfig::from_home(repo.test_home_path()).control_socket_path
 }
 
 fn wait_for_daemon_sockets(repo: &TestRepo) {
@@ -120,12 +112,7 @@ fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
         "async preflight should run silently without trace2 config output"
     );
 
-    let expected_trace_socket = repo
-        .test_home_path()
-        .join(".git-ai")
-        .join("internal")
-        .join("daemon")
-        .join("trace2.sock");
+    let expected_trace_socket = daemon_trace_socket_path(&repo);
     let expected_target = format!("af_unix:stream:{}", expected_trace_socket.to_string_lossy());
 
     let target = read_global_git_config(&repo, "trace2.eventTarget");

@@ -1,7 +1,7 @@
 #[macro_use]
 mod repos;
 
-use git_ai::daemon::{ControlRequest, send_control_request};
+use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};
 use repos::test_repo::{GitTestMode, real_git_executable};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,11 +35,7 @@ fn run_git(args: &[&str]) -> String {
 }
 
 fn daemon_control_socket_path(test_home: &Path) -> PathBuf {
-    test_home
-        .join(".git-ai")
-        .join("internal")
-        .join("daemon")
-        .join("control.sock")
+    DaemonConfig::from_home(test_home).control_socket_path
 }
 
 fn sync_daemon_repo_if_needed(mode: GitTestMode, test_home: &Path, repo_working_dir: &Path) {

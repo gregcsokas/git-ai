@@ -165,8 +165,8 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            inflight_rebase_original_head: None,
             ref_changes: Vec::new(),
-            rewrite_hints: Default::default(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         }

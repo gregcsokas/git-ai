@@ -2,7 +2,7 @@
 mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::daemon::{ControlRequest, ControlResponse, DaemonLock, send_control_request};
+use git_ai::daemon::{ControlRequest, ControlResponse, DaemonConfig, DaemonLock, send_control_request};
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
@@ -28,27 +28,15 @@ fn git_common_dir(repo: &TestRepo) -> PathBuf {
 }
 
 fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
-    repo.test_home_path()
-        .join(".git-ai")
-        .join("internal")
-        .join("daemon")
-        .join("control.sock")
+    DaemonConfig::from_home(repo.test_home_path()).control_socket_path
 }
 
 fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
-    repo.test_home_path()
-        .join(".git-ai")
-        .join("internal")
-        .join("daemon")
-        .join("trace2.sock")
+    DaemonConfig::from_home(repo.test_home_path()).trace_socket_path
 }
 
 fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
-    repo.test_home_path()
-        .join(".git-ai")
-        .join("internal")
-        .join("daemon")
-        .join("daemon.lock")
+    DaemonConfig::from_home(repo.test_home_path()).lock_path
 }
 
 fn repo_workdir_string(repo: &TestRepo) -> String {

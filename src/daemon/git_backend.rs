@@ -60,7 +60,6 @@ impl GitBackend for SystemGitBackend {
 
     fn repo_context(&self, worktree: &Path) -> Result<RepoContext, GitAiError> {
         let head = rev_parse_head(worktree).ok();
-        let cherry_pick_head = rev_parse_optional(worktree, "CHERRY_PICK_HEAD");
         let symbolic = run_git_allow_nonzero(
             [
                 "-C",
@@ -87,7 +86,6 @@ impl GitBackend for SystemGitBackend {
             head,
             branch,
             detached,
-            cherry_pick_head,
         })
     }
 
@@ -229,25 +227,6 @@ fn rev_parse_head(worktree: &Path) -> Result<String, GitAiError> {
         ]
         .as_slice(),
     )
-}
-
-fn rev_parse_optional(worktree: &Path, rev: &str) -> Option<String> {
-    let output = run_git_allow_nonzero(
-        [
-            "-C",
-            &worktree.to_string_lossy(),
-            "rev-parse",
-            "--verify",
-            rev,
-        ]
-        .as_slice(),
-    )
-    .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() { None } else { Some(value) }
 }
 
 fn run_git_allow_nonzero(args: &[&str]) -> Result<std::process::Output, GitAiError> {

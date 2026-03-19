@@ -172,12 +172,12 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            inflight_rebase_original_head: None,
             ref_changes: vec![RefChange {
                 reference: "refs/heads/main".to_string(),
                 old: "".to_string(),
                 new: "abc".to_string(),
             }],
-            rewrite_hints: Default::default(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         }
@@ -210,7 +210,6 @@ mod tests {
             head: Some("def".to_string()),
             branch: Some("main".to_string()),
             detached: false,
-            cherry_pick_head: None,
         });
 
         let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();

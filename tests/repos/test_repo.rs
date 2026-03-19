@@ -3,7 +3,7 @@
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::stats::CommitStats;
 use git_ai::config::ConfigPatch;
-use git_ai::daemon::{ControlRequest, send_control_request};
+use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};
 use git_ai::feature_flags::FeatureFlags;
 use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
@@ -71,19 +71,11 @@ struct DaemonProcess {
 
 impl DaemonProcess {
     fn control_socket_path_for_home(test_home: &Path) -> PathBuf {
-        test_home
-            .join(".git-ai")
-            .join("internal")
-            .join("daemon")
-            .join("control.sock")
+        DaemonConfig::from_home(test_home).control_socket_path
     }
 
     fn trace_socket_path_for_home(test_home: &Path) -> PathBuf {
-        test_home
-            .join(".git-ai")
-            .join("internal")
-            .join("daemon")
-            .join("trace2.sock")
+        DaemonConfig::from_home(test_home).trace_socket_path
     }
 
     fn start(repo_path: &Path, test_home: &Path, test_db_path: &Path) -> Self {
@@ -145,7 +137,10 @@ impl DaemonProcess {
 
     fn wait_until_ready(&self, repo_path: &Path, child: &mut Child) -> Result<(), String> {
         let repo_working_dir = repo_path.to_string_lossy().to_string();
-        for _ in 0..600 {
+        let mut last_status_error: Option<String> = None;
+        let mut saw_control_socket = false;
+        let mut saw_trace_socket = false;
+        for _ in 0..1200 {
             if let Some(status) = child
                 .try_wait()
                 .map_err(|e| format!("failed polling daemon child status: {}", e))?
@@ -174,15 +169,22 @@ impl DaemonProcess {
                 }
             }
 
-            if self.control_socket_path.exists() && self.trace_socket_path.exists() {
+            let control_exists = self.control_socket_path.exists();
+            let trace_exists = self.trace_socket_path.exists();
+            saw_control_socket |= control_exists;
+            saw_trace_socket |= trace_exists;
+            if control_exists && trace_exists {
                 let status = send_control_request(
                     &self.control_socket_path,
                     &ControlRequest::StatusFamily {
                         repo_working_dir: repo_working_dir.clone(),
                     },
                 );
-                if status.is_ok() {
-                    return Ok(());
+                match status {
+                    Ok(_) => return Ok(()),
+                    Err(error) => {
+                        last_status_error = Some(error.to_string());
+                    }
                 }
             }
             thread::sleep(Duration::from_millis(25));
@@ -190,9 +192,14 @@ impl DaemonProcess {
 
         let stderr_tail = self.read_stderr_tail();
         Err(format!(
-            "daemon did not become ready at {} (trace socket: {})",
+            "daemon did not become ready at {} (trace socket: {}, saw_control_socket={}, saw_trace_socket={}, last_status_error={})",
             self.control_socket_path.display(),
-            self.trace_socket_path.display()
+            self.trace_socket_path.display(),
+            saw_control_socket,
+            saw_trace_socket,
+            last_status_error
+                .as_deref()
+                .unwrap_or("none")
         ) + &stderr_tail)
     }
 
@@ -1862,14 +1869,15 @@ fn compile_binary() -> PathBuf {
             .into_owned()
     });
     #[cfg(windows)]
-    {
-        PathBuf::from(target_dir).join("debug/git-ai.exe")
-    }
-
+    let binary_path = PathBuf::from(&target_dir).join("debug/git-ai.exe");
     #[cfg(not(windows))]
-    {
-        PathBuf::from(target_dir).join("debug/git-ai")
-    }
+    let binary_path = PathBuf::from(&target_dir).join("debug/git-ai");
+
+    // Warm the freshly built binary once so the first daemon startups in highly parallel
+    // suites don't all pay cold process initialization overhead at the same time.
+    let _ = Command::new(&binary_path).arg("--version").output();
+
+    binary_path
 }
 
 pub fn get_binary_path() -> &'static PathBuf {

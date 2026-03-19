@@ -20,8 +20,10 @@ impl CommandAnalyzer for HistoryAnalyzer {
         let mut events = Vec::new();
         match name {
             "commit" => {
+                let amend = args.iter().any(|arg| arg == "--amend");
+                let post_head = non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()));
                 if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
-                    if args.iter().any(|arg| arg == "--amend") {
+                    if amend {
                         events.push(SemanticEvent::CommitAmended { old_head, new_head });
                     } else {
                         events.push(SemanticEvent::CommitCreated {
@@ -30,12 +32,16 @@ impl CommandAnalyzer for HistoryAnalyzer {
                         });
                     }
                 } else if cmd.exit_code == 0
-                    && let Some(new_head) =
-                        non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
+                    && let Some(new_head) = post_head
                 {
-                    if args.iter().any(|arg| arg == "--amend") {
+                    if amend {
                         let old_head =
-                            non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
+                            old_head_from_branch_ref_changes(cmd)
+                                .or_else(|| {
+                                    non_empty_opt(
+                                        cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()),
+                                    )
+                                })
                                 .or_else(|| old_head_from_refs(cmd, state.refs))
                                 .filter(|old| old != &new_head);
                         if let Some(old_head) = old_head {
@@ -180,6 +186,21 @@ fn head_change(
     cmd: &NormalizedCommand,
     refs: &std::collections::HashMap<String, String>,
 ) -> Option<(String, String)> {
+    if let Some(branch_ref) = branch_ref_hint(cmd) {
+        let branch_specific_span = cmd
+            .ref_changes
+            .iter()
+            .filter(|change| {
+                change.reference == branch_ref
+                    && !change.new.trim().is_empty()
+                    && change.old.trim() != change.new.trim()
+            })
+            .collect::<Vec<_>>();
+        if let Some((old_head, new_head)) = change_span(&branch_specific_span) {
+            return Some((old_head, new_head));
+        }
+    }
+
     let preferred_span = cmd
         .ref_changes
         .iter()
@@ -257,6 +278,32 @@ fn head_change(
     Some((old_head, new_head))
 }
 
+fn branch_ref_hint(cmd: &NormalizedCommand) -> Option<String> {
+    let branch = cmd
+        .pre_repo
+        .as_ref()
+        .and_then(|repo| repo.branch.clone())
+        .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.branch.clone()))?;
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return None;
+    }
+    if branch.starts_with("refs/") {
+        Some(branch.to_string())
+    } else {
+        Some(format!("refs/heads/{}", branch))
+    }
+}
+
+fn old_head_from_branch_ref_changes(cmd: &NormalizedCommand) -> Option<String> {
+    let branch_ref = branch_ref_hint(cmd)?;
+    cmd.ref_changes
+        .iter()
+        .find(|change| change.reference == branch_ref)
+        .and_then(|change| non_empty(change.old.clone()))
+        .filter(|old| !is_zero_oid(old))
+}
+
 fn old_head_from_refs(
     cmd: &NormalizedCommand,
     refs: &std::collections::HashMap<String, String>,
@@ -279,17 +326,19 @@ fn rebase_change(
     cmd: &NormalizedCommand,
     refs: &std::collections::HashMap<String, String>,
 ) -> Option<(String, String)> {
+    if let Some((old_head, new_head)) = explicit_rebase_branch_change(cmd) {
+        return Some((old_head, new_head));
+    }
+
+    if let Some((old_head, new_head)) = inferred_rebase_branch_change(cmd) {
+        return Some((old_head, new_head));
+    }
+
     let from_changes = head_change(cmd, refs);
     let new_head = from_changes
         .as_ref()
         .map(|(_, new_head)| new_head.clone())
         .or_else(|| non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone())))?;
-
-    if let Some(orig_head) = non_empty_opt(cmd.rewrite_hints.rebase_orig_head.clone())
-        && orig_head != new_head
-    {
-        return Some((orig_head, new_head));
-    }
 
     if let Some((old_head, new_head_from_changes)) = from_changes {
         if old_head != new_head_from_changes {
@@ -300,6 +349,99 @@ fn rebase_change(
     non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
         .filter(|old_head| old_head != &new_head)
         .map(|old_head| (old_head, new_head))
+}
+
+fn inferred_rebase_branch_change(cmd: &NormalizedCommand) -> Option<(String, String)> {
+    let mut candidates = cmd
+        .ref_changes
+        .iter()
+        .filter(|change| {
+            change.reference.starts_with("refs/heads/")
+                && !change.old.trim().is_empty()
+                && !change.new.trim().is_empty()
+                && change.old.trim() != change.new.trim()
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let post_head = non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()));
+    if let Some(post_head) = post_head {
+        if let Some(change) = candidates
+            .iter()
+            .find(|change| change.new.trim() == post_head)
+        {
+            return Some((change.old.trim().to_string(), change.new.trim().to_string()));
+        }
+    }
+
+    if candidates.len() == 1 {
+        let change = candidates.pop()?;
+        return Some((change.old.trim().to_string(), change.new.trim().to_string()));
+    }
+
+    None
+}
+
+fn explicit_rebase_branch_change(cmd: &NormalizedCommand) -> Option<(String, String)> {
+    let args = command_args(cmd);
+    let branch = explicit_rebase_branch_arg(&args)?;
+    let branch_ref = if branch.starts_with("refs/") {
+        branch.to_string()
+    } else {
+        format!("refs/heads/{}", branch)
+    };
+    cmd.ref_changes
+        .iter()
+        .find(|change| {
+            change.reference == branch_ref
+                && !change.old.trim().is_empty()
+                && !change.new.trim().is_empty()
+                && change.old.trim() != change.new.trim()
+        })
+        .map(|change| (change.old.trim().to_string(), change.new.trim().to_string()))
+}
+
+fn explicit_rebase_branch_arg(args: &[String]) -> Option<&str> {
+    let mut positionals = Vec::new();
+    let mut has_root = false;
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match arg.as_str() {
+            "--continue" | "--abort" | "--skip" | "--quit" => return None,
+            "--root" => {
+                has_root = true;
+                continue;
+            }
+            "--onto" | "-s" | "--strategy" | "-X" | "--strategy-option" | "-m" | "--mainline"
+            | "-S" | "--gpg-sign" => {
+                skip_next = true;
+                continue;
+            }
+            _ => {}
+        }
+        if arg.starts_with("--onto=")
+            || arg.starts_with("--strategy=")
+            || arg.starts_with("--strategy-option=")
+            || arg.starts_with("--gpg-sign=")
+        {
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        positionals.push(arg.as_str());
+    }
+    if has_root {
+        positionals.first().copied()
+    } else {
+        positionals.get(1).copied()
+    }
 }
 
 fn change_span(changes: &[&crate::daemon::domain::RefChange]) -> Option<(String, String)> {
@@ -353,12 +495,12 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            inflight_rebase_original_head: None,
             ref_changes: vec![RefChange {
                 reference: "HEAD".to_string(),
                 old: "a".to_string(),
                 new: "b".to_string(),
             }],
-            rewrite_hints: Default::default(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         }
@@ -412,13 +554,11 @@ mod tests {
             head: Some("old-head".to_string()),
             branch: Some("main".to_string()),
             detached: false,
-            cherry_pick_head: None,
         });
         cmd.post_repo = Some(crate::daemon::domain::RepoContext {
             head: Some("new-head".to_string()),
             branch: Some("main".to_string()),
             detached: false,
-            cherry_pick_head: None,
         });
 
         let result = analyzer
@@ -453,7 +593,6 @@ mod tests {
             head: Some("new-head".to_string()),
             branch: Some("main".to_string()),
             detached: false,
-            cherry_pick_head: None,
         });
         let refs = std::collections::HashMap::from([(
             "refs/heads/main".to_string(),
@@ -472,6 +611,138 @@ mod tests {
                 } if base.as_deref() == Some("old-head") && new_head == "new-head"
             )),
             "expected commit-created event from post-head fallback, got {:?}",
+            result.events
+        );
+    }
+
+    #[test]
+    fn commit_prefers_post_head_when_family_ref_changes_are_contaminated() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("commit", &["git", "-C", "/repo-b", "commit", "-m", "x"]);
+        cmd.ref_changes = vec![
+            RefChange {
+                reference: "refs/heads/branch-a".to_string(),
+                old: "0000000000000000000000000000000000000000".to_string(),
+                new: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            },
+            RefChange {
+                reference: "refs/heads/branch-b".to_string(),
+                old: "0000000000000000000000000000000000000000".to_string(),
+                new: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            },
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "0000000000000000000000000000000000000000".to_string(),
+                new: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            },
+        ];
+        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+            branch: Some("branch-b".to_string()),
+            detached: false,
+        });
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+            branch: Some("branch-b".to_string()),
+            detached: false,
+        });
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                SemanticEvent::CommitCreated {
+                    new_head,
+                    ..
+                } if new_head == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            )),
+            "expected commit-created event to use branch-b post head, got {:?}",
+            result.events
+        );
+    }
+
+    #[test]
+    fn head_change_prefers_branch_hint_over_head_change() {
+        let mut cmd = command("commit", &["git", "commit", "-m", "x"]);
+        cmd.ref_changes = vec![
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "old-head".to_string(),
+                new: "wrong-head".to_string(),
+            },
+            RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: "old-main".to_string(),
+                new: "new-main".to_string(),
+            },
+        ];
+        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("old-main".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("new-main".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
+
+        let change = head_change(&cmd, &Default::default());
+        assert_eq!(
+            change,
+            Some(("old-main".to_string(), "new-main".to_string())),
+            "expected branch-specific change to win over generic HEAD change"
+        );
+    }
+
+    #[test]
+    fn rebase_continue_prefers_branch_ref_change_over_head_span() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("rebase", &["git", "rebase", "--continue"]);
+        cmd.ref_changes = vec![
+            RefChange {
+                reference: "refs/heads/feature".to_string(),
+                old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                new: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            },
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "cccccccccccccccccccccccccccccccccccccccc".to_string(),
+                new: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            },
+        ];
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+            branch: Some("feature".to_string()),
+            detached: false,
+        });
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                SemanticEvent::RebaseComplete {
+                    old_head,
+                    new_head,
+                    ..
+                } if old_head == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    && new_head == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            )),
+            "expected rebase-complete to use branch ref span, got {:?}",
             result.events
         );
     }
@@ -532,13 +803,11 @@ mod tests {
             head: Some("new-head".to_string()),
             branch: Some("main".to_string()),
             detached: false,
-            cherry_pick_head: Some("source-head".to_string()),
         });
         cmd.post_repo = Some(crate::daemon::domain::RepoContext {
             head: Some("new-head".to_string()),
             branch: Some("main".to_string()),
             detached: false,
-            cherry_pick_head: None,
         });
         let refs = std::collections::HashMap::from([
             ("HEAD".to_string(), "old-head".to_string()),
