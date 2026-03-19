@@ -560,8 +560,14 @@ impl TestRepo {
         let test_home = std::env::temp_dir().join(format!("{}-home", db_n));
         let test_db_path = resolve_test_db_path(&std::env::temp_dir(), db_n, &test_home, git_mode);
 
-        // Clone from cached template (git init + config + symbolic-ref already done)
-        clone_template_to(path);
+        // Clone from cached template (git init + config + symbolic-ref already done).
+        // If path already has a .git directory (e.g. a real repo cloned from GitHub),
+        // skip the template copy to avoid overwriting its config, HEAD, and refs.
+        if path.join(".git").exists() {
+            set_repo_user_config(path);
+        } else {
+            clone_template_to(path);
+        }
 
         let mut repo = Self {
             path: path.clone(),
