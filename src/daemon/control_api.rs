@@ -95,5 +95,9 @@ pub struct FamilyStatus {
     pub effect_queue_depth: usize,
     pub active_trace_connections: usize,
     pub pending_roots: usize,
+    #[serde(default)]
+    pub pending_root_activity_seq: u64,
+    #[serde(default)]
+    pub pending_root_summaries: Vec<String>,
     pub last_error: Option<String>,
 }

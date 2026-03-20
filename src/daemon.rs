@@ -1850,6 +1850,50 @@ impl ActorDaemonCoordinator {
             || ingress.root_family_reflog_start_offsets.contains_key(root)
     }
 
+    fn trace_root_waits_for_family_settle(ingress: &TraceIngressState, root: &str) -> bool {
+        if !Self::trace_root_is_tracked(ingress, root) {
+            return false;
+        }
+
+        let primary = ingress
+            .root_argv
+            .get(root)
+            .and_then(|argv| trace_argv_primary_command(argv));
+        if matches!(primary.as_deref(), Some("status")) {
+            return true;
+        }
+
+        trace_command_may_mutate_refs(primary.as_deref())
+            || ingress.root_mutating.get(root).copied().unwrap_or(false)
+    }
+
+    fn trace_root_summary(ingress: &TraceIngressState, root: &str, now_ns: u64) -> String {
+        let primary = ingress
+            .root_argv
+            .get(root)
+            .and_then(|argv| trace_argv_primary_command(argv))
+            .unwrap_or_else(|| "unknown".to_string());
+        let open = ingress
+            .root_open_connections
+            .get(root)
+            .copied()
+            .unwrap_or(0);
+        let idle_ms = ingress
+            .root_last_activity_ns
+            .get(root)
+            .copied()
+            .map(|last| now_ns.saturating_sub(last) / 1_000_000)
+            .unwrap_or(0);
+        format!(
+            "sid={} cmd={} open_connections={} idle_ms={} fallback_enqueued={}",
+            root,
+            primary,
+            open,
+            idle_ms,
+            ingress.root_close_fallback_enqueued.contains(root)
+        )
+    }
+
     fn mark_trace_root_activity(&self, root_sid: &str) -> Result<u64, GitAiError> {
         let activity_seq = self.next_trace_root_activity_seq();
         let mut ingress = self
@@ -2995,9 +3039,47 @@ impl ActorDaemonCoordinator {
             .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
         Ok(ingress
             .root_families
-            .values()
-            .filter(|tracked_family| tracked_family.as_str() == family)
+            .iter()
+            .filter(|(root_sid, tracked_family)| {
+                tracked_family.as_str() == family
+                    && Self::trace_root_waits_for_family_settle(&ingress, root_sid)
+            })
             .count() as u64)
+    }
+
+    async fn pending_trace_root_status_for_family(
+        &self,
+        family: &str,
+    ) -> Result<(usize, u64, Vec<String>), GitAiError> {
+        let pending_roots = self.family_pending_trace_root_count(family).await?;
+        let now_ns = now_unix_nanos() as u64;
+        let ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+
+        let mut max_activity_seq = 0u64;
+        let mut summaries = Vec::new();
+
+        for (root_sid, tracked_family) in &ingress.root_families {
+            if tracked_family != family
+                || !Self::trace_root_waits_for_family_settle(&ingress, root_sid)
+            {
+                continue;
+            }
+            max_activity_seq = max_activity_seq.max(
+                ingress
+                    .root_activity_seq
+                    .get(root_sid)
+                    .copied()
+                    .unwrap_or(0),
+            );
+            if summaries.len() < 4 {
+                summaries.push(Self::trace_root_summary(&ingress, root_sid, now_ns));
+            }
+        }
+
+        Ok((pending_roots as usize, max_activity_seq, summaries))
     }
 
     fn append_rewrite_event_for_family(
@@ -4096,7 +4178,9 @@ impl ActorDaemonCoordinator {
             .status_family(Path::new(&repo_working_dir))
             .await?;
         let latest_seq = status.applied_seq;
-        let pending_roots = self.family_pending_trace_root_count(&family.0).await?;
+        let (pending_roots, pending_root_activity_seq, pending_root_summaries) =
+            self.pending_trace_root_status_for_family(&family.0).await?;
+        let pending_roots = pending_roots as u64;
         let cursor = latest_seq.saturating_sub(pending_roots);
         let backlog = pending_roots;
         let inflight_effects = self.inflight_effect_depth(&family.0)?;
@@ -4110,6 +4194,8 @@ impl ActorDaemonCoordinator {
             effect_queue_depth: inflight_effects.saturating_add(pending_ordered_effects),
             active_trace_connections: 0,
             pending_roots: pending_roots as usize,
+            pending_root_activity_seq,
+            pending_root_summaries,
             last_error: status
                 .last_error
                 .or_else(|| self.latest_side_effect_error(&family_key).ok().flatten()),
@@ -4189,7 +4275,7 @@ impl ActorDaemonCoordinator {
         let mut last_progress = start;
         let stall_timeout = Duration::from_secs(10);
         let total_timeout = Duration::from_secs(60);
-        let mut last_metrics: Option<(u64, usize, usize)> = None;
+        let mut last_metrics: Option<(u64, usize, usize, u64)> = None;
 
         loop {
             self.enqueue_connection_closed_trace_root_fallbacks_for_family(&family.0)?;
@@ -4199,6 +4285,7 @@ impl ActorDaemonCoordinator {
                 status.latest_seq,
                 status.pending_roots,
                 status.effect_queue_depth,
+                status.pending_root_activity_seq,
             );
             if last_metrics != Some(metrics) {
                 last_metrics = Some(metrics);
@@ -4244,8 +4331,13 @@ impl ActorDaemonCoordinator {
 
             if last_progress.elapsed() >= stall_timeout {
                 return Err(GitAiError::Generic(format!(
-                    "family {} stopped making progress while waiting to settle; last metrics were latest_seq={}, pending_roots={}, effect_queue_depth={}",
-                    family.0, metrics.0, metrics.1, metrics.2
+                    "family {} stopped making progress while waiting to settle; last metrics were latest_seq={}, pending_roots={}, effect_queue_depth={}, pending_root_activity_seq={}, pending_root_summaries={:?}",
+                    family.0,
+                    metrics.0,
+                    metrics.1,
+                    metrics.2,
+                    metrics.3,
+                    status.pending_root_summaries
                 )));
             }
 
