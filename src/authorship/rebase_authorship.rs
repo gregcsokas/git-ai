@@ -809,15 +809,24 @@ pub fn rewrite_authorship_after_cherry_pick(
     new_commits: &[String],
     _human_author: &str,
 ) -> Result<(), GitAiError> {
-    // Handle edge case: no commits to process
     if new_commits.is_empty() {
-        debug_log("Cherry-pick resulted in no new commits");
-        return Ok(());
+        return Err(GitAiError::Generic(
+            "cherry-pick rewrite missing new commits".to_string(),
+        ));
     }
 
     if source_commits.is_empty() {
-        debug_log("Warning: Cherry-pick with no source commits");
-        return Ok(());
+        return Err(GitAiError::Generic(
+            "cherry-pick rewrite missing source commits".to_string(),
+        ));
+    }
+
+    if source_commits.len() != new_commits.len() {
+        return Err(GitAiError::Generic(format!(
+            "cherry-pick rewrite commit count mismatch source_commits={} new_commits={}",
+            source_commits.len(),
+            new_commits.len()
+        )));
     }
 
     debug_log(&format!(
@@ -2964,8 +2973,9 @@ fn transform_attributions_to_final_state(
 mod tests {
     use super::{
         collect_changed_file_contents_from_diff, get_pathspecs_from_commits,
-        parse_cat_file_batch_output_with_oids, transform_attributions_to_final_state,
-        try_fast_path_rebase_note_remap, walk_commits_to_base,
+        parse_cat_file_batch_output_with_oids, rewrite_authorship_after_cherry_pick,
+        transform_attributions_to_final_state, try_fast_path_rebase_note_remap,
+        walk_commits_to_base,
     };
     use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
     use crate::authorship::authorship_log::{LineRange, PromptRecord};
@@ -3083,6 +3093,26 @@ mod tests {
             msg.contains("not an ancestor"),
             "unexpected error message: {}",
             msg
+        );
+    }
+
+    #[test]
+    fn rewrite_authorship_after_cherry_pick_errors_on_mismatched_commit_counts() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        let err = rewrite_authorship_after_cherry_pick(
+            repo.gitai_repo(),
+            &["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()],
+            &[
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                "cccccccccccccccccccccccccccccccccccccccc".to_string(),
+            ],
+            "human",
+        )
+        .expect_err("mismatched cherry-pick mapping should fail");
+
+        assert!(
+            err.to_string()
+                .contains("cherry-pick rewrite commit count mismatch")
         );
     }
 

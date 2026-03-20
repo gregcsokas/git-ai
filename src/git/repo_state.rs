@@ -1,3 +1,4 @@
+use crate::error::GitAiError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -216,6 +217,143 @@ pub fn resolve_squash_source_head_for_worktree(worktree: &Path) -> Option<String
     resolve_squash_source_head_from_git_dir(&git_dir)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeadReflogTransition {
+    old: String,
+    new: String,
+    message: String,
+}
+
+fn read_head_reflog_transitions_for_worktree(
+    worktree: &Path,
+) -> Result<Vec<HeadReflogTransition>, GitAiError> {
+    let git_dir = git_dir_for_worktree(worktree).ok_or_else(|| {
+        GitAiError::Generic(format!(
+            "missing gitdir for worktree while reading HEAD reflog: {}",
+            worktree.display()
+        ))
+    })?;
+    let path = git_dir.join("logs").join("HEAD");
+    let contents = fs::read_to_string(&path).map_err(|err| {
+        GitAiError::Generic(format!(
+            "failed to read HEAD reflog for worktree {} at {}: {}",
+            worktree.display(),
+            path.display(),
+            err
+        ))
+    })?;
+
+    let mut out = Vec::new();
+    for line in contents.lines() {
+        let (head, message) = line
+            .split_once('\t')
+            .map(|(head, message)| (head, message.trim()))
+            .unwrap_or((line, ""));
+        let mut parts = head.split_whitespace();
+        let Some(old) = parts.next().map(str::trim) else {
+            continue;
+        };
+        let Some(new) = parts.next().map(str::trim) else {
+            continue;
+        };
+        if !is_valid_git_oid(old) || !is_valid_git_oid(new) || old == new {
+            continue;
+        }
+        out.push(HeadReflogTransition {
+            old: old.to_string(),
+            new: new.to_string(),
+            message: message.to_string(),
+        });
+    }
+
+    Ok(out)
+}
+
+fn try_resolve_linear_head_chain(
+    transitions: &[HeadReflogTransition],
+    end_index: usize,
+    expected_count: usize,
+    message_fragment: Option<&str>,
+) -> Option<(String, Vec<String>)> {
+    let mut out = Vec::with_capacity(expected_count);
+    let mut cursor = end_index;
+
+    loop {
+        let current = transitions.get(cursor)?;
+        if let Some(fragment) = message_fragment
+            && !current.message.contains(fragment)
+        {
+            return None;
+        }
+        out.push(current.new.clone());
+        if out.len() == expected_count {
+            out.reverse();
+            return Some((current.old.clone(), out));
+        }
+
+        let target = current.old.as_str();
+        cursor = (0..cursor)
+            .rev()
+            .find(|idx| transitions[*idx].new == target)?;
+    }
+}
+
+pub fn resolve_linear_head_commit_chain_for_worktree(
+    worktree: &Path,
+    new_head: &str,
+    expected_count: usize,
+    message_fragment: Option<&str>,
+) -> Result<(String, Vec<String>), GitAiError> {
+    if expected_count == 0 {
+        return Err(GitAiError::Generic(
+            "cannot resolve HEAD reflog chain with zero expected commits".to_string(),
+        ));
+    }
+    if !is_valid_git_oid(new_head) {
+        return Err(GitAiError::Generic(format!(
+            "invalid HEAD reflog chain bound new={}",
+            new_head
+        )));
+    }
+
+    let transitions = read_head_reflog_transitions_for_worktree(worktree)?;
+    if transitions.is_empty() {
+        return Err(GitAiError::Generic(format!(
+            "HEAD reflog is empty or missing valid transitions for worktree {}",
+            worktree.display()
+        )));
+    }
+
+    let mut matches = Vec::new();
+    for (index, transition) in transitions.iter().enumerate() {
+        if transition.new != new_head {
+            continue;
+        }
+        if let Some((original_head, chain)) =
+            try_resolve_linear_head_chain(&transitions, index, expected_count, message_fragment)
+        {
+            matches.push((original_head, chain));
+        }
+    }
+
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(GitAiError::Generic(format!(
+            "failed to reconstruct HEAD reflog chain for worktree {} new={} expected_count={}",
+            worktree.display(),
+            new_head,
+            expected_count
+        ))),
+        count => Err(GitAiError::Generic(format!(
+            "ambiguous HEAD reflog chain for worktree {} new={} expected_count={} candidates={}",
+            worktree.display(),
+            new_head,
+            expected_count,
+            count
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +467,125 @@ mod tests {
         );
         assert_eq!(state.branch.as_deref(), Some("main"));
         assert!(!state.detached);
+    }
+
+    #[test]
+    fn resolve_linear_head_commit_chain_for_worktree_recovers_multi_step_chain() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path();
+        let git_dir = worktree.join(".git");
+        let original = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let first = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let second = "cccccccccccccccccccccccccccccccccccccccc";
+        let third = "dddddddddddddddddddddddddddddddddddddddd";
+        write_file(&git_dir.join("HEAD"), "ref: refs/heads/main\n");
+        write_file(
+            &git_dir.join("logs/HEAD"),
+            &format!(
+                concat!(
+                    "{original} {first} Test <t@example.com> 0 -0000\tcherry-pick: first\n",
+                    "{first} {second} Test <t@example.com> 0 -0000\tcherry-pick: second\n",
+                    "{second} {third} Test <t@example.com> 0 -0000\tcherry-pick: third\n",
+                ),
+                original = original,
+                first = first,
+                second = second,
+                third = third
+            ),
+        );
+
+        let (resolved_original, commits) =
+            resolve_linear_head_commit_chain_for_worktree(worktree, third, 3, None).unwrap();
+        assert_eq!(resolved_original, original);
+        assert_eq!(
+            commits,
+            vec![first.to_string(), second.to_string(), third.to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_linear_head_commit_chain_for_worktree_errors_when_chain_is_incomplete() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path();
+        let git_dir = worktree.join(".git");
+        let original = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let second = "cccccccccccccccccccccccccccccccccccccccc";
+        let third = "dddddddddddddddddddddddddddddddddddddddd";
+        write_file(&git_dir.join("HEAD"), "ref: refs/heads/main\n");
+        write_file(
+            &git_dir.join("logs/HEAD"),
+            &format!(
+                concat!(
+                    "{original} {second} Test <t@example.com> 0 -0000\tnoise\n",
+                    "{second} {third} Test <t@example.com> 0 -0000\tcherry-pick: third\n",
+                ),
+                original = original,
+                second = second,
+                third = third
+            ),
+        );
+
+        let err =
+            resolve_linear_head_commit_chain_for_worktree(worktree, third, 3, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to reconstruct HEAD reflog chain")
+        );
+    }
+
+    #[test]
+    fn resolve_linear_head_commit_chain_for_worktree_errors_when_chain_is_ambiguous() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path();
+        let git_dir = worktree.join(".git");
+        let original = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let first = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let second = "cccccccccccccccccccccccccccccccccccccccc";
+        write_file(&git_dir.join("HEAD"), "ref: refs/heads/main\n");
+        write_file(
+            &git_dir.join("logs/HEAD"),
+            &format!(
+                concat!(
+                    "{original} {first} Test <t@example.com> 0 -0000\tfirst chain 1\n",
+                    "{first} {second} Test <t@example.com> 0 -0000\tfirst chain 2\n",
+                    "{original} {first} Test <t@example.com> 0 -0000\tsecond chain 1\n",
+                    "{first} {second} Test <t@example.com> 0 -0000\tsecond chain 2\n",
+                ),
+                original = original,
+                first = first,
+                second = second
+            ),
+        );
+
+        let err =
+            resolve_linear_head_commit_chain_for_worktree(worktree, second, 2, None).unwrap_err();
+        assert!(err.to_string().contains("ambiguous HEAD reflog chain"));
+    }
+
+    #[test]
+    fn resolve_linear_head_commit_chain_for_worktree_filters_by_reflog_action() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path();
+        let git_dir = worktree.join(".git");
+        let original = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        write_file(&git_dir.join("HEAD"), "ref: refs/heads/main\n");
+        write_file(
+            &git_dir.join("logs/HEAD"),
+            &format!(
+                concat!(
+                    "{original} {commit} Test <t@example.com> 0 -0000\tcommit: feature\n",
+                    "{original} {commit} Test <t@example.com> 0 -0000\tcherry-pick: feature\n",
+                ),
+                original = original,
+                commit = commit
+            ),
+        );
+
+        let (resolved_original, commits) =
+            resolve_linear_head_commit_chain_for_worktree(worktree, commit, 1, Some("cherry-pick"))
+                .unwrap();
+        assert_eq!(resolved_original, original);
+        assert_eq!(commits, vec![commit.to_string()]);
     }
 }

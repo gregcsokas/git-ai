@@ -9,8 +9,9 @@ use crate::git::cli_parser::{
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{
     HeadState, common_dir_for_worktree, git_dir_for_worktree, read_head_state_for_worktree,
-    read_ref_oid_for_worktree, resolve_squash_source_head_for_worktree,
-    resolve_stash_target_oid_for_worktree, worktree_root_for_path,
+    read_ref_oid_for_worktree, resolve_linear_head_commit_chain_for_worktree,
+    resolve_squash_source_head_for_worktree, resolve_stash_target_oid_for_worktree,
+    worktree_root_for_path,
 };
 use crate::git::repository::{Repository, exec_git};
 use crate::git::rewrite_log::{
@@ -1265,64 +1266,6 @@ fn is_non_auxiliary_ref(reference: &str) -> bool {
         || reference.starts_with("refs/replace/"))
 }
 
-fn ordered_head_commit_chain(cmd: &crate::daemon::domain::NormalizedCommand) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut last_transition: Option<(String, String)> = None;
-    for change in cmd.ref_changes.iter().filter(|change| {
-        change.reference == "HEAD"
-            && is_valid_oid(&change.old)
-            && !is_zero_oid(&change.old)
-            && is_valid_oid(&change.new)
-            && !is_zero_oid(&change.new)
-            && change.old != change.new
-    }) {
-        if last_transition
-            .as_ref()
-            .is_some_and(|(old, new)| old == &change.old && new == &change.new)
-        {
-            continue;
-        }
-        last_transition = Some((change.old.clone(), change.new.clone()));
-        if out.last().is_none_or(|last| last != &change.old) {
-            out.push(change.old.clone());
-        }
-        if out.last().is_none_or(|last| last != &change.new) {
-            out.push(change.new.clone());
-        }
-    }
-    out
-}
-
-fn derive_new_commits_for_rewrite(
-    cmd: &crate::daemon::domain::NormalizedCommand,
-    expected_count: usize,
-    new_head: &str,
-    context: &str,
-) -> Result<Vec<String>, GitAiError> {
-    if expected_count == 0 {
-        return Err(GitAiError::Generic(format!(
-            "{} missing source commit count",
-            context
-        )));
-    }
-    let mut commits = ordered_head_commit_chain(cmd);
-    if let Some(position) = commits.iter().rposition(|oid| oid == new_head) {
-        commits.truncate(position + 1);
-    } else if is_valid_oid(new_head) && !is_zero_oid(new_head) {
-        commits.push(new_head.to_string());
-    }
-    if commits.is_empty() {
-        return Err(GitAiError::Generic(format!(
-            "{} missing HEAD reflog commits",
-            context
-        )));
-    }
-    if commits.len() > expected_count {
-        commits = commits.split_off(commits.len().saturating_sub(expected_count));
-    }
-    Ok(commits)
-}
-
 fn maybe_rebase_mappings_from_repository(
     repository: &Repository,
     old_head: &str,
@@ -1353,15 +1296,14 @@ fn maybe_rebase_mappings_from_repository(
 
 fn strict_cherry_pick_mappings_from_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
-    original_head: &str,
     new_head: &str,
     pending_source_commits: Vec<String>,
     context: &str,
-) -> Result<(Vec<String>, Vec<String>), GitAiError> {
-    if original_head.is_empty() || new_head.is_empty() || original_head == new_head {
+) -> Result<(String, Vec<String>, Vec<String>), GitAiError> {
+    if new_head.is_empty() {
         return Err(GitAiError::Generic(format!(
-            "{} invalid cherry-pick heads old={} new={}",
-            context, original_head, new_head
+            "{} invalid cherry-pick new head new={}",
+            context, new_head
         )));
     }
     let mut source_commits = pending_source_commits;
@@ -1374,8 +1316,28 @@ fn strict_cherry_pick_mappings_from_command(
             context
         )));
     }
-    let new_commits = derive_new_commits_for_rewrite(cmd, source_commits.len(), new_head, context)?;
-    Ok((source_commits, new_commits))
+    let worktree = cmd.worktree.as_deref().ok_or_else(|| {
+        GitAiError::Generic(format!(
+            "{} missing worktree for cherry-pick mapping new={}",
+            context, new_head
+        ))
+    })?;
+    let (original_head, new_commits) = resolve_linear_head_commit_chain_for_worktree(
+        worktree,
+        new_head,
+        source_commits.len(),
+        Some("cherry-pick"),
+    )
+    .map_err(|err| {
+        GitAiError::Generic(format!(
+            "{} failed to reconstruct cherry-pick commits new={} expected_count={}: {}",
+            context,
+            new_head,
+            source_commits.len(),
+            err
+        ))
+    })?;
+    Ok((original_head, source_commits, new_commits))
 }
 
 fn append_unique_oid(target: &mut Vec<String>, value: &str) {
@@ -3448,10 +3410,9 @@ impl ActorDaemonCoordinator {
                     original_head,
                     new_head,
                 } => {
-                    if original_head.is_empty() || new_head.is_empty() || original_head == new_head
-                    {
+                    if new_head.is_empty() {
                         return Err(GitAiError::Generic(
-                            "cherry-pick complete event missing valid heads".to_string(),
+                            "cherry-pick complete event missing valid new head".to_string(),
                         ));
                     }
                     let pending_sources = cmd
@@ -3462,16 +3423,22 @@ impl ActorDaemonCoordinator {
                                 .ok()
                         })
                         .unwrap_or_default();
-                    let (source_commits, new_commits) = strict_cherry_pick_mappings_from_command(
-                        cmd,
-                        original_head,
-                        new_head,
-                        pending_sources,
-                        "cherry_pick_complete",
-                    )?;
+                    let (resolved_original_head, source_commits, new_commits) =
+                        strict_cherry_pick_mappings_from_command(
+                            cmd,
+                            new_head,
+                            pending_sources,
+                            "cherry_pick_complete",
+                        )?;
+                    if !original_head.is_empty() && original_head != &resolved_original_head {
+                        debug_log(&format!(
+                            "cherry-pick complete original head mismatch semantic={} resolved={} new={}",
+                            original_head, resolved_original_head, new_head
+                        ));
+                    }
                     out.push(RewriteLogEvent::cherry_pick_complete(
                         CherryPickCompleteEvent::new(
-                            original_head.clone(),
+                            resolved_original_head,
                             new_head.clone(),
                             source_commits,
                             new_commits,
