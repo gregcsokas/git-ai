@@ -32,7 +32,7 @@ use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
@@ -1599,6 +1599,10 @@ struct TraceIngressState {
     root_reflog_refs: HashMap<String, Vec<String>>,
     root_head_reflog_start_offsets: HashMap<String, u64>,
     root_family_reflog_start_offsets: HashMap<String, HashMap<String, u64>>,
+    root_activity_seq: HashMap<String, u64>,
+    root_last_activity_ns: HashMap<String, u64>,
+    root_open_connections: HashMap<String, usize>,
+    root_close_fallback_enqueued: HashSet<String>,
 }
 
 struct ActorDaemonCoordinator {
@@ -1620,6 +1624,7 @@ struct ActorDaemonCoordinator {
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     trace_ingest_tx: Mutex<Option<mpsc::Sender<Value>>>,
     next_trace_ingest_seq: AtomicUsize,
+    next_trace_root_activity_seq: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
     active_trace_connections: AtomicUsize,
     trace_ingress_state: Mutex<TraceIngressState>,
@@ -1648,6 +1653,7 @@ impl ActorDaemonCoordinator {
             side_effect_exec_locks: Mutex::new(HashMap::new()),
             trace_ingest_tx: Mutex::new(None),
             next_trace_ingest_seq: AtomicUsize::new(0),
+            next_trace_root_activity_seq: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
             active_trace_connections: AtomicUsize::new(0),
             trace_ingress_state: Mutex::new(TraceIngressState::default()),
@@ -1762,30 +1768,123 @@ impl ActorDaemonCoordinator {
         );
     }
 
-    fn tracked_trace_roots(&self, roots: &[String]) -> Result<Vec<String>, GitAiError> {
-        let ingress = self
+    fn next_trace_root_activity_seq(&self) -> u64 {
+        (self
+            .next_trace_root_activity_seq
+            .fetch_add(1, Ordering::SeqCst) as u64)
+            + 1
+    }
+
+    fn trace_root_is_tracked(ingress: &TraceIngressState, root: &str) -> bool {
+        ingress.root_worktrees.contains_key(root)
+            || ingress.root_families.contains_key(root)
+            || ingress.root_argv.contains_key(root)
+            || ingress.root_pre_repo.contains_key(root)
+            || ingress.root_mutating.contains_key(root)
+            || ingress.root_target_repo_only.contains_key(root)
+            || ingress.root_reflog_refs.contains_key(root)
+            || ingress.root_head_reflog_start_offsets.contains_key(root)
+            || ingress.root_family_reflog_start_offsets.contains_key(root)
+    }
+
+    fn mark_trace_root_activity(&self, root_sid: &str) -> Result<u64, GitAiError> {
+        let activity_seq = self.next_trace_root_activity_seq();
+        let mut ingress = self
             .trace_ingress_state
             .lock()
             .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
-        Ok(roots
-            .iter()
-            .filter(|root| {
-                ingress.root_worktrees.contains_key(*root)
-                    || ingress.root_families.contains_key(*root)
-                    || ingress.root_argv.contains_key(*root)
-                    || ingress.root_pre_repo.contains_key(*root)
-                    || ingress.root_mutating.contains_key(*root)
-                    || ingress.root_target_repo_only.contains_key(*root)
-                    || ingress.root_reflog_refs.contains_key(*root)
-                    || ingress.root_head_reflog_start_offsets.contains_key(*root)
-                    || ingress.root_family_reflog_start_offsets.contains_key(*root)
-            })
-            .cloned()
-            .collect())
+        ingress
+            .root_activity_seq
+            .insert(root_sid.to_string(), activity_seq);
+        ingress
+            .root_last_activity_ns
+            .insert(root_sid.to_string(), now_unix_nanos() as u64);
+        ingress.root_close_fallback_enqueued.remove(root_sid);
+        Ok(activity_seq)
     }
 
-    fn enqueue_connection_close_fallbacks(&self, roots: &[String]) -> Result<(), GitAiError> {
-        for root_sid in self.tracked_trace_roots(roots)? {
+    fn trace_root_connection_opened(&self, root_sid: &str) -> Result<(), GitAiError> {
+        let mut ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+        *ingress
+            .root_open_connections
+            .entry(root_sid.to_string())
+            .or_insert(0) += 1;
+        Ok(())
+    }
+
+    fn record_trace_connection_close(
+        &self,
+        roots: &[String],
+    ) -> Result<Vec<(String, u64)>, GitAiError> {
+        let mut ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+        let mut stale_candidates = Vec::new();
+        for root_sid in roots {
+            if let Some(count) = ingress.root_open_connections.get_mut(root_sid) {
+                if *count > 1 {
+                    *count -= 1;
+                    continue;
+                }
+                ingress.root_open_connections.remove(root_sid);
+            }
+            let activity_seq = ingress
+                .root_activity_seq
+                .get(root_sid)
+                .copied()
+                .unwrap_or(0);
+            stale_candidates.push((root_sid.clone(), activity_seq));
+        }
+        Ok(stale_candidates)
+    }
+
+    fn enqueue_stale_connection_close_fallbacks(
+        &self,
+        roots: &[(String, u64)],
+    ) -> Result<(), GitAiError> {
+        let stale_roots = {
+            let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
+                GitAiError::Generic("trace ingress state lock poisoned".to_string())
+            })?;
+            let mut stale = Vec::new();
+            for (root_sid, observed_activity_seq) in roots {
+                if !Self::trace_root_is_tracked(&ingress, root_sid) {
+                    continue;
+                }
+                if ingress
+                    .root_open_connections
+                    .get(root_sid)
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+                {
+                    continue;
+                }
+                if ingress
+                    .root_activity_seq
+                    .get(root_sid)
+                    .copied()
+                    .unwrap_or(0)
+                    != *observed_activity_seq
+                {
+                    continue;
+                }
+                if ingress.root_close_fallback_enqueued.contains(root_sid) {
+                    continue;
+                }
+                ingress
+                    .root_close_fallback_enqueued
+                    .insert(root_sid.clone());
+                stale.push(root_sid.clone());
+            }
+            stale
+        };
+
+        for root_sid in stale_roots {
             let mut payload = json!({
                 "event": "atexit",
                 "sid": root_sid,
@@ -1802,6 +1901,68 @@ impl ActorDaemonCoordinator {
             }
             debug_log(&format!(
                 "daemon trace connection close fallback finalized sid={}",
+                root_sid
+            ));
+            self.enqueue_trace_payload(payload)?;
+        }
+        Ok(())
+    }
+
+    fn enqueue_idle_trace_root_fallbacks_for_family(
+        &self,
+        family: &str,
+        min_idle_ms: u64,
+    ) -> Result<(), GitAiError> {
+        let min_idle_ns = min_idle_ms.saturating_mul(1_000_000);
+        let now_ns = now_unix_nanos() as u64;
+        let stale_roots = {
+            let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
+                GitAiError::Generic("trace ingress state lock poisoned".to_string())
+            })?;
+            let mut stale = Vec::new();
+            for (root_sid, tracked_family) in ingress.root_families.clone() {
+                if tracked_family != family {
+                    continue;
+                }
+                if ingress.root_close_fallback_enqueued.contains(&root_sid) {
+                    continue;
+                }
+                if !Self::trace_root_is_tracked(&ingress, &root_sid) {
+                    continue;
+                }
+                let last_activity_ns = ingress.root_last_activity_ns.get(&root_sid).copied();
+                let idle_for_ns = match last_activity_ns {
+                    Some(last) => now_ns.saturating_sub(last),
+                    None => continue,
+                };
+                if idle_for_ns < min_idle_ns {
+                    continue;
+                }
+                ingress
+                    .root_close_fallback_enqueued
+                    .insert(root_sid.clone());
+                stale.push(root_sid);
+            }
+            stale
+        };
+
+        for root_sid in stale_roots {
+            let mut payload = json!({
+                "event": "atexit",
+                "sid": root_sid,
+                "code": 0,
+                "time_ns": now_unix_nanos() as u64,
+                "git_ai_connection_close_fallback": true,
+            });
+            self.augment_trace_payload_with_reflog_metadata(&mut payload);
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    TRACE_INGEST_SEQ_FIELD.to_string(),
+                    json!(self.next_trace_ingest_seq()),
+                );
+            }
+            debug_log(&format!(
+                "daemon stale trace root fallback finalized sid={}",
                 root_sid
             ));
             self.enqueue_trace_payload(payload)?;
@@ -1827,6 +1988,10 @@ impl ActorDaemonCoordinator {
         ingress.root_reflog_refs.remove(root_sid);
         ingress.root_head_reflog_start_offsets.remove(root_sid);
         ingress.root_family_reflog_start_offsets.remove(root_sid);
+        ingress.root_activity_seq.remove(root_sid);
+        ingress.root_last_activity_ns.remove(root_sid);
+        ingress.root_open_connections.remove(root_sid);
+        ingress.root_close_fallback_enqueued.remove(root_sid);
         Ok(())
     }
 
@@ -1942,7 +2107,18 @@ impl ActorDaemonCoordinator {
             .cloned()
             .ok_or_else(|| GitAiError::Generic("trace ingest worker not started".to_string()))?;
         self.queued_trace_payloads.fetch_add(1, Ordering::SeqCst);
-        if tx.blocking_send(payload).is_err() {
+        let send_result = match tx.try_send(payload) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_payload)) => Err(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(payload)) => {
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    tokio::task::block_in_place(|| tx.blocking_send(payload)).map_err(|_| ())
+                } else {
+                    tx.blocking_send(payload).map_err(|_| ())
+                }
+            }
+        };
+        if send_result.is_err() {
             let _ = self.queued_trace_payloads.fetch_update(
                 Ordering::SeqCst,
                 Ordering::SeqCst,
@@ -1971,6 +2147,7 @@ impl ActorDaemonCoordinator {
         }
 
         let root = trace_root_sid(&sid).to_string();
+        let _ = self.mark_trace_root_activity(&root);
         let mut ingress = match self.trace_ingress_state.lock() {
             Ok(guard) => guard,
             Err(_) => {
@@ -2625,7 +2802,16 @@ impl ActorDaemonCoordinator {
     }
 
     async fn family_pending_trace_root_count(&self, family: &str) -> Result<u64, GitAiError> {
-        self.sweep_orphan_trace_roots().await?;
+        let _ = self.enqueue_idle_trace_root_fallbacks_for_family(family, 1_500);
+        let has_tracked_roots = {
+            let ingress = self.trace_ingress_state.lock().map_err(|_| {
+                GitAiError::Generic("trace ingress state lock poisoned".to_string())
+            })?;
+            !ingress.root_families.is_empty()
+        };
+        if !has_tracked_roots {
+            self.sweep_orphan_trace_roots().await?;
+        }
         let ingress = self
             .trace_ingress_state
             .lock()
@@ -4014,7 +4200,7 @@ fn trace_listener_loop_actor(
 fn handle_trace_connection_actor(
     stream: LocalSocketStream,
     coordinator: Arc<ActorDaemonCoordinator>,
-    _runtime_handle: tokio::runtime::Handle,
+    runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
     coordinator.trace_connection_opened();
     struct TraceConnectionGuard {
@@ -4041,7 +4227,10 @@ fn handle_trace_connection_actor(
             Err(_) => continue,
         };
         if let Some(sid) = parsed.get("sid").and_then(Value::as_str) {
-            observed_roots.insert(trace_root_sid(sid).to_string());
+            let root_sid = trace_root_sid(sid).to_string();
+            if observed_roots.insert(root_sid.clone()) {
+                let _ = coordinator.trace_root_connection_opened(&root_sid);
+            }
         }
         coordinator.augment_trace_payload_with_reflog_metadata(&mut parsed);
 
@@ -4059,11 +4248,28 @@ fn handle_trace_connection_actor(
 
     if !observed_roots.is_empty() {
         let roots = observed_roots.into_iter().collect::<Vec<_>>();
-        if let Err(error) = coordinator.enqueue_connection_close_fallbacks(&roots) {
-            debug_log(&format!(
-                "daemon trace connection close fallback error: {}",
-                error
-            ));
+        match coordinator.record_trace_connection_close(&roots) {
+            Ok(stale_candidates) if !stale_candidates.is_empty() => {
+                let delayed_coordinator = coordinator.clone();
+                runtime_handle.spawn(async move {
+                    sleep(Duration::from_millis(750)).await;
+                    if let Err(error) = delayed_coordinator
+                        .enqueue_stale_connection_close_fallbacks(&stale_candidates)
+                    {
+                        debug_log(&format!(
+                            "daemon trace connection close fallback error: {}",
+                            error
+                        ));
+                    }
+                });
+            }
+            Ok(_) => {}
+            Err(error) => {
+                debug_log(&format!(
+                    "daemon trace connection close bookkeeping error: {}",
+                    error
+                ));
+            }
         }
     }
     Ok(())
