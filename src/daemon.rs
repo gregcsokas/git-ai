@@ -4186,12 +4186,24 @@ impl ActorDaemonCoordinator {
         let repo_path = Path::new(&repo_working_dir);
         let family = self.backend.resolve_family(repo_path)?;
         let start = Instant::now();
-        let timeout = Duration::from_secs(10);
+        let mut last_progress = start;
+        let stall_timeout = Duration::from_secs(10);
+        let total_timeout = Duration::from_secs(60);
+        let mut last_metrics: Option<(u64, usize, usize)> = None;
 
         loop {
             self.enqueue_connection_closed_trace_root_fallbacks_for_family(&family.0)?;
 
             let status = self.status_for_family(repo_working_dir.clone()).await?;
+            let metrics = (
+                status.latest_seq,
+                status.pending_roots,
+                status.effect_queue_depth,
+            );
+            if last_metrics != Some(metrics) {
+                last_metrics = Some(metrics);
+                last_progress = Instant::now();
+            }
             if let Some(error) = status.last_error.clone() {
                 return Err(GitAiError::Generic(format!(
                     "family {} reported side-effect error while waiting to settle: {}",
@@ -4223,10 +4235,17 @@ impl ActorDaemonCoordinator {
                 }
             }
 
-            if start.elapsed() >= timeout {
+            if start.elapsed() >= total_timeout {
                 return Err(GitAiError::Generic(format!(
-                    "timed out waiting for family {} to settle",
-                    family.0
+                    "timed out waiting for family {} to settle after {:?}",
+                    family.0, total_timeout
+                )));
+            }
+
+            if last_progress.elapsed() >= stall_timeout {
+                return Err(GitAiError::Generic(format!(
+                    "family {} stopped making progress while waiting to settle; last metrics were latest_seq={}, pending_roots={}, effect_queue_depth={}",
+                    family.0, metrics.0, metrics.1, metrics.2
                 )));
             }
 

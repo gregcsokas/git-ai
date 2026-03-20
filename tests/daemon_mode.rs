@@ -153,7 +153,11 @@ impl DaemonGuard {
         let settled = self.request(ControlRequest::BarrierSettledFamily {
             repo_working_dir: self.repo_working_dir.clone(),
         });
-        assert!(settled.ok, "barrier.settled_family should succeed");
+        assert!(
+            settled.ok,
+            "barrier.settled_family should succeed: {:?}",
+            settled
+        );
         settled
             .data
             .as_ref()
