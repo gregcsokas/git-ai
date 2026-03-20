@@ -154,6 +154,7 @@ impl DaemonGuard {
     }
 
     fn wait_until_ready(&mut self) {
+        let trace_socket_addr = self.trace_socket_path.to_string_lossy().to_string();
         for _ in 0..200 {
             if let Some(status) = self
                 .child
@@ -162,16 +163,14 @@ impl DaemonGuard {
             {
                 panic!("daemon exited before becoming ready: {}", status);
             }
-            if self.control_socket_path.exists() && self.trace_socket_path.exists() {
-                let status = send_control_request(
-                    &self.control_socket_path,
-                    &ControlRequest::StatusFamily {
-                        repo_working_dir: self.repo_working_dir.clone(),
-                    },
-                );
-                if status.is_ok() {
-                    return;
-                }
+            let status = send_control_request(
+                &self.control_socket_path,
+                &ControlRequest::StatusFamily {
+                    repo_working_dir: self.repo_working_dir.clone(),
+                },
+            );
+            if status.is_ok() && LocalSocketStream::connect(trace_socket_addr.as_str()).is_ok() {
+                return;
             }
             thread::sleep(Duration::from_millis(25));
         }
@@ -214,7 +213,7 @@ fn git_trace_env(trace_socket_path: &Path) -> [(&'static str, String); 2] {
     [
         (
             "GIT_TRACE2_EVENT",
-            format!("af_unix:stream:{}", trace_socket_path.to_string_lossy()),
+            DaemonConfig::trace2_event_target_for_path(trace_socket_path),
         ),
         ("GIT_TRACE2_EVENT_NESTING", "10".to_string()),
     ]
@@ -246,10 +245,7 @@ impl WorkdirRaceHarness {
             .env("GITAI_TEST_DB_PATH", &self.test_db_path)
             .env(
                 "GIT_TRACE2_EVENT",
-                format!(
-                    "af_unix:stream:{}",
-                    self.trace_socket_path.to_string_lossy()
-                ),
+                DaemonConfig::trace2_event_target_for_path(&self.trace_socket_path),
             )
             .env("GIT_TRACE2_EVENT_NESTING", "10")
             .output()
@@ -649,6 +645,83 @@ fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
     assert!(
         !checkpoints_map.is_empty(),
         "daemon family state should record delegated checkpoint summary"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_test_mode_git_ai_checkpoint_updates_family_state() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
+
+    fs::write(repo.path().join("daemon-mode-checkpoint.txt"), "base\n")
+        .expect("failed to write base");
+    repo.git(&["add", "daemon-mode-checkpoint.txt"])
+        .expect("add should succeed");
+    repo.stage_all_and_commit("base commit")
+        .expect("base commit should succeed");
+
+    fs::write(
+        repo.path().join("daemon-mode-checkpoint.txt"),
+        "base\nchanged through daemon mode\n",
+    )
+    .expect("failed to write updated file");
+
+    let before = send_control_request(
+        &repo.daemon_control_socket_path(),
+        &ControlRequest::SnapshotFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    )
+    .expect("snapshot request before checkpoint should succeed");
+    let before_checkpoints = before
+        .data
+        .as_ref()
+        .and_then(|v| v.get("state"))
+        .and_then(|state| state.get("checkpoints"))
+        .and_then(Value::as_object)
+        .expect("family state should contain checkpoints map before checkpoint");
+    assert!(
+        before_checkpoints.is_empty(),
+        "fresh daemon family state should start without checkpoint summaries"
+    );
+
+    let output = repo
+        .git_ai(&["checkpoint", "mock_ai", "daemon-mode-checkpoint.txt"])
+        .expect("daemon-mode checkpoint should succeed");
+    assert!(
+        !output.contains("[BENCHMARK] Starting checkpoint run"),
+        "daemon-mode checkpoint should not run the local checkpoint implementation: {}",
+        output
+    );
+
+    let checkpoints = repo
+        .current_working_logs()
+        .read_all_checkpoints()
+        .expect("checkpoints should be readable");
+    assert!(
+        checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
+        "daemon-mode checkpoint should still write the ai_agent checkpoint side effect"
+    );
+
+    let after = send_control_request(
+        &repo.daemon_control_socket_path(),
+        &ControlRequest::SnapshotFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    )
+    .expect("snapshot request after checkpoint should succeed");
+    let after_checkpoints = after
+        .data
+        .as_ref()
+        .and_then(|v| v.get("state"))
+        .and_then(|state| state.get("checkpoints"))
+        .and_then(Value::as_object)
+        .expect("family state should contain checkpoints map after checkpoint");
+    assert!(
+        !after_checkpoints.is_empty(),
+        "daemon-mode checkpoint should update daemon family checkpoint state"
     );
 }
 

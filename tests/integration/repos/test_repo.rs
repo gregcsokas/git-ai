@@ -150,8 +150,7 @@ impl DaemonProcess {
     fn wait_until_ready(&self, repo_path: &Path, child: &mut Child) -> Result<(), String> {
         let repo_working_dir = repo_path.to_string_lossy().to_string();
         let mut last_status_error: Option<String> = None;
-        let mut saw_control_socket = false;
-        let mut saw_trace_socket = false;
+        let trace_socket_addr = self.trace_socket_path.to_string_lossy().to_string();
         for _ in 0..1200 {
             if let Some(status) = child
                 .try_wait()
@@ -181,30 +180,20 @@ impl DaemonProcess {
                 }
             }
 
-            let control_exists = self.control_socket_path.exists();
-            let trace_exists = self.trace_socket_path.exists();
-            saw_control_socket |= control_exists;
-            saw_trace_socket |= trace_exists;
-            if control_exists && trace_exists {
-                let status = send_control_request(
-                    &self.control_socket_path,
-                    &ControlRequest::StatusFamily {
-                        repo_working_dir: repo_working_dir.clone(),
-                    },
-                );
-                match status {
-                    Ok(_) => {
-                        if LocalSocketStream::connect(
-                            self.trace_socket_path.to_string_lossy().as_ref(),
-                        )
-                        .is_ok()
-                        {
-                            return Ok(());
-                        }
+            let status = send_control_request(
+                &self.control_socket_path,
+                &ControlRequest::StatusFamily {
+                    repo_working_dir: repo_working_dir.clone(),
+                },
+            );
+            match status {
+                Ok(_) => {
+                    if LocalSocketStream::connect(trace_socket_addr.as_str()).is_ok() {
+                        return Ok(());
                     }
-                    Err(error) => {
-                        last_status_error = Some(error.to_string());
-                    }
+                }
+                Err(error) => {
+                    last_status_error = Some(error.to_string());
                 }
             }
             thread::sleep(Duration::from_millis(25));
@@ -212,11 +201,9 @@ impl DaemonProcess {
 
         let stderr_tail = self.read_stderr_tail();
         Err(format!(
-            "daemon did not become ready at {} (trace socket: {}, saw_control_socket={}, saw_trace_socket={}, last_status_error={})",
+            "daemon did not become ready at {} (trace socket: {}, last_status_error={})",
             self.control_socket_path.display(),
             self.trace_socket_path.display(),
-            saw_control_socket,
-            saw_trace_socket,
             last_status_error.as_deref().unwrap_or("none")
         ) + &stderr_tail)
     }
@@ -298,8 +285,23 @@ impl DaemonProcess {
 }
 
 static SHARED_DAEMON_PROCESS: OnceLock<Arc<DaemonProcess>> = OnceLock::new();
+static SHARED_DAEMON_EXIT_HOOK: OnceLock<()> = OnceLock::new();
+
+extern "C" fn shutdown_shared_daemon_at_process_exit() {
+    if let Some(daemon) = SHARED_DAEMON_PROCESS.get() {
+        daemon.shutdown();
+    }
+}
+
+fn register_shared_daemon_exit_hook() {
+    SHARED_DAEMON_EXIT_HOOK.get_or_init(|| {
+        let rc = unsafe { libc::atexit(shutdown_shared_daemon_at_process_exit) };
+        assert_eq!(rc, 0, "failed to register shared daemon exit hook");
+    });
+}
 
 fn shared_daemon_process(repo_path: &Path) -> Arc<DaemonProcess> {
+    register_shared_daemon_exit_hook();
     SHARED_DAEMON_PROCESS
         .get_or_init(|| {
             let mut rng = rand::thread_rng();
@@ -993,6 +995,13 @@ impl TestRepo {
             .unwrap_or_else(|| DaemonProcess::control_socket_path_for_home(&self.test_home))
     }
 
+    pub(crate) fn daemon_home_path(&self) -> PathBuf {
+        self.daemon_process
+            .as_ref()
+            .map(|daemon| daemon.daemon_home.clone())
+            .unwrap_or_else(|| self.test_home.clone())
+    }
+
     pub(crate) fn daemon_trace_socket_path(&self) -> PathBuf {
         self.daemon_process
             .as_ref()
@@ -1073,10 +1082,7 @@ impl TestRepo {
         if self.git_mode.uses_daemon() {
             command.env(
                 "GIT_TRACE2_EVENT",
-                format!(
-                    "af_unix:stream:{}",
-                    self.daemon_trace_socket_path().to_string_lossy()
-                ),
+                DaemonConfig::trace2_event_target_for_path(&self.daemon_trace_socket_path()),
             );
             command.env("GIT_TRACE2_EVENT_NESTING", Self::trace2_nesting_value());
         }
@@ -1097,9 +1103,14 @@ impl TestRepo {
 
         if self.git_mode.uses_daemon() {
             command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");
+            command.env("GIT_AI_DAEMON_HOME", self.daemon_home_path());
             command.env(
                 "GIT_AI_DAEMON_CONTROL_SOCKET",
                 self.daemon_control_socket_path(),
+            );
+            command.env(
+                "GIT_AI_DAEMON_TRACE_SOCKET",
+                self.daemon_trace_socket_path(),
             );
         }
 

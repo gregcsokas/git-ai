@@ -109,11 +109,17 @@ impl DaemonConfig {
         };
 
         #[cfg(not(unix))]
-        let (lock_path, trace_socket_path, control_socket_path) = (
-            daemon_dir.join("daemon.lock"),
-            daemon_dir.join("trace2.sock"),
-            daemon_dir.join("control.sock"),
-        );
+        let (lock_path, trace_socket_path, control_socket_path) = {
+            let mut hasher = Sha256::new();
+            hasher.update(internal_dir.to_string_lossy().as_bytes());
+            let digest = format!("{:x}", hasher.finalize());
+            let short = &digest[..16];
+            (
+                daemon_dir.join("daemon.lock"),
+                PathBuf::from(format!(r"\\.\pipe\git-ai-{}-trace2", short)),
+                PathBuf::from(format!(r"\\.\pipe\git-ai-{}-control", short)),
+            )
+        };
 
         Self {
             internal_dir,
@@ -143,6 +149,21 @@ impl DaemonConfig {
         fs::create_dir_all(daemon_dir)?;
         fs::create_dir_all(&self.internal_dir)?;
         Ok(())
+    }
+
+    pub fn trace2_event_target(&self) -> String {
+        Self::trace2_event_target_for_path(&self.trace_socket_path)
+    }
+
+    pub fn trace2_event_target_for_path(path: &Path) -> String {
+        #[cfg(unix)]
+        {
+            format!("af_unix:stream:{}", path.to_string_lossy())
+        }
+        #[cfg(not(unix))]
+        {
+            path.to_string_lossy().to_string()
+        }
     }
 }
 
@@ -1344,9 +1365,12 @@ fn now_unix_nanos() -> u128 {
 }
 
 fn remove_socket_if_exists(path: &Path) -> Result<(), GitAiError> {
+    #[cfg(unix)]
     if path.exists() {
         fs::remove_file(path)?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

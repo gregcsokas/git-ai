@@ -75,7 +75,9 @@ macro_rules! subdir_test_variants {
                                 .unwrap_or_else(|_| "10".to_string());
                             command.env(
                                 "GIT_TRACE2_EVENT",
-                                format!("af_unix:stream:{}", trace_socket.to_string_lossy()),
+                                git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
+                                    &trace_socket,
+                                ),
                             );
                             command.env("GIT_TRACE2_EVENT_NESTING", nesting);
                         }
@@ -151,7 +153,9 @@ macro_rules! subdir_test_variants {
                                     .unwrap_or_else(|_| "10".to_string());
                                 command.env(
                                     "GIT_TRACE2_EVENT",
-                                    format!("af_unix:stream:{}", trace_socket.to_string_lossy()),
+                                    git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
+                                        &trace_socket,
+                                    ),
                                 );
                                 command.env("GIT_TRACE2_EVENT_NESTING", nesting);
                             }

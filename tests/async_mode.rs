@@ -2,6 +2,7 @@
 mod repos;
 
 use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};
+use interprocess::local_socket::LocalSocketStream;
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use std::fs;
@@ -51,11 +52,37 @@ fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
     DaemonConfig::from_home(repo.test_home_path()).control_socket_path
 }
 
+fn write_async_mode_config(repo: &TestRepo) {
+    let config_dir = repo.test_home_path().join(".git-ai");
+    fs::create_dir_all(&config_dir).expect("failed to create async mode config dir");
+    let config_path = config_dir.join("config.json");
+    let config = serde_json::json!({
+        "git_path": real_git_executable(),
+        "disable_auto_updates": true,
+        "feature_flags": {
+            "async_mode": true,
+            "git_hooks_enabled": false
+        },
+        "quiet": false
+    });
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).expect("failed to serialize async mode config"),
+    )
+    .expect("failed to write async mode config");
+}
+
 fn wait_for_daemon_sockets(repo: &TestRepo) {
     let control = daemon_control_socket_path(repo);
     let trace = daemon_trace_socket_path(repo);
     for _ in 0..200 {
-        if control.exists() && trace.exists() {
+        let status = send_control_request(
+            &control,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo.canonical_path().to_string_lossy().to_string(),
+            },
+        );
+        if status.is_ok() && LocalSocketStream::connect(trace.to_string_lossy().as_ref()).is_ok() {
             return;
         }
         thread::sleep(Duration::from_millis(25));
@@ -64,6 +91,34 @@ fn wait_for_daemon_sockets(repo: &TestRepo) {
         "daemon sockets did not become ready: control={}, trace={}",
         control.display(),
         trace.display()
+    );
+}
+
+fn wait_for_daemon_latest_seq(repo: &TestRepo, min_seq: u64) {
+    let control = daemon_control_socket_path(repo);
+    let repo_working_dir = repo.canonical_path().to_string_lossy().to_string();
+    for _ in 0..200 {
+        let response = send_control_request(
+            &control,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_working_dir.clone(),
+            },
+        )
+        .expect("status request should succeed while waiting for traced command");
+        let latest_seq = response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("latest_seq"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if latest_seq >= min_seq {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "daemon did not observe traced command for {}",
+        repo.canonical_path().display()
     );
 }
 
@@ -184,7 +239,7 @@ fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
     );
 
     let expected_trace_socket = daemon_trace_socket_path(&repo);
-    let expected_target = format!("af_unix:stream:{}", expected_trace_socket.to_string_lossy());
+    let expected_target = DaemonConfig::trace2_event_target_for_path(&expected_trace_socket);
 
     let target = read_global_git_config(&repo, "trace2.eventTarget");
     let nesting = read_global_git_config(&repo, "trace2.eventNesting");
@@ -217,13 +272,81 @@ fn install_hooks_async_mode_dry_run_does_not_write_trace2_global_config() {
 }
 
 #[test]
+fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    repo.git_ai_with_env(
+        &["install-hooks", "--dry-run=false"],
+        &[("GIT_AI_ASYNC_MODE", "true")],
+    )
+    .expect("install-hooks should succeed in async mode");
+
+    let start_output = daemon_command_output(&repo, &["daemon", "start"], repo.path());
+    assert!(
+        start_output.status.success(),
+        "daemon start should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&start_output.stdout),
+        String::from_utf8_lossy(&start_output.stderr)
+    );
+    wait_for_daemon_sockets(&repo);
+
+    let git_output = Command::new(real_git_executable())
+        .args(["status", "--short"])
+        .current_dir(repo.path())
+        .env("HOME", repo.test_home_path())
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            repo.test_home_path().join(".gitconfig"),
+        )
+        .output()
+        .expect("failed to run traced git status");
+    assert!(
+        git_output.status.success(),
+        "traced git status should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&git_output.stdout),
+        String::from_utf8_lossy(&git_output.stderr)
+    );
+
+    wait_for_daemon_latest_seq(&repo, 1);
+    shutdown_daemon(&repo);
+}
+
+#[test]
+fn async_mode_checkpoint_starts_daemon_when_down() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    write_async_mode_config(&repo);
+
+    let control = daemon_control_socket_path(&repo);
+    let trace = daemon_trace_socket_path(&repo);
+    let _ = fs::remove_file(&control);
+    let _ = fs::remove_file(&trace);
+
+    fs::write(
+        repo.path().join("async-checkpoint.txt"),
+        "async checkpoint\n",
+    )
+    .expect("failed to write async checkpoint file");
+
+    let output = repo
+        .git_ai(&["checkpoint", "mock_ai", "async-checkpoint.txt"])
+        .expect("async mode checkpoint should succeed");
+
+    assert!(
+        !output.contains("[BENCHMARK] Starting checkpoint run"),
+        "async mode checkpoint should delegate to daemon instead of running synchronously: {}",
+        output
+    );
+
+    wait_for_daemon_sockets(&repo);
+    assert_daemon_status_ok_after_launch_repo_removed(&repo, &repo);
+    shutdown_daemon(&repo);
+}
+
+#[test]
 fn daemon_status_does_not_self_emit_trace2_events() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     fs::create_dir_all(repo.test_home_path()).expect("failed to create test HOME directory");
-    let trace_target = format!(
-        "af_unix:stream:{}",
-        daemon_trace_socket_path(&repo).to_string_lossy()
-    );
+    let trace_target = DaemonConfig::trace2_event_target_for_path(&daemon_trace_socket_path(&repo));
 
     let set_target = Command::new(real_git_executable())
         .args(["config", "--global", "trace2.eventTarget", &trace_target])

@@ -1,6 +1,6 @@
 use crate::daemon::{ControlRequest, DaemonConfig, send_control_request};
 use interprocess::local_socket::LocalSocketStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -53,11 +53,32 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     ensure_daemon_running(Duration::from_secs(2)).map(|_| ())
 }
 
+fn daemon_config_from_env_or_default_paths() -> Result<DaemonConfig, String> {
+    let mut config = if let Ok(home) = std::env::var("GIT_AI_DAEMON_HOME")
+        && !home.trim().is_empty()
+    {
+        DaemonConfig::from_home(Path::new(&home))
+    } else {
+        DaemonConfig::from_default_paths().map_err(|e| e.to_string())?
+    };
+    if let Ok(path) = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
+        && !path.trim().is_empty()
+    {
+        config.control_socket_path = PathBuf::from(path);
+    }
+    if let Ok(path) = std::env::var("GIT_AI_DAEMON_TRACE_SOCKET")
+        && !path.trim().is_empty()
+    {
+        config.trace_socket_path = PathBuf::from(path);
+    }
+    Ok(config)
+}
+
 fn handle_run(args: &[String]) -> Result<(), String> {
     if has_flag(args, "--mode") {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
-    let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
+    let config = daemon_config_from_env_or_default_paths()?;
     let runtime_dir = daemon_runtime_dir(&config)?;
     std::env::set_current_dir(&runtime_dir).map_err(|e| {
         format!(
@@ -76,7 +97,7 @@ fn handle_run(args: &[String]) -> Result<(), String> {
 }
 
 pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, String> {
-    let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
+    let config = daemon_config_from_env_or_default_paths()?;
     if daemon_is_up(&config) {
         return Ok(config);
     }
@@ -94,10 +115,6 @@ pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, S
 }
 
 fn daemon_is_up(config: &DaemonConfig) -> bool {
-    if !config.control_socket_path.exists() {
-        return false;
-    }
-
     let socket_path = config.control_socket_path.to_string_lossy().to_string();
     let (tx, rx) = mpsc::sync_channel(1);
     let spawn_result = thread::Builder::new()
@@ -151,7 +168,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
 }
 
 fn handle_status(repo_working_dir: String) -> Result<(), String> {
-    let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
+    let config = daemon_config_from_env_or_default_paths()?;
     let request = ControlRequest::StatusFamily { repo_working_dir };
     let response =
         send_control_request(&config.control_socket_path, &request).map_err(|e| e.to_string())?;
@@ -163,7 +180,7 @@ fn handle_status(repo_working_dir: String) -> Result<(), String> {
 }
 
 fn handle_shutdown() -> Result<(), String> {
-    let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
+    let config = daemon_config_from_env_or_default_paths()?;
     let response = send_control_request(&config.control_socket_path, &ControlRequest::Shutdown)
         .map_err(|e| e.to_string())?;
     println!(

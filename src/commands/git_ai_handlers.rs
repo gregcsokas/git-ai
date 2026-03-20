@@ -1089,6 +1089,10 @@ fn log_daemon_checkpoint_delegate_failure(
 }
 
 fn daemon_checkpoint_delegate_enabled() -> bool {
+    if config::Config::get().feature_flags().async_mode {
+        return true;
+    }
+
     matches!(
         std::env::var("GIT_AI_DAEMON_CHECKPOINT_DELEGATE")
             .ok()

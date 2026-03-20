@@ -191,10 +191,7 @@ fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiEr
     ensure_global_git_config_dirs()?;
 
     let daemon_config = DaemonConfig::from_default_paths()?;
-    let event_target = format!(
-        "af_unix:stream:{}",
-        daemon_config.trace_socket_path.to_string_lossy()
-    );
+    let event_target = daemon_config.trace2_event_target();
 
     ensure_global_git_config_value(
         runtime_config.git_cmd(),
