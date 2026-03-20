@@ -1542,9 +1542,13 @@ pub fn restore_stashed_va(
     // Write INITIAL attributions to working log for new HEAD
     if !initial_attributions.files.is_empty() || !initial_attributions.prompts.is_empty() {
         let working_log = repository.storage.working_log_for_base_commit(new_head);
-        if let Err(e) = working_log
-            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)
-        {
+        let initial_file_contents =
+            merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
+        if let Err(e) = working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            initial_file_contents,
+        ) {
             debug_log(&format!("Failed to write INITIAL attributions: {}", e));
             return;
         }

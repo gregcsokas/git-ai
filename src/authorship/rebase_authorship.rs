@@ -1562,8 +1562,13 @@ pub fn rewrite_authorship_after_commit_amend(
     // Save INITIAL file for uncommitted attributions
     if !initial_attributions.files.is_empty() {
         let new_working_log = repo.storage.working_log_for_base_commit(amended_commit);
-        new_working_log
-            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+        let initial_file_contents =
+            working_va.snapshot_contents_for_files(initial_attributions.files.keys());
+        new_working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            initial_file_contents,
+        )?;
     }
 
     // Clean up old working log
@@ -1794,8 +1799,11 @@ pub fn reconstruct_working_log_after_reset(
     new_working_log.reset_working_log()?;
 
     if !initial_attributions.files.is_empty() {
-        new_working_log
-            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+        new_working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            final_state,
+        )?;
     }
 
     // Delete old working log

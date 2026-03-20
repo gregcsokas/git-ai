@@ -271,8 +271,13 @@ pub fn post_commit(
     // Write INITIAL file for uncommitted AI attributions (if any)
     if !initial_attributions.files.is_empty() {
         let new_working_log = repo_storage.working_log_for_base_commit(&commit_sha);
-        new_working_log
-            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+        let initial_file_contents =
+            working_va.snapshot_contents_for_files(initial_attributions.files.keys());
+        new_working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            initial_file_contents,
+        )?;
     }
 
     // // Clean up old working log
