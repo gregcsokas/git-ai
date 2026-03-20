@@ -1762,6 +1762,53 @@ impl ActorDaemonCoordinator {
         );
     }
 
+    fn tracked_trace_roots(&self, roots: &[String]) -> Result<Vec<String>, GitAiError> {
+        let ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+        Ok(roots
+            .iter()
+            .filter(|root| {
+                ingress.root_worktrees.contains_key(*root)
+                    || ingress.root_families.contains_key(*root)
+                    || ingress.root_argv.contains_key(*root)
+                    || ingress.root_pre_repo.contains_key(*root)
+                    || ingress.root_mutating.contains_key(*root)
+                    || ingress.root_target_repo_only.contains_key(*root)
+                    || ingress.root_reflog_refs.contains_key(*root)
+                    || ingress.root_head_reflog_start_offsets.contains_key(*root)
+                    || ingress.root_family_reflog_start_offsets.contains_key(*root)
+            })
+            .cloned()
+            .collect())
+    }
+
+    fn enqueue_connection_close_fallbacks(&self, roots: &[String]) -> Result<(), GitAiError> {
+        for root_sid in self.tracked_trace_roots(roots)? {
+            let mut payload = json!({
+                "event": "atexit",
+                "sid": root_sid,
+                "code": 0,
+                "time_ns": now_unix_nanos() as u64,
+                "git_ai_connection_close_fallback": true,
+            });
+            self.augment_trace_payload_with_reflog_metadata(&mut payload);
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    TRACE_INGEST_SEQ_FIELD.to_string(),
+                    json!(self.next_trace_ingest_seq()),
+                );
+            }
+            debug_log(&format!(
+                "daemon trace connection close fallback finalized sid={}",
+                root_sid
+            ));
+            self.enqueue_trace_payload(payload)?;
+        }
+        Ok(())
+    }
+
     fn active_trace_connection_count(&self) -> u64 {
         self.active_trace_connections.load(Ordering::SeqCst) as u64
     }
@@ -3983,6 +4030,7 @@ fn handle_trace_connection_actor(
     };
 
     let mut reader = BufReader::new(stream);
+    let mut observed_roots = std::collections::BTreeSet::new();
     while let Some(line) = read_json_line(&mut reader)? {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -3992,6 +4040,9 @@ fn handle_trace_connection_actor(
             Ok(v) => v,
             Err(_) => continue,
         };
+        if let Some(sid) = parsed.get("sid").and_then(Value::as_str) {
+            observed_roots.insert(trace_root_sid(sid).to_string());
+        }
         coordinator.augment_trace_payload_with_reflog_metadata(&mut parsed);
 
         if let Some(object) = parsed.as_object_mut() {
@@ -4003,6 +4054,16 @@ fn handle_trace_connection_actor(
 
         if coordinator.enqueue_trace_payload(parsed).is_err() {
             break;
+        }
+    }
+
+    if !observed_roots.is_empty() {
+        let roots = observed_roots.into_iter().collect::<Vec<_>>();
+        if let Err(error) = coordinator.enqueue_connection_close_fallbacks(&roots) {
+            debug_log(&format!(
+                "daemon trace connection close fallback error: {}",
+                error
+            ));
         }
     }
     Ok(())

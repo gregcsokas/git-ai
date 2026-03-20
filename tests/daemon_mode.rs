@@ -843,6 +843,74 @@ fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
 
 #[test]
 #[serial]
+fn daemon_trace_connection_close_finalizes_open_root() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo);
+    let sid = "connection-close-status";
+    let mut trace_stream = open_trace_stream(&daemon.trace_socket_path);
+
+    write_trace_frames(
+        &mut trace_stream,
+        &[serde_json::json!({
+            "event":"start",
+            "sid":sid,
+            "ts":1,
+            "argv":["git","status"],
+            "cwd":repo.path().to_string_lossy().to_string(),
+        })],
+    );
+
+    let before = daemon.request(ControlRequest::StatusFamily {
+        repo_working_dir: repo_workdir_string(&repo),
+    });
+    assert!(before.ok, "status before socket close should succeed");
+    let before_data = before
+        .data
+        .as_ref()
+        .expect("status before socket close should include data");
+    assert_eq!(
+        before_data.get("pending_roots").and_then(Value::as_u64),
+        Some(1),
+        "open root should be visible before trace socket close: {}",
+        before_data
+    );
+
+    drop(trace_stream);
+
+    daemon.latest_seq_and_wait_idle();
+
+    let after = daemon.request(ControlRequest::StatusFamily {
+        repo_working_dir: repo_workdir_string(&repo),
+    });
+    assert!(after.ok, "status after socket close should succeed");
+    let after_data = after
+        .data
+        .as_ref()
+        .expect("status after socket close should include data");
+    assert_eq!(
+        after_data.get("pending_roots").and_then(Value::as_u64),
+        Some(0),
+        "socket close fallback should settle the open root: {}",
+        after_data
+    );
+
+    let family_state = daemon.family_state_snapshot();
+    let commands = family_state
+        .get("commands")
+        .and_then(Value::as_array)
+        .expect("family state should contain command history");
+    assert!(
+        commands.iter().any(|command| {
+            command.get("sid").and_then(Value::as_str) == Some(sid)
+                && command.get("name").and_then(Value::as_str) == Some("status")
+                && command.get("exit_code").and_then(Value::as_i64) == Some(0)
+        }),
+        "socket close fallback should finalize the open root into a tracked command"
+    );
+}
+
+#[test]
+#[serial]
 fn daemon_status_family_ignores_open_roots_from_other_families() {
     let repo_a = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let repo_b = TestRepo::new_with_mode(GitTestMode::Wrapper);
