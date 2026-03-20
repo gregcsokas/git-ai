@@ -4104,10 +4104,7 @@ impl ActorDaemonCoordinator {
                 self.wait_for_family_idle(repo_working_dir, timeout_ms)
                     .await
             }
-            ControlRequest::Shutdown => {
-                self.request_shutdown();
-                Ok(ControlResponse::ok(None, None, None))
-            }
+            ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None, None)),
         };
 
         match result {
@@ -4156,8 +4153,10 @@ fn handle_control_connection_actor(
             continue;
         }
         let parsed = serde_json::from_str::<ControlRequest>(trimmed);
+        let mut shutdown_after_response = false;
         let response = match parsed {
             Ok(req) => {
+                shutdown_after_response = matches!(req, ControlRequest::Shutdown);
                 runtime_handle.block_on(async { coordinator.handle_control_request(req).await })
             }
             Err(e) => ControlResponse::err(format!("invalid control request: {}", e)),
@@ -4166,6 +4165,9 @@ fn handle_control_connection_actor(
         reader.get_mut().write_all(raw.as_bytes())?;
         reader.get_mut().write_all(b"\n")?;
         reader.get_mut().flush()?;
+        if shutdown_after_response {
+            coordinator.request_shutdown();
+        }
     }
     Ok(())
 }
