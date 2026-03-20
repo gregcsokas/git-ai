@@ -1191,19 +1191,6 @@ impl TestRepo {
         self.sync_test_home_config_for_hooks();
     }
 
-    fn wait_for_daemon_idle(&self) {
-        if !self.git_mode.uses_daemon() {
-            return;
-        }
-        if let Some(daemon) = &self.daemon_process {
-            daemon
-                .wait_for_repo_idle(self.path.to_string_lossy().as_ref())
-                .unwrap_or_else(|e| {
-                    panic!("daemon sync failed for {}: {}", self.path.display(), e)
-                });
-        }
-    }
-
     fn daemon_family_status_for_path(&self, repo_path: &Path) -> FamilyStatus {
         let response = send_control_request(
             &self.daemon_control_socket_path(),
@@ -1271,6 +1258,44 @@ impl TestRepo {
         );
     }
 
+    fn wait_for_daemon_family_stably_idle(
+        &self,
+        repo_path: &Path,
+        expected_latest_seq: Option<u64>,
+    ) -> u64 {
+        if !self.git_mode.uses_daemon() {
+            return 0;
+        }
+
+        if let Some(expected_latest_seq) = expected_latest_seq {
+            self.wait_for_daemon_family_observed(repo_path, expected_latest_seq);
+        }
+
+        let Some(daemon) = &self.daemon_process else {
+            return 0;
+        };
+
+        let repo_working_dir = repo_path.to_string_lossy().to_string();
+        let mut previous_latest_seq = None;
+        for _ in 0..4 {
+            daemon
+                .wait_for_repo_idle(&repo_working_dir)
+                .unwrap_or_else(|e| {
+                    panic!("daemon sync failed for {}: {}", repo_path.display(), e)
+                });
+            let settled_latest_seq = self.daemon_family_status_for_path(repo_path).latest_seq;
+            if previous_latest_seq == Some(settled_latest_seq) {
+                return settled_latest_seq;
+            }
+            previous_latest_seq = Some(settled_latest_seq);
+        }
+
+        panic!(
+            "daemon family {} did not reach a stable idle latest_seq",
+            repo_path.display()
+        );
+    }
+
     fn daemon_family_key(&self) -> String {
         self.daemon_family_key
             .get_or_init(|| {
@@ -1323,9 +1348,8 @@ impl TestRepo {
         };
 
         if let Some((target_generation, expected_latest_seq)) = target {
-            self.wait_for_daemon_family_observed(&self.path, expected_latest_seq);
-            self.wait_for_daemon_idle();
-            let settled_latest_seq = self.daemon_family_status_for_path(&self.path).latest_seq;
+            let settled_latest_seq =
+                self.wait_for_daemon_family_stably_idle(&self.path, Some(expected_latest_seq));
             let mut registry = daemon_sync_registry()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1353,11 +1377,10 @@ impl TestRepo {
             (target_generation, expected_latest_seq, needs_observation)
         };
 
-        if needs_observation {
-            self.wait_for_daemon_family_observed(&self.path, expected_latest_seq);
-        }
-        self.wait_for_daemon_idle();
-        let settled_latest_seq = self.daemon_family_status_for_path(&self.path).latest_seq;
+        let settled_latest_seq = self.wait_for_daemon_family_stably_idle(
+            &self.path,
+            needs_observation.then_some(expected_latest_seq),
+        );
 
         let mut registry = daemon_sync_registry()
             .lock()
@@ -1370,22 +1393,7 @@ impl TestRepo {
             return;
         }
 
-        let Some(daemon) = &self.daemon_process else {
-            return;
-        };
-
-        self.wait_for_daemon_family_observed(target_repo_path, 1);
-
-        let repo_working_dir = target_repo_path.to_string_lossy().to_string();
-        daemon
-            .wait_for_repo_idle(&repo_working_dir)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "daemon clone sync failed for {}: {}",
-                    target_repo_path.display(),
-                    e
-                )
-            });
+        self.wait_for_daemon_family_stably_idle(target_repo_path, Some(1));
     }
 
     fn setup_git_hooks_mode(&self) {
