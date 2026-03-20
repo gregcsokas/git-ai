@@ -407,6 +407,166 @@ worktree_test_wrappers! {
 }
 
 worktree_test_wrappers! {
+    fn notes_sync_pull_fast_forward_syncs_only_selected_remote() {
+        let (local, upstream) = TestRepo::new_with_remote();
+        let backup = repos::test_repo::TestRepo::new_bare_with_mode(GitTestMode::from_env());
+        let default_branch = local.current_branch();
+
+        fs::write(local.path().join("pull-base.txt"), "base\n")
+            .expect("failed to write pull base file");
+        local
+            .git_og(&["add", "pull-base.txt"])
+            .expect("add should succeed");
+        local
+            .git_og(&["commit", "-m", "base commit"])
+            .expect("base commit should succeed");
+
+        let base_sha = local
+            .git_og(&["rev-parse", "HEAD"])
+            .expect("rev-parse should succeed")
+            .trim()
+            .to_string();
+
+        local
+            .git_og(&["push", "-u", "origin", "HEAD"])
+            .expect("initial push to origin should succeed");
+
+        let backup_path = backup.path().to_string_lossy().to_string();
+        local
+            .git_og(&["remote", "add", "backup", backup_path.as_str()])
+            .expect("adding backup remote should succeed");
+        local
+            .git_og(&["push", "backup", "HEAD"])
+            .expect("initial push to backup should succeed");
+
+        let backup_clone = unique_temp_path("notes-sync-pull-backup-remote");
+        let backup_clone_str = backup_clone.to_string_lossy().to_string();
+        let _ = fs::remove_dir_all(&backup_clone);
+
+        run_git(&["clone", backup_path.as_str(), backup_clone_str.as_str()]);
+        run_git(&[
+            "-C",
+            backup_clone_str.as_str(),
+            "config",
+            "user.name",
+            "Test User",
+        ]);
+        run_git(&[
+            "-C",
+            backup_clone_str.as_str(),
+            "config",
+            "user.email",
+            "test@example.com",
+        ]);
+        run_git(&[
+            "-C",
+            backup_clone_str.as_str(),
+            "notes",
+            "--ref=ai",
+            "add",
+            "-m",
+            "backup-remote-note",
+            base_sha.as_str(),
+        ]);
+        run_git(&[
+            "-C",
+            backup_clone_str.as_str(),
+            "push",
+            "origin",
+            "refs/notes/ai",
+        ]);
+
+        let origin_clone = unique_temp_path("notes-sync-pull-origin-remote");
+        let origin_clone_str = origin_clone.to_string_lossy().to_string();
+        let upstream_str = upstream.path().to_string_lossy().to_string();
+        let _ = fs::remove_dir_all(&origin_clone);
+
+        run_git(&["clone", upstream_str.as_str(), origin_clone_str.as_str()]);
+        run_git(&[
+            "-C",
+            origin_clone_str.as_str(),
+            "config",
+            "user.name",
+            "Test User",
+        ]);
+        run_git(&[
+            "-C",
+            origin_clone_str.as_str(),
+            "config",
+            "user.email",
+            "test@example.com",
+        ]);
+
+        fs::write(origin_clone.join("pull-selected-remote.txt"), "remote\n")
+            .expect("failed to write selected remote file");
+        run_git(&["-C", origin_clone_str.as_str(), "add", "pull-selected-remote.txt"]);
+        run_git(&[
+            "-C",
+            origin_clone_str.as_str(),
+            "commit",
+            "-m",
+            "remote pull commit",
+        ]);
+
+        let remote_sha = run_git(&["-C", origin_clone_str.as_str(), "rev-parse", "HEAD"]);
+
+        run_git(&[
+            "-C",
+            origin_clone_str.as_str(),
+            "notes",
+            "--ref=ai",
+            "add",
+            "-m",
+            "origin-remote-note",
+            remote_sha.as_str(),
+        ]);
+        run_git(&[
+            "-C",
+            origin_clone_str.as_str(),
+            "push",
+            "origin",
+            default_branch.as_str(),
+        ]);
+        run_git(&[
+            "-C",
+            origin_clone_str.as_str(),
+            "push",
+            "origin",
+            "refs/notes/ai",
+        ]);
+
+        assert!(
+            read_note_from_worktree(local.path(), &base_sha).is_none(),
+            "backup remote note should be absent before pull"
+        );
+        assert!(
+            read_note_from_worktree(local.path(), &remote_sha).is_none(),
+            "origin remote note should be absent before pull"
+        );
+
+        local
+            .git(&["pull", "--ff-only", "origin", default_branch.as_str()])
+            .expect("pull --ff-only should succeed");
+
+        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, local.path());
+
+        let pulled_origin_note = read_note_from_worktree(local.path(), &remote_sha);
+        assert!(
+            pulled_origin_note.is_some(),
+            "pull should import authorship note for selected remote commit {}",
+            remote_sha
+        );
+
+        let leaked_backup_note = read_note_from_worktree(local.path(), &base_sha);
+        assert!(
+            leaked_backup_note.is_none(),
+            "pull from origin should not import backup remote note for commit {}",
+            base_sha
+        );
+    }
+}
+
+worktree_test_wrappers! {
     fn notes_sync_pull_rebase_imports_authorship_notes() {
         let (local, upstream) = TestRepo::new_with_remote();
         let default_branch = local.current_branch();
