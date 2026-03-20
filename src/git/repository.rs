@@ -2720,9 +2720,8 @@ fn repository_from_discovered_paths(
 }
 
 pub fn discover_repository_in_path_no_git_exec(path: &Path) -> Result<Repository, GitAiError> {
-    let start = if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
-        path.to_path_buf()
-    } else if path.is_dir() {
+    let start = if path.file_name().and_then(|name| name.to_str()) == Some(".git") || path.is_dir()
+    {
         path.to_path_buf()
     } else {
         path.parent()

@@ -1266,13 +1266,15 @@ fn is_non_auxiliary_ref(reference: &str) -> bool {
         || reference.starts_with("refs/replace/"))
 }
 
+type RebaseCommitMappings = (Vec<String>, Vec<String>);
+
 fn maybe_rebase_mappings_from_repository(
     repository: &Repository,
     old_head: &str,
     new_head: &str,
     onto_head: Option<&str>,
     context: &str,
-) -> Result<Option<(Vec<String>, Vec<String>)>, GitAiError> {
+) -> Result<Option<RebaseCommitMappings>, GitAiError> {
     let (original_commits, new_commits) =
         crate::commands::hooks::rebase_hooks::build_rebase_commit_mappings(
             repository, old_head, new_head, onto_head,
@@ -2697,7 +2699,7 @@ impl ActorDaemonCoordinator {
                         .maybe_apply_side_effects_for_applied_command(Some(family), &applied)
                         .await;
                     if let Err(error) = &result {
-                        let _ = self.record_side_effect_error(family, seq, &error);
+                        let _ = self.record_side_effect_error(family, seq, error);
                         debug_log(&format!(
                             "daemon command side effect failed for family {} seq {}: {}",
                             family, seq, error
@@ -2738,7 +2740,7 @@ impl ActorDaemonCoordinator {
                     let _ = self.begin_family_effect(family);
                     let result = apply_checkpoint_side_effect(*request);
                     if let Err(error) = &result {
-                        let _ = self.record_side_effect_error(family, seq, &error);
+                        let _ = self.record_side_effect_error(family, seq, error);
                         debug_log(&format!(
                             "daemon checkpoint side effect failed for family {} seq {}: {}",
                             family, seq, error
