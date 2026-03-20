@@ -499,6 +499,8 @@ fn resolve_stash_target_oid_for_command(
     Ok(Some(resolved))
 }
 
+type MergeSquashSnapshot = (String, HashMap<String, String>);
+
 fn capture_merge_squash_staged_file_blobs_for_command(
     worktree: &Path,
     primary_command: Option<&str>,
@@ -550,7 +552,7 @@ fn capture_inflight_merge_squash_context_for_commit(
     worktree: &Path,
     primary_command: Option<&str>,
     argv: &[String],
-) -> Result<Option<(String, HashMap<String, String>)>, GitAiError> {
+) -> Result<Option<MergeSquashSnapshot>, GitAiError> {
     if primary_command != Some("commit") {
         return Ok(None);
     }
@@ -1575,8 +1577,8 @@ fn read_json_line(reader: &mut BufReader<LocalSocketStream>) -> Result<Option<St
 
 #[derive(Debug, Clone)]
 enum OrderedSideEffectEntry {
-    Command(crate::daemon::domain::AppliedCommand),
-    Checkpoint(CheckpointRunRequest),
+    Command(Box<crate::daemon::domain::AppliedCommand>),
+    Checkpoint(Box<CheckpointRunRequest>),
     Marker,
 }
 
@@ -2420,7 +2422,7 @@ impl ActorDaemonCoordinator {
                 }
                 OrderedSideEffectEntry::Checkpoint(request) => {
                     let _ = self.begin_family_effect(family);
-                    if let Err(error) = apply_checkpoint_side_effect(request) {
+                    if let Err(error) = apply_checkpoint_side_effect(*request) {
                         let _ = self.record_side_effect_error(family, seq, &error);
                         debug_log(&format!(
                             "daemon checkpoint side effect failed for family {} seq {}: {}",
@@ -2447,7 +2449,7 @@ impl ActorDaemonCoordinator {
         self.enqueue_ordered_family_side_effect_entry(
             family,
             applied.seq,
-            OrderedSideEffectEntry::Command(applied),
+            OrderedSideEffectEntry::Command(Box::new(applied)),
         )
         .await
     }
@@ -2470,7 +2472,7 @@ impl ActorDaemonCoordinator {
         self.enqueue_ordered_family_side_effect_entry(
             family,
             seq,
-            OrderedSideEffectEntry::Checkpoint(request),
+            OrderedSideEffectEntry::Checkpoint(Box::new(request)),
         )
         .await
     }
@@ -3584,7 +3586,7 @@ impl ActorDaemonCoordinator {
             self.enqueue_ordered_family_side_effect_entry_no_drain(
                 &family,
                 applied.seq,
-                OrderedSideEffectEntry::Command(applied),
+                OrderedSideEffectEntry::Command(Box::new(applied)),
             )
             .await?;
             let coordinator = self.clone();
