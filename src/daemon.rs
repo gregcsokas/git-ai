@@ -1855,15 +1855,19 @@ impl ActorDaemonCoordinator {
             return false;
         }
 
-        let primary = ingress
+        let parsed = ingress
             .root_argv
             .get(root)
-            .and_then(|argv| trace_argv_primary_command(argv));
+            .map(|argv| parse_git_cli_args(trace_invocation_args(argv)));
+        let primary = parsed.as_ref().and_then(|parsed| parsed.command.clone());
         if matches!(primary.as_deref(), Some("status")) {
             return true;
         }
 
         trace_command_may_mutate_refs(primary.as_deref())
+            || parsed
+                .as_ref()
+                .is_some_and(crate::daemon::test_sync::tracks_parsed_git_invocation_for_test_sync)
             || ingress.root_mutating.get(root).copied().unwrap_or(false)
     }
 
