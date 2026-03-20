@@ -1,6 +1,6 @@
 use crate::daemon::CheckpointRunRequest;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
-use crate::git::repository::{Repository, discover_repository_in_path_no_git_exec};
+use crate::git::repository::config_get_str_for_path_no_git_exec;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -45,11 +45,7 @@ pub fn tracked_parsed_git_invocation_for_test_sync(
     }
 
     let repo_lookup = resolve_repo_lookup_for_git_invocation(&parsed, cwd);
-    let Ok(repository) = discover_repository_in_path_no_git_exec(&repo_lookup) else {
-        return parsed;
-    };
-
-    resolve_alias_invocation_no_git_exec(&parsed, &repository).unwrap_or(parsed)
+    resolve_alias_invocation_no_git_exec(&parsed, &repo_lookup).unwrap_or(parsed)
 }
 
 pub fn tracks_checkpoint_request_for_test_sync(request: &CheckpointRunRequest) -> bool {
@@ -105,7 +101,7 @@ fn resolve_command_base_dir_from_cwd(global_args: &[String], cwd: &Path) -> Path
 
 fn resolve_alias_invocation_no_git_exec(
     parsed_args: &ParsedGitInvocation,
-    repository: &Repository,
+    repo_lookup: &Path,
 ) -> Option<ParsedGitInvocation> {
     let mut current = parsed_args.clone();
     let mut seen: HashSet<String> = HashSet::new();
@@ -121,7 +117,7 @@ fn resolve_alias_invocation_no_git_exec(
         }
 
         let key = format!("alias.{}", command);
-        let alias_value = match repository.config_get_str(&key) {
+        let alias_value = match config_get_str_for_path_no_git_exec(repo_lookup, &key) {
             Ok(Some(value)) => value,
             _ => return Some(current),
         };
@@ -251,5 +247,24 @@ mod tests {
         assert_eq!(parsed.command.as_deref(), Some("branch"));
         assert_eq!(parsed.command_args, vec!["--show-current".to_string()]);
         assert!(!tracks_parsed_git_invocation_for_test_sync(&parsed));
+    }
+
+    #[test]
+    fn tracked_invocation_does_not_create_ai_dir_for_untracked_commands() {
+        let repo = init_repo();
+        let ai_dir = repo.path().join(".git").join("ai");
+        assert!(
+            !ai_dir.exists(),
+            "sanity check: .git/ai should not exist yet"
+        );
+
+        let argv = vec!["add".to_string(), "file.txt".to_string()];
+        let parsed = tracked_parsed_git_invocation_for_test_sync(&argv, repo.path());
+
+        assert_eq!(parsed.command.as_deref(), Some("add"));
+        assert!(
+            !ai_dir.exists(),
+            "tracking helper should not create .git/ai while checking aliases"
+        );
     }
 }

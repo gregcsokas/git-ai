@@ -1409,63 +1409,7 @@ impl Repository {
     }
 
     fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
-        let mut config =
-            gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
-
-        let home = dirs::home_dir();
-        let options = gix_config::file::init::Options {
-            includes: gix_config::file::includes::Options::follow(
-                gix_config::path::interpolate::Context {
-                    home_dir: home.as_deref(),
-                    ..Default::default()
-                },
-                gix_config::file::includes::conditional::Context {
-                    git_dir: Some(self.path()),
-                    branch_name: None,
-                },
-            ),
-            ..Default::default()
-        };
-
-        config
-            .resolve_includes(options)
-            .map_err(|e| GitAiError::GixError(e.to_string()))?;
-
-        let local_config_path = self.common_dir().join("config");
-        let local_config =
-            Self::load_optional_config_file(&local_config_path, gix_config::Source::Local)?;
-        let worktree_config_enabled = local_config
-            .as_ref()
-            .and_then(|cfg| cfg.boolean("extensions.worktreeConfig"))
-            .and_then(Result::ok)
-            .unwrap_or(false);
-
-        if let Some(mut local_config) = local_config {
-            local_config
-                .resolve_includes(options)
-                .map_err(|e| GitAiError::GixError(e.to_string()))?;
-            config.append(local_config);
-        }
-
-        if worktree_config_enabled {
-            let worktree_config_path = self.path().join("config.worktree");
-            if let Some(mut worktree_config) = Self::load_optional_config_file(
-                &worktree_config_path,
-                gix_config::Source::Worktree,
-            )? {
-                worktree_config
-                    .resolve_includes(options)
-                    .map_err(|e| GitAiError::GixError(e.to_string()))?;
-                config.append(worktree_config);
-            }
-        }
-
-        config.append(
-            gix_config::File::from_environment_overrides()
-                .map_err(|e| GitAiError::GixError(e.to_string()))?,
-        );
-
-        Ok(config)
+        git_config_file_for_repo_paths(self.path(), self.common_dir())
     }
 
     /// Get config value for a given key as a String.
@@ -2628,6 +2572,190 @@ fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {
         .join(fallback_name)
 }
 
+struct DiscoveredRepositoryPaths {
+    command_root: PathBuf,
+    workdir: PathBuf,
+    git_dir: PathBuf,
+    git_common_dir: PathBuf,
+}
+
+fn discover_repository_paths_no_git_exec(
+    path: &Path,
+) -> Result<DiscoveredRepositoryPaths, GitAiError> {
+    let start = if path.file_name().and_then(|name| name.to_str()) == Some(".git") || path.is_dir()
+    {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+
+    if start.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        if start.is_dir() {
+            let workdir = start.parent().ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Git directory has no parent workdir: {}",
+                    start.display()
+                ))
+            })?;
+            let git_common_dir = common_dir_for_git_dir(&start).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Unable to resolve common dir for git dir: {}",
+                    start.display()
+                ))
+            })?;
+            return Ok(DiscoveredRepositoryPaths {
+                command_root: workdir.to_path_buf(),
+                workdir: workdir.to_path_buf(),
+                git_dir: start,
+                git_common_dir,
+            });
+        }
+
+        if start.is_file() {
+            let workdir = start.parent().ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    ".git file has no parent workdir: {}",
+                    start.display()
+                ))
+            })?;
+            let git_dir = git_dir_for_worktree(workdir).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Unable to resolve git dir for worktree: {}",
+                    workdir.display()
+                ))
+            })?;
+            let git_common_dir = common_dir_for_git_dir(&git_dir).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Unable to resolve common dir for git dir: {}",
+                    git_dir.display()
+                ))
+            })?;
+            return Ok(DiscoveredRepositoryPaths {
+                command_root: workdir.to_path_buf(),
+                workdir: workdir.to_path_buf(),
+                git_dir,
+                git_common_dir,
+            });
+        }
+    }
+
+    if let Some(worktree_root) = worktree_root_for_path(&start) {
+        let git_dir = git_dir_for_worktree(&worktree_root).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "Unable to resolve git dir for worktree: {}",
+                worktree_root.display()
+            ))
+        })?;
+        let git_common_dir = common_dir_for_git_dir(&git_dir).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "Unable to resolve common dir for git dir: {}",
+                git_dir.display()
+            ))
+        })?;
+        return Ok(DiscoveredRepositoryPaths {
+            command_root: worktree_root.clone(),
+            workdir: worktree_root,
+            git_dir,
+            git_common_dir,
+        });
+    }
+
+    let mut current = Some(start.as_path());
+    while let Some(dir) = current {
+        if dir.join("HEAD").is_file() && dir.join("objects").is_dir() {
+            let workdir = dir.parent().ok_or_else(|| {
+                GitAiError::Generic(format!("Git directory has no parent: {}", dir.display()))
+            })?;
+            return Ok(DiscoveredRepositoryPaths {
+                command_root: dir.to_path_buf(),
+                workdir: workdir.to_path_buf(),
+                git_dir: dir.to_path_buf(),
+                git_common_dir: dir.to_path_buf(),
+            });
+        }
+        current = dir.parent();
+    }
+
+    Err(GitAiError::Generic(format!(
+        "No git repository found for path without exec: {}",
+        path.display()
+    )))
+}
+
+fn git_config_file_for_repo_paths(
+    git_dir: &Path,
+    git_common_dir: &Path,
+) -> Result<gix_config::File<'static>, GitAiError> {
+    let mut config =
+        gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
+
+    let home = dirs::home_dir();
+    let options = gix_config::file::init::Options {
+        includes: gix_config::file::includes::Options::follow(
+            gix_config::path::interpolate::Context {
+                home_dir: home.as_deref(),
+                ..Default::default()
+            },
+            gix_config::file::includes::conditional::Context {
+                git_dir: Some(git_dir),
+                branch_name: None,
+            },
+        ),
+        ..Default::default()
+    };
+
+    config
+        .resolve_includes(options)
+        .map_err(|e| GitAiError::GixError(e.to_string()))?;
+
+    let local_config_path = git_common_dir.join("config");
+    let local_config =
+        Repository::load_optional_config_file(&local_config_path, gix_config::Source::Local)?;
+    let worktree_config_enabled = local_config
+        .as_ref()
+        .and_then(|cfg| cfg.boolean("extensions.worktreeConfig"))
+        .and_then(Result::ok)
+        .unwrap_or(false);
+
+    if let Some(mut local_config) = local_config {
+        local_config
+            .resolve_includes(options)
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+        config.append(local_config);
+    }
+
+    if worktree_config_enabled {
+        let worktree_config_path = git_dir.join("config.worktree");
+        if let Some(mut worktree_config) = Repository::load_optional_config_file(
+            &worktree_config_path,
+            gix_config::Source::Worktree,
+        )? {
+            worktree_config
+                .resolve_includes(options)
+                .map_err(|e| GitAiError::GixError(e.to_string()))?;
+            config.append(worktree_config);
+        }
+    }
+
+    config.append(
+        gix_config::File::from_environment_overrides()
+            .map_err(|e| GitAiError::GixError(e.to_string()))?,
+    );
+
+    Ok(config)
+}
+
+pub fn config_get_str_for_path_no_git_exec(
+    path: &Path,
+    key: &str,
+) -> Result<Option<String>, GitAiError> {
+    let paths = discover_repository_paths_no_git_exec(path)?;
+    git_config_file_for_repo_paths(&paths.git_dir, &paths.git_common_dir)
+        .map(|cfg| cfg.string(key).map(|cow| cow.to_string()))
+}
+
 #[allow(dead_code)]
 pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
     let workdir = git_dir
@@ -2720,88 +2848,13 @@ fn repository_from_discovered_paths(
 }
 
 pub fn discover_repository_in_path_no_git_exec(path: &Path) -> Result<Repository, GitAiError> {
-    let start = if path.file_name().and_then(|name| name.to_str()) == Some(".git") || path.is_dir()
-    {
-        path.to_path_buf()
-    } else {
-        path.parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf())
-    };
-
-    if start.file_name().and_then(|name| name.to_str()) == Some(".git") {
-        if start.is_dir() {
-            let workdir = start.parent().ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "Git directory has no parent workdir: {}",
-                    start.display()
-                ))
-            })?;
-            let git_common_dir = common_dir_for_git_dir(&start).ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "Unable to resolve common dir for git dir: {}",
-                    start.display()
-                ))
-            })?;
-            return repository_from_discovered_paths(workdir, workdir, &start, &git_common_dir);
-        }
-
-        if start.is_file() {
-            let workdir = start.parent().ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    ".git file has no parent workdir: {}",
-                    start.display()
-                ))
-            })?;
-            let git_dir = git_dir_for_worktree(workdir).ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "Unable to resolve git dir for worktree: {}",
-                    workdir.display()
-                ))
-            })?;
-            let git_common_dir = common_dir_for_git_dir(&git_dir).ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "Unable to resolve common dir for git dir: {}",
-                    git_dir.display()
-                ))
-            })?;
-            return repository_from_discovered_paths(workdir, workdir, &git_dir, &git_common_dir);
-        }
-    }
-
-    if let Some(worktree_root) = worktree_root_for_path(&start) {
-        let git_dir = git_dir_for_worktree(&worktree_root).ok_or_else(|| {
-            GitAiError::Generic(format!(
-                "Unable to resolve git dir for worktree: {}",
-                worktree_root.display()
-            ))
-        })?;
-        let git_common_dir = common_dir_for_git_dir(&git_dir).ok_or_else(|| {
-            GitAiError::Generic(format!(
-                "Unable to resolve common dir for git dir: {}",
-                git_dir.display()
-            ))
-        })?;
-        return repository_from_discovered_paths(
-            &worktree_root,
-            &worktree_root,
-            &git_dir,
-            &git_common_dir,
-        );
-    }
-
-    let mut current = Some(start.as_path());
-    while let Some(dir) = current {
-        if dir.join("HEAD").is_file() && dir.join("objects").is_dir() {
-            return from_bare_repository(dir);
-        }
-        current = dir.parent();
-    }
-
-    Err(GitAiError::Generic(format!(
-        "No git repository found for path without exec: {}",
-        path.display()
-    )))
+    let paths = discover_repository_paths_no_git_exec(path)?;
+    repository_from_discovered_paths(
+        &paths.command_root,
+        &paths.workdir,
+        &paths.git_dir,
+        &paths.git_common_dir,
+    )
 }
 
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
