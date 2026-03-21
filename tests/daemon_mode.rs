@@ -246,6 +246,16 @@ fn git_trace_env(trace_socket_path: &Path) -> [(&'static str, String); 2] {
     ]
 }
 
+fn traced_git_with_env(
+    repo: &TestRepo,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    expected_top_level_completions: &mut u64,
+) -> Result<String, String> {
+    *expected_top_level_completions += 1;
+    repo.git_og_with_env(args, envs)
+}
+
 #[derive(Clone)]
 struct WorkdirRaceHarness {
     test_home: PathBuf,
@@ -1377,39 +1387,100 @@ fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
 
     fs::write(repo.path().join("stash-case.txt"), "base\n").expect("failed to write base");
-    repo.git_og_with_env(&["add", "stash-case.txt"], &env_refs)
-        .expect("base add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
-        .expect("base commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "stash-case.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "base"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base commit should succeed");
 
     fs::write(repo.path().join("stash-case.txt"), "base\nchange one\n")
         .expect("failed to write stash content");
-    repo.git_og_with_env(&["stash", "push", "-m", "save one"], &env_refs)
-        .expect("stash push should succeed");
-    repo.git_og_with_env(&["stash", "list"], &env_refs)
-        .expect("stash list should succeed");
-    repo.git_og_with_env(&["stash", "apply", "stash@{0}"], &env_refs)
-        .expect("stash apply should succeed");
+    traced_git_with_env(
+        &repo,
+        &["stash", "push", "-m", "save one"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("stash push should succeed");
+    traced_git_with_env(
+        &repo,
+        &["stash", "list"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("stash list should succeed");
+    traced_git_with_env(
+        &repo,
+        &["stash", "apply", "stash@{0}"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("stash apply should succeed");
 
-    repo.git_og_with_env(&["reset", "--hard", "HEAD"], &env_refs)
-        .expect("reset hard should succeed");
-    repo.git_og_with_env(&["stash", "pop", "stash@{0}"], &env_refs)
-        .expect("stash pop should succeed");
+    traced_git_with_env(
+        &repo,
+        &["reset", "--hard", "HEAD"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("reset hard should succeed");
+    traced_git_with_env(
+        &repo,
+        &["stash", "pop", "stash@{0}"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("stash pop should succeed");
 
-    repo.git_og_with_env(&["add", "stash-case.txt"], &env_refs)
-        .expect("add before commit should succeed");
-    repo.git_og_with_env(&["commit", "-m", "stash pop result"], &env_refs)
-        .expect("commit after stash pop should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "stash-case.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add before commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "stash pop result"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("commit after stash pop should succeed");
 
     fs::write(repo.path().join("stash-case.txt"), "base\nchange two\n")
         .expect("failed to write second stash content");
-    repo.git_og_with_env(&["stash", "push", "-m", "save two"], &env_refs)
-        .expect("second stash push should succeed");
-    repo.git_og_with_env(&["stash", "drop", "stash@{0}"], &env_refs)
-        .expect("stash drop should succeed");
+    traced_git_with_env(
+        &repo,
+        &["stash", "push", "-m", "save two"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("second stash push should succeed");
+    traced_git_with_env(
+        &repo,
+        &["stash", "drop", "stash@{0}"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("stash drop should succeed");
 
+    repo.wait_for_daemon_total_completion_count(
+        completion_baseline,
+        completion_baseline + expected_top_level_completions,
+    );
     daemon.latest_seq_and_wait_idle();
 
     let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");

@@ -221,6 +221,8 @@ struct TestCompletionLogEntry {
     kind: String,
     primary_command: Option<String>,
     exit_code: Option<i32>,
+    #[serde(default)]
+    sync_tracked: bool,
     status: String,
     error: Option<String>,
 }
@@ -2951,16 +2953,20 @@ impl ActorDaemonCoordinator {
                         ));
                     }
                     let _ = self.end_family_effect(family);
-                    if crate::daemon::test_sync::tracks_primary_command_for_test_sync(
-                        applied.command.primary_command.as_deref(),
-                        &applied.command.invoked_args,
-                    ) {
+                    let sync_tracked =
+                        crate::daemon::test_sync::tracks_primary_command_for_test_sync(
+                            applied.command.primary_command.as_deref(),
+                            &applied.command.invoked_args,
+                        );
+                    let top_level_root = !applied.command.root_sid.contains('/');
+                    if top_level_root {
                         let log_entry = TestCompletionLogEntry {
                             seq,
                             family_key: family.to_string(),
                             kind: "command".to_string(),
                             primary_command: applied.command.primary_command.clone(),
                             exit_code: Some(applied.command.exit_code),
+                            sync_tracked,
                             status: if result.is_ok() {
                                 "ok".to_string()
                             } else {
@@ -2999,6 +3005,7 @@ impl ActorDaemonCoordinator {
                             kind: "checkpoint".to_string(),
                             primary_command: Some("checkpoint".to_string()),
                             exit_code: None,
+                            sync_tracked: true,
                             status: if result.is_ok() {
                                 "ok".to_string()
                             } else {

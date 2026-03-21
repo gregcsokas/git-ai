@@ -466,6 +466,8 @@ impl DaemonSyncRegistry {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct DaemonTestCompletionLogEntry {
+    #[serde(default)]
+    sync_tracked: bool,
     status: String,
     error: Option<String>,
 }
@@ -1264,6 +1266,17 @@ impl TestRepo {
             return 0;
         }
         let family_key = self.daemon_family_key();
+        self.daemon_completion_entries_for_family(&family_key)
+            .into_iter()
+            .filter(|entry| entry.sync_tracked)
+            .count() as u64
+    }
+
+    pub(crate) fn daemon_total_completion_count(&self) -> u64 {
+        if !self.git_mode.uses_daemon() {
+            return 0;
+        }
+        let family_key = self.daemon_family_key();
         self.daemon_completion_entries_for_family(&family_key).len() as u64
     }
 
@@ -1301,6 +1314,45 @@ impl TestRepo {
     ) -> u64 {
         for _ in 0..800 {
             let entries = self.daemon_completion_entries_for_family(family_key);
+            let tracked_entries = entries
+                .iter()
+                .filter(|entry| entry.sync_tracked)
+                .collect::<Vec<_>>();
+            if let Some(error_entry) = tracked_entries
+                .iter()
+                .skip(baseline_count as usize)
+                .find(|entry| entry.status == "error")
+            {
+                panic!(
+                    "daemon completion log reported an error for family {}: {}",
+                    family_key,
+                    error_entry
+                        .error
+                        .as_deref()
+                        .unwrap_or("unknown completion error")
+                );
+            }
+            let observed_count = tracked_entries.len() as u64;
+            if observed_count >= expected_count {
+                return observed_count;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!(
+            "daemon completion log for family {} did not reach {} entries within timeout",
+            family_key, expected_count
+        );
+    }
+
+    pub(crate) fn wait_for_daemon_total_completion_count(
+        &self,
+        baseline_count: u64,
+        expected_count: u64,
+    ) -> u64 {
+        let family_key = self.daemon_family_key();
+        for _ in 0..800 {
+            let entries = self.daemon_completion_entries_for_family(&family_key);
             if let Some(error_entry) = entries
                 .iter()
                 .skip(baseline_count as usize)
@@ -1323,7 +1375,7 @@ impl TestRepo {
         }
 
         panic!(
-            "daemon completion log for family {} did not reach {} entries within timeout",
+            "daemon completion log for family {} did not reach {} total entries within timeout",
             family_key, expected_count
         );
     }
