@@ -681,48 +681,6 @@ impl TestRepo {
         Self::new_with_daemon_scope(DaemonTestScope::Dedicated)
     }
 
-    fn sync_daemon_env_overrides(&self, envs: &[(&str, &str)]) {
-        if !self.git_mode.uses_daemon() || envs.is_empty() {
-            return;
-        }
-
-        let overrides: HashMap<String, String> = envs
-            .iter()
-            .filter_map(|(key, value)| {
-                if matches!(
-                    *key,
-                    "GIT_AI_CURSOR_GLOBAL_DB_PATH"
-                        | "GIT_AI_OPENCODE_STORAGE_PATH"
-                        | "GIT_AI_AMP_THREADS_PATH"
-                ) {
-                    Some(((*key).to_string(), (*value).to_string()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if overrides.is_empty() {
-            return;
-        }
-
-        let request = ControlRequest::EnvOverride {
-            repo_working_dir: self.canonical_path().to_string_lossy().to_string(),
-            env: overrides,
-            wait: Some(true),
-        };
-        let response = send_control_request(&self.daemon_control_socket_path(), &request)
-            .unwrap_or_else(|e| panic!("failed to sync daemon env overrides: {}", e));
-        if !response.ok {
-            panic!(
-                "daemon env override request failed: {}",
-                response
-                    .error
-                    .unwrap_or_else(|| "unknown daemon error".to_string())
-            );
-        }
-    }
-
     fn write_test_config_to_home(&self, home: &Path) {
         let Some(patch) = &self.config_patch else {
             return;
@@ -2006,8 +1964,6 @@ impl TestRepo {
     /// Run a raw git command (bypassing git-ai hooks) with custom environment variables.
     /// Useful for creating commits with specific author/committer identities.
     pub fn git_og_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
-        self.sync_daemon_env_overrides(envs);
-
         #[cfg(windows)]
         let null_hooks = "NUL";
         #[cfg(not(windows))]
@@ -2149,8 +2105,6 @@ impl TestRepo {
         envs: &[(&str, &str)],
         working_dir: Option<&std::path::Path>,
     ) -> Result<String, String> {
-        self.sync_daemon_env_overrides(envs);
-
         let canonical_working_dir = if let Some(working_dir_path) = working_dir {
             Some(working_dir_path.canonicalize().map_err(|e| {
                 format!(

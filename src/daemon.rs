@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use tokio::time::{Duration, sleep};
 
 pub mod analyzers;
@@ -926,7 +926,7 @@ fn capture_merge_squash_staged_file_blobs_for_command(
         return Ok(None);
     }
 
-    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+    let repo = discover_repository_in_path_no_git_exec(worktree)?;
     Ok(Some(repo.get_all_staged_file_blob_oids()?))
 }
 
@@ -973,7 +973,7 @@ fn capture_inflight_merge_squash_context_for_commit(
     let Some(source_head) = resolve_squash_source_head_for_worktree(worktree) else {
         return Ok(None);
     };
-    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+    let repo = discover_repository_in_path_no_git_exec(worktree)?;
     let staged_file_blobs = repo.get_all_staged_file_blob_oids()?;
     Ok(Some((source_head, staged_file_blobs)))
 }
@@ -1548,7 +1548,6 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
 fn apply_rewrite_side_effect(
     worktree: &str,
     rewrite_event: RewriteLogEvent,
-    env_overrides: Option<&HashMap<String, String>>,
     carryover_snapshot: Option<&HashMap<String, String>>,
     reset_pathspecs: Option<&[String]>,
 ) -> Result<(), GitAiError> {
@@ -1578,7 +1577,6 @@ fn apply_rewrite_side_effect(
         &author,
         carryover_snapshot,
     )?;
-    apply_env_overrides_to_working_log(&repo, &rewrite_event, env_overrides)?;
     let log = repo.storage.append_rewrite_event(rewrite_event.clone())?;
     let committed_final_state = stable_final_state_for_commit_rewrite(&repo, &rewrite_event)?;
     match &rewrite_event {
@@ -1734,79 +1732,6 @@ fn apply_stash_rewrite_side_effect(
             stash_hooks::restore_stash_attributions(repo, head_sha, stash_sha)?;
         }
         StashOperation::Drop | StashOperation::List => {}
-    }
-    Ok(())
-}
-
-fn apply_env_overrides_to_working_log(
-    repo: &crate::git::repository::Repository,
-    rewrite_event: &RewriteLogEvent,
-    env_overrides: Option<&HashMap<String, String>>,
-) -> Result<(), GitAiError> {
-    let Some(env_overrides) = env_overrides else {
-        return Ok(());
-    };
-    let RewriteLogEvent::Commit { commit } = rewrite_event else {
-        return Ok(());
-    };
-    let base_commit = commit
-        .base_commit
-        .as_deref()
-        .filter(|sha| !sha.is_empty())
-        .unwrap_or("initial");
-
-    let mut changed = false;
-    let working_log = repo.storage.working_log_for_base_commit(base_commit);
-    let mut checkpoints = working_log.read_all_checkpoints()?;
-    if checkpoints.is_empty() {
-        return Ok(());
-    }
-
-    let cursor_db_override = env_overrides
-        .get("GIT_AI_CURSOR_GLOBAL_DB_PATH")
-        .filter(|value| !value.trim().is_empty())
-        .cloned();
-    let opencode_storage_override = env_overrides
-        .get("GIT_AI_OPENCODE_STORAGE_PATH")
-        .filter(|value| !value.trim().is_empty())
-        .cloned();
-    let amp_threads_override = env_overrides
-        .get("GIT_AI_AMP_THREADS_PATH")
-        .filter(|value| !value.trim().is_empty())
-        .cloned();
-
-    for checkpoint in &mut checkpoints {
-        let Some(agent_id) = checkpoint.agent_id.as_ref() else {
-            continue;
-        };
-        match agent_id.tool.as_str() {
-            "cursor" => {
-                if let Some(path) = cursor_db_override.as_ref() {
-                    let metadata = checkpoint.agent_metadata.get_or_insert_with(HashMap::new);
-                    metadata.insert("__test_cursor_db_path".to_string(), path.clone());
-                    changed = true;
-                }
-            }
-            "opencode" => {
-                if let Some(path) = opencode_storage_override.as_ref() {
-                    let metadata = checkpoint.agent_metadata.get_or_insert_with(HashMap::new);
-                    metadata.insert("__test_storage_path".to_string(), path.clone());
-                    changed = true;
-                }
-            }
-            "amp" => {
-                if let Some(path) = amp_threads_override.as_ref() {
-                    let metadata = checkpoint.agent_metadata.get_or_insert_with(HashMap::new);
-                    metadata.insert("__test_amp_threads_path".to_string(), path.clone());
-                    changed = true;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if changed {
-        working_log.write_all_checkpoints(&checkpoints)?;
     }
     Ok(())
 }
@@ -2190,17 +2115,28 @@ fn read_json_line(reader: &mut BufReader<LocalSocketStream>) -> Result<Option<St
     Ok(Some(line))
 }
 
-#[derive(Debug, Clone)]
-enum OrderedSideEffectEntry {
-    Command(Box<crate::daemon::domain::AppliedCommand>),
-    Checkpoint(Box<CheckpointRunRequest>),
-    Marker,
+#[derive(Debug)]
+enum FamilySequencerEntry {
+    PendingRoot,
+    ReadyCommand(Box<crate::daemon::domain::NormalizedCommand>),
+    Checkpoint {
+        request: Box<CheckpointRunRequest>,
+        respond_to: Option<oneshot::Sender<Result<u64, GitAiError>>>,
+    },
+    Canceled,
 }
 
-#[derive(Debug, Default, Clone)]
-struct FamilySideEffectState {
-    next_seq: u64,
-    pending: BTreeMap<u64, OrderedSideEffectEntry>,
+#[derive(Debug, Default)]
+struct FamilySequencerState {
+    next_order: u64,
+    front_order: u64,
+    entries: BTreeMap<u64, FamilySequencerEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingRootSlot {
+    family: String,
+    order: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -2245,7 +2181,8 @@ struct ActorDaemonCoordinator {
     pending_rebase_original_head_by_worktree: Mutex<HashMap<String, String>>,
     pending_cherry_pick_sources_by_worktree: Mutex<HashMap<String, Vec<String>>>,
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
-    ordered_side_effects_by_family: Mutex<HashMap<String, FamilySideEffectState>>,
+    family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
+    pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     trace_root_errors_by_family: Mutex<HashMap<String, String>>,
     side_effect_progress_notify_by_family: Mutex<HashMap<String, Arc<Notify>>>,
@@ -2259,9 +2196,17 @@ struct ActorDaemonCoordinator {
     next_trace_root_activity_seq: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
     queued_trace_payloads_by_root: Mutex<HashMap<String, usize>>,
+    processed_trace_ingest_seq: AtomicUsize,
+    trace_ingest_progress_notify: Notify,
     trace_ingress_state: Mutex<TraceIngressState>,
     shutting_down: AtomicBool,
     shutdown_notify: Notify,
+}
+
+enum TracePayloadApplyOutcome {
+    None,
+    Applied(Box<crate::daemon::domain::AppliedCommand>),
+    QueuedFamily(String),
 }
 
 impl ActorDaemonCoordinator {
@@ -2279,7 +2224,8 @@ impl ActorDaemonCoordinator {
             pending_rebase_original_head_by_worktree: Mutex::new(HashMap::new()),
             pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
-            ordered_side_effects_by_family: Mutex::new(HashMap::new()),
+            family_sequencers_by_family: Mutex::new(HashMap::new()),
+            pending_root_slots_by_root: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             trace_root_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_progress_notify_by_family: Mutex::new(HashMap::new()),
@@ -2302,6 +2248,8 @@ impl ActorDaemonCoordinator {
             next_trace_root_activity_seq: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
             queued_trace_payloads_by_root: Mutex::new(HashMap::new()),
+            processed_trace_ingest_seq: AtomicUsize::new(0),
+            trace_ingest_progress_notify: Notify::new(),
             trace_ingress_state: Mutex::new(TraceIngressState::default()),
             shutting_down: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
@@ -2361,13 +2309,184 @@ impl ActorDaemonCoordinator {
     }
 
     fn pending_ordered_effect_depth(&self, family: &str) -> Result<usize, GitAiError> {
-        let map = self.ordered_side_effects_by_family.lock().map_err(|_| {
-            GitAiError::Generic("ordered side effect map lock poisoned".to_string())
-        })?;
+        let map = self
+            .family_sequencers_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("family sequencer map lock poisoned".to_string()))?;
         Ok(map
             .get(family)
-            .map(|state| state.pending.len())
+            .map(|state| state.entries.len())
             .unwrap_or(0))
+    }
+
+    fn trace_command_participates_in_family_sequencer(primary_command: Option<&str>) -> bool {
+        matches!(
+            primary_command,
+            Some(
+                "branch"
+                    | "checkout"
+                    | "cherry-pick"
+                    | "commit"
+                    | "fetch"
+                    | "merge"
+                    | "pull"
+                    | "push"
+                    | "rebase"
+                    | "remote"
+                    | "reset"
+                    | "revert"
+                    | "stash"
+                    | "switch"
+                    | "tag"
+                    | "update-ref"
+                    | "worktree"
+            )
+        )
+    }
+
+    fn append_pending_root_entry(
+        &self,
+        family: &str,
+        root_sid: &str,
+        primary_command: Option<String>,
+    ) -> Result<(), GitAiError> {
+        {
+            let pending_slots = self.pending_root_slots_by_root.lock().map_err(|_| {
+                GitAiError::Generic("pending root slots map lock poisoned".to_string())
+            })?;
+            if pending_slots.contains_key(root_sid) {
+                return Ok(());
+            }
+        }
+
+        let order = {
+            let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
+                GitAiError::Generic("family sequencer map lock poisoned".to_string())
+            })?;
+            let state =
+                sequencers
+                    .entry(family.to_string())
+                    .or_insert_with(|| FamilySequencerState {
+                        next_order: 1,
+                        front_order: 1,
+                        entries: BTreeMap::new(),
+                    });
+            let order = state.next_order;
+            state.next_order = state.next_order.saturating_add(1);
+            let _ = primary_command;
+            state
+                .entries
+                .insert(order, FamilySequencerEntry::PendingRoot);
+            order
+        };
+
+        self.pending_root_slots_by_root
+            .lock()
+            .map_err(|_| GitAiError::Generic("pending root slots map lock poisoned".to_string()))?
+            .insert(
+                root_sid.to_string(),
+                PendingRootSlot {
+                    family: family.to_string(),
+                    order,
+                },
+            );
+        Ok(())
+    }
+
+    fn take_pending_root_slot(
+        &self,
+        root_sid: &str,
+    ) -> Result<Option<PendingRootSlot>, GitAiError> {
+        self.pending_root_slots_by_root
+            .lock()
+            .map_err(|_| GitAiError::Generic("pending root slots map lock poisoned".to_string()))
+            .map(|mut slots| slots.remove(root_sid))
+    }
+
+    fn maybe_append_pending_root_from_trace_payload(
+        &self,
+        payload: &Value,
+    ) -> Result<(), GitAiError> {
+        let event = payload
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if event != "start" {
+            return Ok(());
+        }
+
+        let Some(sid) = payload.get("sid").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        let root_sid = trace_root_sid(sid);
+        if root_sid != sid {
+            return Ok(());
+        }
+
+        let argv = trace_payload_argv(payload);
+        let primary_command =
+            trace_payload_primary_command(payload).or_else(|| trace_argv_primary_command(&argv));
+        if !Self::trace_command_participates_in_family_sequencer(primary_command.as_deref()) {
+            return Ok(());
+        }
+
+        let Some(worktree) = trace_payload_worktree_hint(payload) else {
+            return Ok(());
+        };
+        let Some(common_dir) = common_dir_for_worktree(&worktree) else {
+            return Ok(());
+        };
+        let family = common_dir
+            .canonicalize()
+            .unwrap_or(common_dir)
+            .to_string_lossy()
+            .to_string();
+        self.append_pending_root_entry(&family, root_sid, primary_command)
+    }
+
+    async fn replace_pending_root_entry(
+        &self,
+        root_sid: &str,
+        replacement: FamilySequencerEntry,
+    ) -> Result<Option<String>, GitAiError> {
+        let Some(slot) = self.take_pending_root_slot(root_sid)? else {
+            return Ok(None);
+        };
+        let family = slot.family.clone();
+        let exec_lock = self.side_effect_exec_lock(&family)?;
+        let _guard = exec_lock.lock().await;
+        {
+            let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
+                GitAiError::Generic("family sequencer map lock poisoned".to_string())
+            })?;
+            let state = sequencers
+                .entry(family.clone())
+                .or_insert_with(|| FamilySequencerState {
+                    next_order: 1,
+                    front_order: 1,
+                    entries: BTreeMap::new(),
+                });
+            let Some(entry) = state.entries.get_mut(&slot.order) else {
+                return Err(GitAiError::Generic(format!(
+                    "missing pending root sequencer entry for sid={} family={} order={}",
+                    root_sid, family, slot.order
+                )));
+            };
+            match entry {
+                FamilySequencerEntry::PendingRoot => {
+                    *entry = replacement;
+                }
+                _ => {
+                    return Err(GitAiError::Generic(format!(
+                        "sequencer entry for sid={} family={} order={} was not pending",
+                        root_sid, family, slot.order
+                    )));
+                }
+            }
+        }
+        self.drain_ready_family_sequencer_entries_locked(&family)
+            .await?;
+        Ok(Some(family))
     }
 
     fn record_side_effect_error(
@@ -2441,6 +2560,42 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
+    fn append_command_completion_log(
+        &self,
+        family: &str,
+        applied: &crate::daemon::domain::AppliedCommand,
+        result: &Result<(), GitAiError>,
+        error_order: u64,
+    ) -> Result<(), GitAiError> {
+        let sync_tracked = crate::daemon::test_sync::tracks_primary_command_for_test_sync(
+            applied.command.primary_command.as_deref(),
+            &applied.command.invoked_args,
+        );
+        let test_sync_session = crate::daemon::test_sync::test_sync_session_from_invocation(
+            &parsed_invocation_for_normalized_command(&applied.command),
+        );
+        let log_entry = TestCompletionLogEntry {
+            seq: applied.seq,
+            family_key: family.to_string(),
+            kind: "command".to_string(),
+            primary_command: applied.command.primary_command.clone(),
+            test_sync_session,
+            exit_code: Some(applied.command.exit_code),
+            sync_tracked,
+            status: if result.is_ok() {
+                "ok".to_string()
+            } else {
+                "error".to_string()
+            },
+            error: result.as_ref().err().map(|error| error.to_string()),
+        };
+        if let Err(error) = self.maybe_append_test_completion_log(family, &log_entry) {
+            let _ = self.record_side_effect_error(family, error_order, &error);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn next_trace_root_activity_seq(&self) -> u64 {
         (self
             .next_trace_root_activity_seq
@@ -2460,24 +2615,22 @@ impl ActorDaemonCoordinator {
             || ingress.root_family_reflog_start_offsets.contains_key(root)
     }
 
-    fn trace_root_waits_for_family_settle(ingress: &TraceIngressState, root: &str) -> bool {
+    fn trace_root_blocks_family_progress(ingress: &TraceIngressState, root: &str) -> bool {
         if !Self::trace_root_is_tracked(ingress, root) {
             return false;
         }
 
-        let parsed = ingress
+        let primary = ingress
             .root_argv
             .get(root)
-            .map(|argv| parse_git_cli_args(trace_invocation_args(argv)));
-        let primary = parsed.as_ref().and_then(|parsed| parsed.command.clone());
+            .map(|argv| parse_git_cli_args(trace_invocation_args(argv)))
+            .and_then(|parsed| parsed.command);
+
         if matches!(primary.as_deref(), Some("status")) {
             return true;
         }
 
-        trace_command_may_mutate_refs(primary.as_deref())
-            || parsed
-                .as_ref()
-                .is_some_and(crate::daemon::test_sync::tracks_parsed_git_invocation_for_test_sync)
+        Self::trace_command_participates_in_family_sequencer(primary.as_deref())
             || ingress.root_mutating.get(root).copied().unwrap_or(false)
     }
 
@@ -2956,6 +3109,30 @@ impl ActorDaemonCoordinator {
         (self.next_trace_ingest_seq.fetch_add(1, Ordering::SeqCst) as u64) + 1
     }
 
+    fn trace_ingest_high_watermark(&self) -> u64 {
+        self.next_trace_ingest_seq.load(Ordering::SeqCst) as u64
+    }
+
+    async fn wait_for_trace_ingest_processed_through(&self, seq: u64) -> Result<(), GitAiError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let notified = self.trace_ingest_progress_notify.notified();
+            let processed = self.processed_trace_ingest_seq.load(Ordering::SeqCst) as u64;
+            if processed >= seq {
+                return Ok(());
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(GitAiError::Generic(format!(
+                    "timed out waiting for trace ingest through seq {} (processed={})",
+                    seq, processed
+                )));
+            }
+            let wait_for = deadline.saturating_duration_since(now);
+            let _ = tokio::time::timeout(wait_for, notified).await;
+        }
+    }
+
     fn start_trace_ingest_worker(self: &Arc<Self>) -> Result<(), GitAiError> {
         let mut guard = self
             .trace_ingest_tx
@@ -3037,6 +3214,10 @@ impl ActorDaemonCoordinator {
                             error
                         ));
                     }
+                    coordinator
+                        .processed_trace_ingest_seq
+                        .store(seq as usize, Ordering::SeqCst);
+                    coordinator.trace_ingest_progress_notify.notify_waiters();
                     next_seq = next_seq.saturating_add(1);
                 }
             }
@@ -3626,98 +3807,75 @@ impl ActorDaemonCoordinator {
             .clone())
     }
 
-    async fn enqueue_ordered_family_side_effect_entry(
+    async fn append_checkpoint_to_family_sequencer(
         &self,
         family: &str,
-        seq: u64,
-        entry: OrderedSideEffectEntry,
-    ) -> Result<(), GitAiError> {
-        self.enqueue_ordered_family_side_effect_entry_internal(family, seq, entry, true)
-            .await
-    }
-
-    async fn enqueue_ordered_family_side_effect_entry_no_drain(
-        &self,
-        family: &str,
-        seq: u64,
-        entry: OrderedSideEffectEntry,
-    ) -> Result<(), GitAiError> {
-        self.enqueue_ordered_family_side_effect_entry_internal(family, seq, entry, false)
-            .await
-    }
-
-    async fn enqueue_ordered_family_side_effect_entry_internal(
-        &self,
-        family: &str,
-        seq: u64,
-        entry: OrderedSideEffectEntry,
-        drain_now: bool,
+        request: CheckpointRunRequest,
+        respond_to: Option<oneshot::Sender<Result<u64, GitAiError>>>,
     ) -> Result<(), GitAiError> {
         let exec_lock = self.side_effect_exec_lock(family)?;
         let _guard = exec_lock.lock().await;
 
         {
-            let mut map = self.ordered_side_effects_by_family.lock().map_err(|_| {
-                GitAiError::Generic("ordered side effect map lock poisoned".to_string())
+            let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
+                GitAiError::Generic("family sequencer map lock poisoned".to_string())
             })?;
-            let state = map
-                .entry(family.to_string())
-                .or_insert_with(|| FamilySideEffectState {
-                    next_seq: 1,
-                    pending: BTreeMap::new(),
-                });
-            if seq < state.next_seq {
-                return Err(GitAiError::Generic(format!(
-                    "ordered side effect seq regression for family {}: seq {} < next_seq {}",
-                    family, seq, state.next_seq
-                )));
-            }
-            if state.pending.insert(seq, entry).is_some() {
-                return Err(GitAiError::Generic(format!(
-                    "duplicate ordered side effect seq {} for family {}",
-                    seq, family
-                )));
-            }
+            let state =
+                sequencers
+                    .entry(family.to_string())
+                    .or_insert_with(|| FamilySequencerState {
+                        next_order: 1,
+                        front_order: 1,
+                        entries: BTreeMap::new(),
+                    });
+            let order = state.next_order;
+            state.next_order = state.next_order.saturating_add(1);
+            state.entries.insert(
+                order,
+                FamilySequencerEntry::Checkpoint {
+                    request: Box::new(request),
+                    respond_to,
+                },
+            );
         }
 
-        if drain_now {
-            self.drain_ready_ordered_family_side_effect_entries_locked(family)
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn drain_ordered_family_side_effect_entries(
-        &self,
-        family: &str,
-    ) -> Result<(), GitAiError> {
-        let exec_lock = self.side_effect_exec_lock(family)?;
-        let _guard = exec_lock.lock().await;
-        self.drain_ready_ordered_family_side_effect_entries_locked(family)
+        self.drain_ready_family_sequencer_entries_locked(family)
             .await
     }
 
-    async fn drain_ready_ordered_family_side_effect_entries_locked(
+    async fn drain_ready_family_sequencer_entries_locked(
         &self,
         family: &str,
     ) -> Result<(), GitAiError> {
-        let mut ready: Vec<(u64, OrderedSideEffectEntry)> = Vec::new();
+        let mut ready: Vec<(u64, FamilySequencerEntry)> = Vec::new();
         let mut progressed = false;
         {
-            let mut map = self.ordered_side_effects_by_family.lock().map_err(|_| {
-                GitAiError::Generic("ordered side effect map lock poisoned".to_string())
+            let mut map = self.family_sequencers_by_family.lock().map_err(|_| {
+                GitAiError::Generic("family sequencer map lock poisoned".to_string())
             })?;
             let state = map
                 .entry(family.to_string())
-                .or_insert_with(|| FamilySideEffectState {
-                    next_seq: 1,
-                    pending: BTreeMap::new(),
+                .or_insert_with(|| FamilySequencerState {
+                    next_order: 1,
+                    front_order: 1,
+                    entries: BTreeMap::new(),
                 });
-            while let Some(next_entry) = state.pending.remove(&state.next_seq) {
-                let seq = state.next_seq;
-                ready.push((seq, next_entry));
-                state.next_seq = state.next_seq.saturating_add(1);
-                progressed = true;
+            loop {
+                let Some(entry) = state.entries.remove(&state.front_order) else {
+                    break;
+                };
+                match entry {
+                    FamilySequencerEntry::PendingRoot => {
+                        state.entries.insert(state.front_order, entry);
+                        break;
+                    }
+                    other => {
+                        let order = state.front_order;
+                        state.front_order = state.front_order.saturating_add(1);
+                        ready.push((order, other));
+                        progressed = true;
+                    }
+                }
             }
         }
 
@@ -3726,65 +3884,77 @@ impl ActorDaemonCoordinator {
         }
 
         let _ = self.begin_family_effect(family);
-        for (seq, ready_entry) in ready {
+        for (order, ready_entry) in ready {
             match ready_entry {
-                OrderedSideEffectEntry::Command(applied) => {
+                FamilySequencerEntry::ReadyCommand(command) => {
+                    let result = self.coordinator.route_command(*command).await;
+                    let applied = match result {
+                        Ok(applied) => applied,
+                        Err(error) => {
+                            let _ = self.record_side_effect_error(family, order, &error);
+                            debug_log(&format!(
+                                "daemon command apply failed for family {} order {}: {}",
+                                family, order, error
+                            ));
+                            continue;
+                        }
+                    };
                     let result = self
                         .maybe_apply_side_effects_for_applied_command(Some(family), &applied)
                         .await;
                     if let Err(error) = &result {
-                        let _ = self.record_side_effect_error(family, seq, error);
+                        let _ = self.record_side_effect_error(family, order, error);
                         debug_log(&format!(
                             "daemon command side effect failed for family {} seq {}: {}",
-                            family, seq, error
+                            family, applied.seq, error
                         ));
                     }
-                    let sync_tracked =
-                        crate::daemon::test_sync::tracks_primary_command_for_test_sync(
-                            applied.command.primary_command.as_deref(),
-                            &applied.command.invoked_args,
-                        );
-                    let test_sync_session =
-                        crate::daemon::test_sync::test_sync_session_from_invocation(
-                            &parsed_invocation_for_normalized_command(&applied.command),
-                        );
-                    let log_entry = TestCompletionLogEntry {
-                        seq,
-                        family_key: family.to_string(),
-                        kind: "command".to_string(),
-                        primary_command: applied.command.primary_command.clone(),
-                        test_sync_session,
-                        exit_code: Some(applied.command.exit_code),
-                        sync_tracked,
-                        status: if result.is_ok() {
-                            "ok".to_string()
-                        } else {
-                            "error".to_string()
-                        },
-                        error: result.err().map(|error| error.to_string()),
-                    };
-                    if let Err(error) = self.maybe_append_test_completion_log(family, &log_entry) {
-                        let _ = self.record_side_effect_error(family, seq, &error);
+                    if let Err(error) =
+                        self.append_command_completion_log(family, &applied, &result, order)
+                    {
+                        let _ = self.record_side_effect_error(family, order, &error);
                         debug_log(&format!(
-                            "daemon command completion log write failed for family {} seq {}: {}",
-                            family, seq, error
+                            "daemon command completion log write failed for family {} order {}: {}",
+                            family, order, error
                         ));
                     }
                 }
-                OrderedSideEffectEntry::Checkpoint(request) => {
+                FamilySequencerEntry::Checkpoint {
+                    request,
+                    respond_to,
+                } => {
+                    let id = format!(
+                        "cp-{}",
+                        short_hash_json(&serde_json::to_value(&request).map_err(GitAiError::from)?)
+                    );
+                    let author = request
+                        .author
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let observed = crate::daemon::domain::CheckpointObserved {
+                        repo_working_dir: PathBuf::from(&request.repo_working_dir),
+                        id,
+                        author,
+                        timestamp_ns: now_unix_nanos(),
+                        file_count: 0,
+                    };
+                    let ack = self.coordinator.apply_checkpoint(observed).await;
                     let should_log_completion =
                         crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
-                    let result = apply_checkpoint_side_effect(*request);
+                    let result = match ack {
+                        Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
+                        Err(error) => Err(error),
+                    };
                     if let Err(error) = &result {
-                        let _ = self.record_side_effect_error(family, seq, error);
+                        let _ = self.record_side_effect_error(family, order, error);
                         debug_log(&format!(
-                            "daemon checkpoint side effect failed for family {} seq {}: {}",
-                            family, seq, error
+                            "daemon checkpoint side effect failed for family {} order {}: {}",
+                            family, order, error
                         ));
                     }
                     if should_log_completion {
                         let log_entry = TestCompletionLogEntry {
-                            seq,
+                            seq: result.as_ref().copied().unwrap_or(0),
                             family_key: family.to_string(),
                             kind: "checkpoint".to_string(),
                             primary_command: Some("checkpoint".to_string()),
@@ -3796,20 +3966,24 @@ impl ActorDaemonCoordinator {
                             } else {
                                 "error".to_string()
                             },
-                            error: result.err().map(|error| error.to_string()),
+                            error: result.as_ref().err().map(|error| error.to_string()),
                         };
                         if let Err(error) =
                             self.maybe_append_test_completion_log(family, &log_entry)
                         {
-                            let _ = self.record_side_effect_error(family, seq, &error);
+                            let _ = self.record_side_effect_error(family, order, &error);
                             debug_log(&format!(
-                                "daemon checkpoint completion log write failed for family {} seq {}: {}",
-                                family, seq, error
+                                "daemon checkpoint completion log write failed for family {} order {}: {}",
+                                family, order, error
                             ));
                         }
                     }
+                    if let Some(respond_to) = respond_to {
+                        let _ = respond_to.send(result);
+                    }
                 }
-                OrderedSideEffectEntry::Marker => {}
+                FamilySequencerEntry::Canceled => {}
+                FamilySequencerEntry::PendingRoot => {}
             }
         }
         let _ = self.end_family_effect(family);
@@ -3818,95 +3992,6 @@ impl ActorDaemonCoordinator {
             self.side_effect_progress_notify(family)?.notify_waiters();
         }
         Ok(())
-    }
-
-    async fn enqueue_ordered_family_side_effect_command(
-        &self,
-        family: &str,
-        applied: crate::daemon::domain::AppliedCommand,
-    ) -> Result<(), GitAiError> {
-        self.enqueue_ordered_family_side_effect_entry(
-            family,
-            applied.seq,
-            OrderedSideEffectEntry::Command(Box::new(applied)),
-        )
-        .await
-    }
-
-    async fn advance_ordered_family_side_effect_seq(
-        &self,
-        family: &str,
-        seq: u64,
-    ) -> Result<(), GitAiError> {
-        self.enqueue_ordered_family_side_effect_entry(family, seq, OrderedSideEffectEntry::Marker)
-            .await
-    }
-
-    async fn enqueue_ordered_family_checkpoint_side_effect(
-        &self,
-        family: &str,
-        seq: u64,
-        request: CheckpointRunRequest,
-    ) -> Result<(), GitAiError> {
-        self.enqueue_ordered_family_side_effect_entry(
-            family,
-            seq,
-            OrderedSideEffectEntry::Checkpoint(Box::new(request)),
-        )
-        .await
-    }
-
-    async fn wait_for_ordered_family_side_effect_seq(
-        &self,
-        family: &str,
-        seq: u64,
-    ) -> Result<(), GitAiError> {
-        let notify = self.side_effect_progress_notify(family)?;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let notified = notify.notified();
-            // Read progress under the family execution lock so we never observe
-            // `next_seq` while ordered side effects are still in flight.
-            let exec_lock = self.side_effect_exec_lock(family)?;
-            let _guard = exec_lock.lock().await;
-            let (applied, side_effect_error) = {
-                let map = self.ordered_side_effects_by_family.lock().map_err(|_| {
-                    GitAiError::Generic("ordered side effect map lock poisoned".to_string())
-                })?;
-                let applied = map
-                    .get(family)
-                    .map(|state| state.next_seq.saturating_sub(1))
-                    .unwrap_or(0);
-                let side_effect_error = self
-                    .side_effect_errors_by_family
-                    .lock()
-                    .map_err(|_| {
-                        GitAiError::Generic("side effect errors map lock poisoned".to_string())
-                    })?
-                    .get(family)
-                    .and_then(|errors| errors.get(&seq).cloned());
-                (applied, side_effect_error)
-            };
-            if let Some(error) = side_effect_error {
-                return Err(GitAiError::Generic(format!(
-                    "ordered side effect failed for family {} seq {}: {}",
-                    family, seq, error
-                )));
-            }
-            if applied >= seq {
-                return Ok(());
-            }
-            drop(_guard);
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return Err(GitAiError::Generic(format!(
-                    "timed out waiting for side effects through seq {} for family {}",
-                    seq, family
-                )));
-            }
-            let wait_for = deadline.saturating_duration_since(now);
-            let _ = tokio::time::timeout(wait_for, notified).await;
-        }
     }
 
     async fn sweep_orphan_trace_roots_for_family(&self, family: &str) -> Result<(), GitAiError> {
@@ -3919,20 +4004,17 @@ impl ActorDaemonCoordinator {
                 .iter()
                 .filter_map(|(root_sid, tracked_family)| {
                     if tracked_family != family
-                        || !Self::trace_root_waits_for_family_settle(&ingress, root_sid)
+                        || !Self::trace_root_blocks_family_progress(&ingress, root_sid)
                     {
                         return None;
                     }
-                    if ingress
+                    ingress
                         .root_open_connections
                         .get(root_sid)
                         .copied()
                         .unwrap_or(0)
-                        > 0
-                    {
-                        return None;
-                    }
-                    Some(root_sid.clone())
+                        .eq(&0)
+                        .then_some(root_sid.clone())
                 })
                 .collect::<Vec<_>>()
         };
@@ -3991,6 +4073,9 @@ impl ActorDaemonCoordinator {
                     "argv": raw_argv,
                 })),
             );
+            let _ = self
+                .replace_pending_root_entry(&root_sid, FamilySequencerEntry::Canceled)
+                .await;
             if let Some(family) = family.as_deref() {
                 let _ = self.record_trace_root_error(family, &error);
             }
@@ -4011,7 +4096,7 @@ impl ActorDaemonCoordinator {
             .iter()
             .filter(|(root_sid, tracked_family)| {
                 tracked_family.as_str() == family
-                    && Self::trace_root_waits_for_family_settle(&ingress, root_sid)
+                    && Self::trace_root_blocks_family_progress(&ingress, root_sid)
             })
             .count() as u64)
     }
@@ -4032,7 +4117,7 @@ impl ActorDaemonCoordinator {
 
         for (root_sid, tracked_family) in &ingress.root_families {
             if tracked_family != family
-                || !Self::trace_root_waits_for_family_settle(&ingress, root_sid)
+                || !Self::trace_root_blocks_family_progress(&ingress, root_sid)
             {
                 continue;
             }
@@ -4807,36 +4892,6 @@ impl ActorDaemonCoordinator {
         Ok(out)
     }
 
-    async fn env_overrides_for_worktree(&self, worktree: &Path) -> Option<HashMap<String, String>> {
-        let snapshot = match self.coordinator.snapshot_family(worktree).await {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                debug_log(&format!(
-                    "daemon failed to read family snapshot for env overrides ({}): {}",
-                    worktree.display(),
-                    err
-                ));
-                return None;
-            }
-        };
-
-        if let Some(overrides) = snapshot.env_overrides.get(worktree) {
-            return Some(overrides.clone());
-        }
-
-        let worktree_str = worktree.to_string_lossy();
-        snapshot
-            .env_overrides
-            .into_iter()
-            .find_map(|(key, overrides)| {
-                if key.to_string_lossy() == worktree_str {
-                    Some(overrides)
-                } else {
-                    None
-                }
-            })
-    }
-
     async fn maybe_apply_side_effects_for_applied_command(
         &self,
         family: Option<&str>,
@@ -5058,11 +5113,9 @@ impl ActorDaemonCoordinator {
             emitted_rewrite_event = true;
             if let Some(worktree) = cmd.worktree.as_ref() {
                 let worktree = worktree.to_string_lossy().to_string();
-                let env_overrides = self.env_overrides_for_worktree(worktree.as_ref()).await;
                 apply_rewrite_side_effect(
                     &worktree,
                     rewrite_event.clone(),
-                    env_overrides.as_ref(),
                     carryover_snapshot.as_ref(),
                     reset_pathspecs.as_deref(),
                 )?;
@@ -5132,23 +5185,58 @@ impl ActorDaemonCoordinator {
     async fn apply_trace_payload_to_state(
         &self,
         payload: Value,
-    ) -> Result<Option<crate::daemon::domain::AppliedCommand>, GitAiError> {
+    ) -> Result<TracePayloadApplyOutcome, GitAiError> {
+        self.maybe_append_pending_root_from_trace_payload(&payload)?;
+        let payload_root_sid = Self::trace_payload_root_sid(&payload);
+        let event = payload
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let emitted = {
             let mut normalizer = self.normalizer.lock().await;
             normalizer.ingest_payload(&payload)?
         };
         let Some(command) = emitted else {
-            return Ok(None);
+            if is_terminal_root_trace_event(
+                &event,
+                payload
+                    .get("sid")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                payload_root_sid.as_deref().unwrap_or_default(),
+            ) && let Some(root_sid) = payload_root_sid.as_deref()
+                && let Some(family) = self
+                    .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
+                    .await?
+            {
+                self.clear_trace_root_tracking(root_sid)?;
+                return Ok(TracePayloadApplyOutcome::QueuedFamily(family));
+            }
+            return Ok(TracePayloadApplyOutcome::None);
         };
         let root_sid = command.root_sid.clone();
-        match self.coordinator.route_command(command).await {
-            Ok(applied) => Ok(Some(applied)),
-            Err(error) => {
-                let _ = self.clear_trace_root_tracking(&root_sid);
-                let _ = self.discard_carryover_snapshots_for_root(&root_sid);
-                Err(error)
+
+        let outcome = if let Some(family) = self
+            .replace_pending_root_entry(
+                &root_sid,
+                FamilySequencerEntry::ReadyCommand(Box::new(command.clone())),
+            )
+            .await?
+        {
+            TracePayloadApplyOutcome::QueuedFamily(family)
+        } else {
+            match self.coordinator.route_command(command).await {
+                Ok(applied) => TracePayloadApplyOutcome::Applied(Box::new(applied)),
+                Err(error) => {
+                    let _ = self.clear_trace_root_tracking(&root_sid);
+                    let _ = self.discard_carryover_snapshots_for_root(&root_sid);
+                    return Err(error);
+                }
             }
-        }
+        };
+        self.clear_trace_root_tracking(&root_sid)?;
+        Ok(outcome)
     }
 
     async fn ingest_trace_payload(
@@ -5164,64 +5252,85 @@ impl ActorDaemonCoordinator {
             ));
         }
 
-        let Some(applied) = self.apply_trace_payload_to_state(payload).await? else {
-            return Ok(ControlResponse::ok(
+        match self.apply_trace_payload_to_state(payload).await? {
+            TracePayloadApplyOutcome::None => Ok(ControlResponse::ok(
                 None,
                 None,
                 Some(json!({ "buffered": true })),
-            ));
-        };
-        if let Some(family) = applied
-            .command
-            .family_key
-            .as_ref()
-            .map(|key| key.0.as_str())
-        {
-            self.enqueue_ordered_family_side_effect_command(family, applied.clone())
-                .await?;
-        }
-        self.clear_trace_root_tracking(&applied.command.root_sid)?;
+            )),
+            TracePayloadApplyOutcome::Applied(applied) => {
+                if let Some(family) = applied
+                    .command
+                    .family_key
+                    .as_ref()
+                    .map(|key| key.0.as_str())
+                {
+                    self.begin_family_effect(family)?;
+                    let result = self
+                        .maybe_apply_side_effects_for_applied_command(Some(family), &applied)
+                        .await;
+                    let _ = self.end_family_effect(family);
+                    if let Err(error) = result {
+                        let _ = self.record_side_effect_error(family, applied.seq, &error);
+                        return Err(error);
+                    }
+                    if let Err(error) =
+                        self.append_command_completion_log(family, &applied, &Ok(()), applied.seq)
+                    {
+                        let _ = self.record_side_effect_error(family, applied.seq, &error);
+                        return Err(error);
+                    }
+                }
 
-        if wait && let Some(worktree) = applied.command.worktree.as_ref() {
-            let _ = self.coordinator.barrier_family(worktree, applied.seq).await;
-        }
+                if wait && let Some(worktree) = applied.command.worktree.as_ref() {
+                    let _ = self.coordinator.barrier_family(worktree, applied.seq).await;
+                }
 
-        Ok(ControlResponse::ok(
-            Some(applied.seq),
-            if wait { Some(applied.seq) } else { None },
-            None,
-        ))
+                Ok(ControlResponse::ok(
+                    Some(applied.seq),
+                    if wait { Some(applied.seq) } else { None },
+                    None,
+                ))
+            }
+            TracePayloadApplyOutcome::QueuedFamily(family) => Ok(ControlResponse::ok(
+                None,
+                None,
+                Some(json!({ "queued": true, "family_key": family })),
+            )),
+        }
     }
 
     async fn ingest_trace_payload_fast(self: Arc<Self>, payload: Value) -> Result<(), GitAiError> {
         if !is_trace_payload(&payload) {
             return Ok(());
         }
-        let Some(applied) = self.apply_trace_payload_to_state(payload).await? else {
-            return Ok(());
-        };
-        let root_sid = applied.command.root_sid.clone();
-        if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
-            self.enqueue_ordered_family_side_effect_entry_no_drain(
-                &family,
-                applied.seq,
-                OrderedSideEffectEntry::Command(Box::new(applied)),
-            )
-            .await?;
-            let coordinator = self.clone();
-            tokio::spawn(async move {
-                if let Err(error) = coordinator
-                    .drain_ordered_family_side_effect_entries(&family)
-                    .await
-                {
-                    debug_log(&format!(
-                        "daemon async side-effect drain error for family {}: {}",
-                        family, error
-                    ));
+        match self.apply_trace_payload_to_state(payload).await? {
+            TracePayloadApplyOutcome::None | TracePayloadApplyOutcome::QueuedFamily(_) => {}
+            TracePayloadApplyOutcome::Applied(applied) => {
+                if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
+                    self.begin_family_effect(&family)?;
+                    let result = self
+                        .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
+                        .await;
+                    let _ = self.end_family_effect(&family);
+                    if let Err(error) = result {
+                        let _ = self.record_side_effect_error(&family, applied.seq, &error);
+                        debug_log(&format!(
+                            "daemon async side-effect error for family {} seq {}: {}",
+                            family, applied.seq, error
+                        ));
+                    } else if let Err(error) =
+                        self.append_command_completion_log(&family, &applied, &Ok(()), applied.seq)
+                    {
+                        let _ = self.record_side_effect_error(&family, applied.seq, &error);
+                        debug_log(&format!(
+                            "daemon async completion log write failed for family {} seq {}: {}",
+                            family, applied.seq, error
+                        ));
+                    }
                 }
-            });
+            }
         }
-        self.clear_trace_root_tracking(&root_sid)?;
 
         Ok(())
     }
@@ -5238,64 +5347,25 @@ impl ActorDaemonCoordinator {
             ));
         }
         let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
-        let pending_trace_roots = self.family_pending_trace_root_count(&family.0).await?;
-        if pending_trace_roots > 0 || self.pending_ordered_effect_depth(&family.0)? > 0 {
-            let _ = self
-                .wait_until_family_settled(repo_working_dir.clone())
+        let ingest_high_watermark = self.trace_ingest_high_watermark();
+        if ingest_high_watermark > 0 {
+            self.wait_for_trace_ingest_processed_through(ingest_high_watermark)
                 .await?;
         }
-        let id = format!(
-            "cp-{}",
-            short_hash_json(&serde_json::to_value(&request).map_err(GitAiError::from)?)
-        );
-        let author = request
-            .author
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let observed = crate::daemon::domain::CheckpointObserved {
-            repo_working_dir: PathBuf::from(&repo_working_dir),
-            id,
-            author,
-            timestamp_ns: now_unix_nanos(),
-            file_count: 0,
-        };
-        let ack = self.coordinator.apply_checkpoint(observed).await?;
-        self.enqueue_ordered_family_checkpoint_side_effect(&family.0, ack.seq, request)
-            .await?;
 
         if wait {
-            self.wait_for_ordered_family_side_effect_seq(&family.0, ack.seq)
+            let (tx, rx) = oneshot::channel();
+            self.append_checkpoint_to_family_sequencer(&family.0, request, Some(tx))
                 .await?;
-            self.coordinator
-                .barrier_family(Path::new(&repo_working_dir), ack.seq)
-                .await?;
-            return Ok(ControlResponse::ok(Some(ack.seq), Some(ack.seq), None));
+            let seq = rx.await.map_err(|_| {
+                GitAiError::Generic("checkpoint sequencer completion receive failed".to_string())
+            })??;
+            return Ok(ControlResponse::ok(Some(seq), Some(seq), None));
         }
-        Ok(ControlResponse::ok(Some(ack.seq), None, None))
-    }
 
-    async fn ingest_env_override(
-        &self,
-        repo_working_dir: String,
-        env: HashMap<String, String>,
-        wait: bool,
-    ) -> Result<ControlResponse, GitAiError> {
-        let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
-        let observed = crate::daemon::domain::EnvOverrideSet {
-            repo_working_dir: PathBuf::from(&repo_working_dir),
-            overrides: env,
-        };
-        let ack = self.coordinator.apply_env_override(observed).await?;
-        self.advance_ordered_family_side_effect_seq(&family.0, ack.seq)
+        self.append_checkpoint_to_family_sequencer(&family.0, request, None)
             .await?;
-        if wait {
-            self.coordinator
-                .barrier_family(Path::new(&repo_working_dir), ack.seq)
-                .await?;
-            return Ok(ControlResponse::ok(Some(ack.seq), Some(ack.seq), None));
-        }
-        Ok(ControlResponse::ok(Some(ack.seq), None, None))
+        Ok(ControlResponse::ok(None, None, None))
     }
 
     async fn status_for_family(
@@ -5450,14 +5520,6 @@ impl ActorDaemonCoordinator {
             }
             ControlRequest::CheckpointRun { request, wait } => {
                 self.ingest_checkpoint_payload(*request, wait.unwrap_or(false))
-                    .await
-            }
-            ControlRequest::EnvOverride {
-                repo_working_dir,
-                env,
-                wait,
-            } => {
-                self.ingest_env_override(repo_working_dir, env, wait.unwrap_or(false))
                     .await
             }
             ControlRequest::StatusFamily { repo_working_dir } => self

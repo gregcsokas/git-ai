@@ -1,6 +1,6 @@
 use crate::daemon::domain::{
-    AppliedCommand, ApplyAck, CheckpointObserved, CommandScope, EnvOverrideSet, FamilyKey,
-    FamilySnapshot, FamilyStatus, NormalizedCommand,
+    AppliedCommand, ApplyAck, CheckpointObserved, CommandScope, FamilyKey, FamilySnapshot,
+    FamilyStatus, NormalizedCommand,
 };
 use crate::daemon::family_actor::{FamilyActorHandle, spawn_family_actor};
 use crate::daemon::git_backend::GitBackend;
@@ -46,12 +46,6 @@ impl<B: GitBackend> Coordinator<B> {
         let family = self.backend.resolve_family(&checkpoint.repo_working_dir)?;
         let actor = self.get_or_create_family_actor(family).await;
         actor.apply_checkpoint(checkpoint).await
-    }
-
-    pub async fn apply_env_override(&self, env: EnvOverrideSet) -> Result<ApplyAck, GitAiError> {
-        let family = self.backend.resolve_family(&env.repo_working_dir)?;
-        let actor = self.get_or_create_family_actor(family).await;
-        actor.apply_env_override(env).await
     }
 
     pub async fn status_family(&self, repo_working_dir: &Path) -> Result<FamilyStatus, GitAiError> {

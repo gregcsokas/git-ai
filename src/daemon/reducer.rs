@@ -1,7 +1,7 @@
 use crate::daemon::analyzers::{AnalysisView, AnalyzerRegistry};
 use crate::daemon::domain::{
-    AnalysisResult, AppliedCommand, CheckpointObserved, CheckpointSummary, EnvOverrideSet,
-    FamilyState, GlobalState, NormalizedCommand, WorktreeState,
+    AnalysisResult, AppliedCommand, CheckpointObserved, CheckpointSummary, FamilyState,
+    GlobalState, NormalizedCommand, WorktreeState,
 };
 use crate::error::GitAiError;
 use std::collections::VecDeque;
@@ -58,15 +58,6 @@ pub fn reduce_checkpoint(state: &mut FamilyState, checkpoint: CheckpointObserved
             file_count: checkpoint.file_count,
         },
     );
-}
-
-pub fn reduce_env_override(state: &mut FamilyState, env: EnvOverrideSet) {
-    state.applied_seq = state.applied_seq.saturating_add(1);
-    let key = env
-        .repo_working_dir
-        .canonicalize()
-        .unwrap_or(env.repo_working_dir);
-    state.env_overrides.insert(key, env.overrides);
 }
 
 fn apply_ref_changes(state: &mut FamilyState, cmd: &NormalizedCommand) {
@@ -190,7 +181,6 @@ mod tests {
             worktrees: HashMap::new(),
             recent_commands: VecDeque::new(),
             checkpoints: HashMap::new(),
-            env_overrides: HashMap::new(),
             last_error: None,
             applied_seq: 0,
         }

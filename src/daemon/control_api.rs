@@ -1,7 +1,6 @@
 use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
@@ -11,12 +10,6 @@ pub enum ControlRequest {
     #[serde(rename = "checkpoint.run")]
     CheckpointRun {
         request: Box<CheckpointRunRequest>,
-        wait: Option<bool>,
-    },
-    #[serde(rename = "env.override")]
-    EnvOverride {
-        repo_working_dir: String,
-        env: HashMap<String, String>,
         wait: Option<bool>,
     },
     #[serde(rename = "status.family")]

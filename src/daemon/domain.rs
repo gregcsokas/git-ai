@@ -259,7 +259,6 @@ pub struct FamilyState {
     pub worktrees: HashMap<PathBuf, WorktreeState>,
     pub recent_commands: VecDeque<AppliedCommand>,
     pub checkpoints: HashMap<String, CheckpointSummary>,
-    pub env_overrides: HashMap<PathBuf, HashMap<String, String>>,
     pub last_error: Option<String>,
     pub applied_seq: u64,
 }
@@ -290,7 +289,6 @@ pub struct FamilySnapshot {
     pub worktrees: HashMap<PathBuf, WorktreeState>,
     pub recent_commands: Vec<AppliedCommand>,
     pub checkpoints: HashMap<String, CheckpointSummary>,
-    pub env_overrides: HashMap<PathBuf, HashMap<String, String>>,
     pub last_error: Option<String>,
     pub applied_seq: u64,
 }
@@ -302,10 +300,4 @@ pub struct CheckpointObserved {
     pub author: String,
     pub timestamp_ns: u128,
     pub file_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnvOverrideSet {
-    pub repo_working_dir: PathBuf,
-    pub overrides: HashMap<String, String>,
 }

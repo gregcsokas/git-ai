@@ -1,7 +1,7 @@
 use crate::daemon::analyzers::AnalyzerRegistry;
 use crate::daemon::domain::{
-    AppliedCommand, ApplyAck, CheckpointObserved, EnvOverrideSet, FamilyKey, FamilySnapshot,
-    FamilyState, FamilyStatus, NormalizedCommand,
+    AppliedCommand, ApplyAck, CheckpointObserved, FamilyKey, FamilySnapshot, FamilyState,
+    FamilyStatus, NormalizedCommand,
 };
 use crate::daemon::reducer;
 use crate::error::GitAiError;
@@ -15,10 +15,6 @@ pub enum FamilyMsg {
     ),
     ApplyCheckpoint(
         CheckpointObserved,
-        oneshot::Sender<Result<ApplyAck, GitAiError>>,
-    ),
-    ApplyEnvOverride(
-        EnvOverrideSet,
         oneshot::Sender<Result<ApplyAck, GitAiError>>,
     ),
     Status(oneshot::Sender<Result<FamilyStatus, GitAiError>>),
@@ -55,19 +51,6 @@ impl FamilyActorHandle {
             .map_err(|_| GitAiError::Generic("family actor checkpoint send failed".to_string()))?;
         rx.await.map_err(|_| {
             GitAiError::Generic("family actor checkpoint receive failed".to_string())
-        })?
-    }
-
-    pub async fn apply_env_override(&self, env: EnvOverrideSet) -> Result<ApplyAck, GitAiError> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(FamilyMsg::ApplyEnvOverride(env, tx))
-            .await
-            .map_err(|_| {
-                GitAiError::Generic("family actor env_override send failed".to_string())
-            })?;
-        rx.await.map_err(|_| {
-            GitAiError::Generic("family actor env_override receive failed".to_string())
         })?
     }
 
@@ -124,7 +107,6 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
             worktrees: HashMap::new(),
             recent_commands: VecDeque::new(),
             checkpoints: HashMap::new(),
-            env_overrides: HashMap::new(),
             last_error: None,
             applied_seq: 0,
         };
@@ -150,14 +132,6 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                     }));
                     satisfy_barriers(state.applied_seq, &mut waiters);
                 }
-                FamilyMsg::ApplyEnvOverride(env, respond_to) => {
-                    reducer::reduce_env_override(&mut state, env);
-                    let _ = respond_to.send(Ok(ApplyAck {
-                        seq: state.applied_seq,
-                        applied: true,
-                    }));
-                    satisfy_barriers(state.applied_seq, &mut waiters);
-                }
                 FamilyMsg::Status(respond_to) => {
                     let _ = respond_to.send(Ok(FamilyStatus {
                         family_key: state.family_key.clone(),
@@ -173,7 +147,6 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                         worktrees: state.worktrees.clone(),
                         recent_commands: state.recent_commands.iter().cloned().collect(),
                         checkpoints: state.checkpoints.clone(),
-                        env_overrides: state.env_overrides.clone(),
                         last_error: state.last_error.clone(),
                         applied_seq: state.applied_seq,
                     }));
