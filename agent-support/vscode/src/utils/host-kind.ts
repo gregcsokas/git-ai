@@ -53,9 +53,15 @@ export function detectIDEHost(): IDEHostConfiguration {
   // If we don't recognize the IDE, check if it's a custom VSCode-like IDE that should be treated as VSCode by checking the configuration file.
   if (kind === "unknown") {
     const vscodeIdeNames = loadVscodeIdeNames();
-    if (vscodeIdeNames.some(has)) {
-      kind = "vscode";
+    if (vscodeIdeNames.length > 0) {
+      console.log('[git-ai] Checking for VSCode-like IDE: ', vscodeIdeNames);
+      if (vscodeIdeNames.some(has)) {
+        kind = "vscode";
+        console.log('[git-ai] Found VSCode-like IDE: ', kind);
+      }
     }
+  } else {
+    console.log('[git-ai] Recognized IDE: ', kind);
   }
 
   return { kind, appName: vscode.env.appName, uriScheme: vscode.env.uriScheme, execPath: process.execPath };
