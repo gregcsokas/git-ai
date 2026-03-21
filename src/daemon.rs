@@ -12,7 +12,8 @@ use crate::git::repo_state::{
     read_head_state_for_worktree, read_ref_oid_for_worktree,
     resolve_linear_head_commit_chain_for_worktree, resolve_rebase_segment_for_worktree,
     resolve_reflog_old_oid_for_ref_new_oid_in_worktree, resolve_squash_source_head_for_worktree,
-    resolve_stash_target_oid_for_worktree, worktree_root_for_path,
+    resolve_stash_target_oid_for_worktree, resolve_worktree_head_reflog_old_oid_for_new_head,
+    worktree_root_for_path,
 };
 use crate::git::repository::{Repository, discover_repository_in_path_no_git_exec, exec_git};
 use crate::git::rewrite_log::{
@@ -531,6 +532,155 @@ fn commit_replay_files_from_snapshot(snapshot: &HashMap<String, String>) -> Vec<
     let mut files = snapshot.keys().cloned().collect::<Vec<_>>();
     files.sort();
     files
+}
+
+fn ref_change_span(
+    ref_changes: &[crate::daemon::domain::RefChange],
+    predicate: impl Fn(&crate::daemon::domain::RefChange) -> bool,
+) -> Option<(String, String)> {
+    let matching = ref_changes
+        .iter()
+        .filter(|change| predicate(change) && change.old.trim() != change.new.trim())
+        .collect::<Vec<_>>();
+    let first = matching.first()?;
+    let last = matching.last()?;
+    Some((first.old.clone(), last.new.clone()))
+}
+
+fn stable_head_change_from_ref_changes(
+    ref_changes: &[crate::daemon::domain::RefChange],
+) -> Option<(String, String)> {
+    ref_change_span(ref_changes, |change| change.reference == "HEAD")
+        .or_else(|| {
+            ref_change_span(ref_changes, |change| {
+                change.reference.starts_with("refs/heads/")
+            })
+        })
+        .or_else(|| {
+            ref_change_span(ref_changes, |change| {
+                is_non_auxiliary_ref(&change.reference)
+            })
+        })
+}
+
+fn stable_new_head_from_ref_changes(
+    ref_changes: &[crate::daemon::domain::RefChange],
+) -> Option<String> {
+    stable_head_change_from_ref_changes(ref_changes).map(|(_, new_head)| new_head)
+}
+
+fn stable_old_head_from_worktree_head_reflog(worktree: &Path, new_head: &str) -> Option<String> {
+    resolve_worktree_head_reflog_old_oid_for_new_head(worktree, new_head)
+        .ok()
+        .flatten()
+        .filter(|old_head| is_valid_oid(old_head) && !is_zero_oid(old_head))
+}
+
+fn commit_parent_head_for_capture(repo: &Repository, commit_sha: &str) -> Option<String> {
+    let commit = repo.find_commit(commit_sha.to_string()).ok()?;
+    commit.parent(0).ok().map(|parent| parent.id().to_string())
+}
+
+fn stable_carryover_heads_for_command(
+    repo: &Repository,
+    input: &CarryoverCaptureInput<'_>,
+    parsed: &ParsedGitInvocation,
+) -> Result<Option<(String, String)>, GitAiError> {
+    let command = parsed.command.as_deref().or(input.primary_command);
+    let Some(command) = command else {
+        return Ok(None);
+    };
+
+    let post_head = input
+        .post_repo
+        .and_then(|repo| repo.head.clone())
+        .filter(|head| is_valid_oid(head) && !is_zero_oid(head));
+    let ref_head_change = stable_head_change_from_ref_changes(input.ref_changes);
+    let rebase_start_target_hint = if command == "rebase" {
+        rebase_start_target_hint_from_args(&parsed.command_args)
+    } else {
+        None
+    };
+
+    let resolved = match command {
+        "commit" => {
+            let new_head = ref_head_change
+                .as_ref()
+                .map(|(_, new_head)| new_head.clone())
+                .or_else(|| post_head.clone())
+                .ok_or_else(|| {
+                    GitAiError::Generic(format!(
+                        "commit missing stable post-head for carryover capture sid={}",
+                        input.root_sid
+                    ))
+                })?;
+            let old_head = ref_head_change
+                .as_ref()
+                .map(|(old_head, _)| old_head.clone())
+                .filter(|old_head| !is_zero_oid(old_head))
+                .or_else(|| stable_old_head_from_worktree_head_reflog(input.worktree, &new_head))
+                .or_else(|| {
+                    if parsed.has_command_flag("--amend") {
+                        None
+                    } else {
+                        commit_parent_head_for_capture(repo, &new_head)
+                    }
+                })
+                .unwrap_or_else(|| "initial".to_string());
+            Some((old_head, new_head))
+        }
+        "rebase" | "pull" => ActorDaemonCoordinator::stable_rebase_heads_from_worktree(
+            repo,
+            input.worktree,
+            input.argv,
+            rebase_start_target_hint.as_deref(),
+        )?
+        .map(|(old_head, new_head, _onto_head)| (old_head, new_head))
+        .or_else(|| {
+            ref_head_change.clone().or_else(|| {
+                let new_head = post_head.clone()?;
+                let old_head =
+                    stable_old_head_from_worktree_head_reflog(input.worktree, &new_head)?;
+                Some((old_head, new_head))
+            })
+        }),
+        "checkout" | "switch" => {
+            let is_merge = parsed.has_command_flag("--merge") || parsed.has_command_flag("-m");
+            if !is_merge {
+                None
+            } else {
+                ref_head_change.clone().or_else(|| {
+                    let new_head = post_head.clone()?;
+                    let old_head =
+                        stable_old_head_from_worktree_head_reflog(input.worktree, &new_head)?;
+                    Some((old_head, new_head))
+                })
+            }
+        }
+        "reset" => {
+            if parsed.has_command_flag("--hard") {
+                None
+            } else if let Some((old_head, new_head)) = ref_head_change.clone() {
+                Some((old_head, new_head))
+            } else {
+                let new_head = post_head
+                    .clone()
+                    .or_else(|| stable_new_head_from_ref_changes(input.ref_changes))
+                    .ok_or_else(|| {
+                        GitAiError::Generic(format!(
+                            "reset missing stable head for carryover capture sid={}",
+                            input.root_sid
+                        ))
+                    })?;
+                let old_head = stable_old_head_from_worktree_head_reflog(input.worktree, &new_head)
+                    .unwrap_or_else(|| new_head.clone());
+                Some((old_head, new_head))
+            }
+        }
+        _ => None,
+    };
+
+    Ok(resolved)
 }
 
 fn resolve_explicit_rebase_branch_ref(worktree: &Path, argv: &[String]) -> Option<String> {
@@ -2030,8 +2180,8 @@ struct CarryoverCaptureInput<'a> {
     primary_command: Option<&'a str>,
     argv: &'a [String],
     exit_code: i32,
-    pre_repo: Option<&'a RepoContext>,
     post_repo: Option<&'a RepoContext>,
+    ref_changes: &'a [crate::daemon::domain::RefChange],
     merge_squash_staged_file_blobs: Option<&'a HashMap<String, String>>,
 }
 
@@ -2633,55 +2783,51 @@ impl ActorDaemonCoordinator {
         };
 
         let repo = discover_repository_in_path_no_git_exec(input.worktree)?;
-
-        let fallback_old_head = input
-            .pre_repo
-            .and_then(|repo| repo.head.as_deref())
-            .unwrap_or("initial");
-        let fallback_new_head = input
-            .post_repo
-            .and_then(|repo| repo.head.as_deref())
-            .unwrap_or_default();
+        let stable_heads = stable_carryover_heads_for_command(&repo, &input, &parsed)?;
 
         let mut file_paths = HashSet::new();
         match command {
             "commit" => {
-                file_paths.extend(tracked_working_log_files(&repo, fallback_old_head)?);
+                let (old_head, _) = stable_heads.clone().ok_or_else(|| {
+                    GitAiError::Generic(format!(
+                        "commit missing stable carryover heads sid={}",
+                        input.root_sid
+                    ))
+                })?;
+                file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
                 if let Some(staged_file_blobs) = input.merge_squash_staged_file_blobs {
                     file_paths.extend(staged_file_blobs.keys().cloned());
                 }
             }
             "rebase" | "pull" => {
-                let start_target_hint = if command == "rebase" {
-                    rebase_start_target_hint_from_args(&parsed.command_args)
-                } else {
-                    None
-                };
-                let (old_head, new_head) = Self::stable_rebase_heads_from_worktree(
-                    &repo,
-                    input.worktree,
-                    input.argv,
-                    start_target_hint.as_deref(),
-                )?
-                .map(|(old_head, new_head, _onto_head)| (old_head, new_head))
-                .unwrap_or_else(|| (fallback_old_head.to_string(), fallback_new_head.to_string()));
-                if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
-                    file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
+                if let Some((old_head, new_head)) = stable_heads.clone() {
+                    if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
+                        file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
+                    }
+                } else if command == "rebase" {
+                    return Err(GitAiError::Generic(format!(
+                        "rebase missing stable carryover heads sid={}",
+                        input.root_sid
+                    )));
                 }
             }
             "checkout" | "switch" => {
                 let is_merge = parsed.has_command_flag("--merge") || parsed.has_command_flag("-m");
                 if is_merge
-                    && !fallback_old_head.is_empty()
-                    && !fallback_new_head.is_empty()
-                    && fallback_old_head != fallback_new_head
+                    && let Some((old_head, new_head)) = stable_heads.clone()
+                    && !old_head.is_empty()
+                    && !new_head.is_empty()
+                    && old_head != new_head
                 {
-                    file_paths.extend(tracked_working_log_files(&repo, fallback_old_head)?);
+                    file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
                 }
             }
             "reset" => {
-                if !parsed.has_command_flag("--hard") && !fallback_old_head.is_empty() {
-                    file_paths.extend(tracked_working_log_files(&repo, fallback_old_head)?);
+                if !parsed.has_command_flag("--hard")
+                    && let Some((old_head, _new_head)) = stable_heads.clone()
+                    && !old_head.is_empty()
+                {
+                    file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
                     let pathspecs = parsed.pathspecs();
                     if !pathspecs.is_empty() {
                         file_paths.retain(|file| matches_any_pathspec(file, &pathspecs));
@@ -3267,8 +3413,8 @@ impl ActorDaemonCoordinator {
                     primary_command: effective_primary.as_deref(),
                     argv: &effective_argv,
                     exit_code: terminal_exit_code.unwrap_or(0),
-                    pre_repo: pre_repo.as_ref(),
                     post_repo: post_repo.as_ref(),
+                    ref_changes: terminal_ref_changes.as_deref().unwrap_or(&[]),
                     merge_squash_staged_file_blobs: merge_squash_staged_file_blobs.as_ref(),
                 }) {
                     Ok(Some(snapshot_id)) => {
@@ -3838,6 +3984,16 @@ impl ActorDaemonCoordinator {
     fn resolve_heads_for_command(
         cmd: &crate::daemon::domain::NormalizedCommand,
     ) -> (String, String) {
+        let reflog_old_head = cmd
+            .post_repo
+            .as_ref()
+            .and_then(|repo| repo.head.as_deref())
+            .filter(|head| is_valid_oid(head) && !is_zero_oid(head))
+            .and_then(|new_head| {
+                cmd.worktree.as_deref().and_then(|worktree| {
+                    stable_old_head_from_worktree_head_reflog(worktree, new_head)
+                })
+            });
         let old = cmd
             .ref_changes
             .iter()
@@ -3861,6 +4017,7 @@ impl ActorDaemonCoordinator {
                     .find(|change| is_non_auxiliary_ref(&change.reference))
                     .map(|change| change.old.clone())
             })
+            .or(reflog_old_head)
             .or_else(|| cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
             .unwrap_or_default();
         let new = cmd

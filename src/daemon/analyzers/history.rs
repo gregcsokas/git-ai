@@ -4,7 +4,8 @@ use crate::daemon::domain::{
 };
 use crate::error::GitAiError;
 use crate::git::cli_parser::{explicit_rebase_branch_arg, parse_git_cli_args};
-use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
+use crate::git::repo_state::{is_valid_git_oid, resolve_worktree_head_reflog_old_oid_for_new_head};
+#[cfg(test)]
 use std::fs;
 use std::path::Path;
 
@@ -349,41 +350,18 @@ fn commit_base_hint(
 ) -> Option<String> {
     sanitize_base(
         old_head_from_branch_ref_changes(cmd)
-            .or_else(|| non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone())))
             .or_else(|| old_head_from_worktree_head_reflog(cmd, new_head))
+            .or_else(|| non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone())))
             .or_else(|| old_head_from_refs(cmd, refs)),
         new_head,
     )
 }
 
 fn old_head_from_worktree_head_reflog(cmd: &NormalizedCommand, new_head: &str) -> Option<String> {
-    if !is_valid_git_oid(new_head) || is_zero_oid(new_head) {
-        return None;
-    }
-
     let worktree = cmd.worktree.as_deref()?;
-    let git_dir = git_dir_for_worktree(worktree)?;
-    let path = git_dir.join("logs").join("HEAD");
-    let contents = fs::read_to_string(path).ok()?;
-
-    for line in contents.lines().rev() {
-        let head = line.split('\t').next().unwrap_or_default();
-        let mut parts = head.split_whitespace();
-        let Some(old) = parts.next().map(str::trim) else {
-            continue;
-        };
-        let Some(new) = parts.next().map(str::trim) else {
-            continue;
-        };
-        if !is_valid_git_oid(old) || !is_valid_git_oid(new) || old == new {
-            continue;
-        }
-        if new == new_head {
-            return Some(old.to_string());
-        }
-    }
-
-    None
+    resolve_worktree_head_reflog_old_oid_for_new_head(worktree, new_head)
+        .ok()
+        .flatten()
 }
 
 fn rebase_change(

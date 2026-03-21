@@ -201,6 +201,21 @@ pub fn resolve_reflog_old_oid_for_ref_new_oid_in_worktree(
         .map(|entry| entry.old)
 }
 
+pub fn resolve_worktree_head_reflog_old_oid_for_new_head(
+    worktree: &Path,
+    new_oid: &str,
+) -> Result<Option<String>, GitAiError> {
+    if !is_valid_git_oid(new_oid) {
+        return Ok(None);
+    }
+
+    Ok(read_head_reflog_transitions_for_worktree(worktree)?
+        .into_iter()
+        .rev()
+        .find(|transition| transition.new == new_oid && is_valid_git_oid(&transition.old))
+        .map(|transition| transition.old))
+}
+
 pub fn read_head_state_for_worktree(worktree: &Path) -> Option<HeadState> {
     let git_dir = git_dir_for_worktree(worktree)?;
     let common_dir = common_dir_for_git_dir(&git_dir)?;
