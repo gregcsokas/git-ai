@@ -1290,6 +1290,7 @@ fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
         rebase_conflict.is_err(),
         "rebase should conflict for abort flow coverage"
     );
+    daemon.latest_seq_and_wait_idle();
     repo.git_og_with_env(&["rebase", "--abort"], &env_refs)
         .expect("rebase abort should succeed");
 
@@ -1351,6 +1352,7 @@ fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
         cherry_pick_conflict.is_err(),
         "cherry-pick should conflict for abort flow coverage"
     );
+    daemon.latest_seq_and_wait_idle();
     repo.git_og_with_env(&["cherry-pick", "--abort"], &env_refs)
         .expect("cherry-pick abort should succeed");
 
@@ -1539,6 +1541,7 @@ fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
         rebase_conflict.is_err(),
         "rebase should conflict before continue"
     );
+    daemon.latest_seq_and_wait_idle();
 
     fs::write(repo.path().join("rebase-continue.txt"), "resolved\n")
         .expect("failed to write resolved content");
@@ -1608,6 +1611,7 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
         cherry_conflict.is_err(),
         "cherry-pick should conflict before continue"
     );
+    daemon.latest_seq_and_wait_idle();
 
     fs::write(repo.path().join("cherry-continue.txt"), "resolved\n")
         .expect("failed to write resolved cherry content");
