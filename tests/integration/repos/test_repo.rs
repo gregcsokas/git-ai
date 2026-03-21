@@ -521,7 +521,7 @@ pub(crate) fn git_command_requires_daemon_completion_barrier(args: &[&str], succ
 
     match command {
         "merge" => success && args.contains(&"--squash"),
-        "reset" | "stash" => success,
+        "pull" | "reset" | "stash" => success,
         "cherry-pick" | "rebase" => !success,
         _ => false,
     }
