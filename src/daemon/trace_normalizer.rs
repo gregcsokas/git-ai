@@ -166,6 +166,34 @@ impl<B: GitBackend> TraceNormalizer<B> {
         removed
     }
 
+    pub fn sweep_orphans_for_roots(&mut self, roots: &[String]) -> Vec<OrphanTraceRoot> {
+        let mut removed = Vec::new();
+
+        for root_sid in roots {
+            if let Some(pending) = self.remove_pending_root(root_sid) {
+                removed.push(OrphanTraceRoot {
+                    root_sid: root_sid.clone(),
+                    raw_argv: pending.raw_argv,
+                    deferred_exit_only: false,
+                });
+                continue;
+            }
+
+            if self.state.deferred_exits.remove(root_sid).is_some() {
+                let _ = self.state.sid_to_worktree.remove(root_sid);
+                let _ = self.state.sid_to_family.remove(root_sid);
+                let _ = self.state.prestart_root_cmd_names.remove(root_sid);
+                removed.push(OrphanTraceRoot {
+                    root_sid: root_sid.clone(),
+                    raw_argv: Vec::new(),
+                    deferred_exit_only: true,
+                });
+            }
+        }
+
+        removed
+    }
+
     fn resolve_primary_hint(
         &self,
         root_cmd_name: Option<&str>,

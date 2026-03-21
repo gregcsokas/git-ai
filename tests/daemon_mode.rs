@@ -1000,6 +1000,57 @@ fn daemon_settled_family_barrier_errors_on_orphan_deferred_root() {
 
 #[test]
 #[serial]
+fn daemon_settled_family_barrier_errors_on_orphan_deferred_root_with_other_family_open() {
+    let repo_a = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo_b = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo_a);
+
+    let mut orphan_stream = open_trace_stream(&daemon.trace_socket_path);
+    write_trace_frames(
+        &mut orphan_stream,
+        &[serde_json::json!({
+            "event":"cmd_name",
+            "sid":"orphan-deferred-stash-a",
+            "ts":1,
+            "name":"stash",
+            "cwd":repo_a.path().to_string_lossy().to_string(),
+        })],
+    );
+    drop(orphan_stream);
+
+    let mut other_family_stream = open_trace_stream(&daemon.trace_socket_path);
+    write_trace_frames(
+        &mut other_family_stream,
+        &[serde_json::json!({
+            "event":"start",
+            "sid":"family-b-open-root-during-orphan-sweep",
+            "ts":1,
+            "argv":["git","status"],
+            "cwd":repo_b.path().to_string_lossy().to_string(),
+        })],
+    );
+
+    let settled = daemon.request(ControlRequest::BarrierSettledFamily {
+        repo_working_dir: repo_workdir_string(&repo_a),
+    });
+    assert!(
+        !settled.ok,
+        "family A barrier should fail fast on its orphan even while family B is active: {:?}",
+        settled
+    );
+    assert!(
+        settled
+            .error
+            .as_deref()
+            .is_some_and(|error| error
+                .contains("orphan deferred trace exit removed without active connections")),
+        "expected orphan deferred root error with another family active, got {:?}",
+        settled
+    );
+}
+
+#[test]
+#[serial]
 fn daemon_status_family_ignores_open_roots_from_other_families() {
     let repo_a = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let repo_b = TestRepo::new_with_mode(GitTestMode::Wrapper);

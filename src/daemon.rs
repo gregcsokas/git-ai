@@ -2211,7 +2211,7 @@ struct ActorDaemonCoordinator {
     next_carryover_snapshot_id: AtomicUsize,
     next_trace_root_activity_seq: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
-    active_trace_connections: AtomicUsize,
+    queued_trace_payloads_by_root: Mutex<HashMap<String, usize>>,
     trace_ingress_state: Mutex<TraceIngressState>,
     shutting_down: AtomicBool,
     shutdown_notify: Notify,
@@ -2254,7 +2254,7 @@ impl ActorDaemonCoordinator {
             next_carryover_snapshot_id: AtomicUsize::new(0),
             next_trace_root_activity_seq: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
-            active_trace_connections: AtomicUsize::new(0),
+            queued_trace_payloads_by_root: Mutex::new(HashMap::new()),
             trace_ingress_state: Mutex::new(TraceIngressState::default()),
             shutting_down: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
@@ -2394,18 +2394,6 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn trace_connection_opened(&self) {
-        self.active_trace_connections.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn trace_connection_closed(&self) {
-        let _ = self.active_trace_connections.fetch_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |current| Some(current.saturating_sub(1)),
-        );
-    }
-
     fn next_trace_root_activity_seq(&self) -> u64 {
         (self
             .next_trace_root_activity_seq
@@ -2518,6 +2506,55 @@ impl ActorDaemonCoordinator {
             stale_roots.push(root_sid.clone());
         }
         Ok(stale_roots)
+    }
+
+    fn trace_payload_root_sid(payload: &Value) -> Option<String> {
+        payload
+            .get("sid")
+            .and_then(Value::as_str)
+            .map(|sid| trace_root_sid(sid).to_string())
+    }
+
+    fn record_trace_payload_enqueued(&self, payload: &Value) -> Result<(), GitAiError> {
+        self.record_trace_payload_enqueued_root(Self::trace_payload_root_sid(payload).as_deref())
+    }
+
+    fn record_trace_payload_enqueued_root(&self, root_sid: Option<&str>) -> Result<(), GitAiError> {
+        let Some(root_sid) = root_sid else {
+            return Ok(());
+        };
+        let mut queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
+            GitAiError::Generic("queued trace payloads by root lock poisoned".to_string())
+        })?;
+        *queued.entry(root_sid.to_string()).or_insert(0) += 1;
+        Ok(())
+    }
+
+    fn record_trace_payload_processed_root(
+        &self,
+        root_sid: Option<&str>,
+    ) -> Result<(), GitAiError> {
+        let Some(root_sid) = root_sid else {
+            return Ok(());
+        };
+        let mut queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
+            GitAiError::Generic("queued trace payloads by root lock poisoned".to_string())
+        })?;
+        if let Some(count) = queued.get_mut(root_sid) {
+            if *count > 1 {
+                *count -= 1;
+            } else {
+                queued.remove(root_sid);
+            }
+        }
+        Ok(())
+    }
+
+    fn queued_trace_payload_count_for_root(&self, root_sid: &str) -> Result<usize, GitAiError> {
+        let queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
+            GitAiError::Generic("queued trace payloads by root lock poisoned".to_string())
+        })?;
+        Ok(queued.get(root_sid).copied().unwrap_or(0))
     }
 
     fn enqueue_stale_connection_close_fallbacks(&self, roots: &[String]) -> Result<(), GitAiError> {
@@ -2693,10 +2730,6 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn active_trace_connection_count(&self) -> u64 {
-        self.active_trace_connections.load(Ordering::SeqCst) as u64
-    }
-
     fn clear_trace_root_tracking(&self, root_sid: &str) -> Result<(), GitAiError> {
         let mut ingress = self
             .trace_ingress_state
@@ -2715,6 +2748,10 @@ impl ActorDaemonCoordinator {
         ingress.root_last_activity_ns.remove(root_sid);
         ingress.root_open_connections.remove(root_sid);
         ingress.root_close_fallback_enqueued.remove(root_sid);
+        let mut queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
+            GitAiError::Generic("queued trace payloads by root lock poisoned".to_string())
+        })?;
+        queued.remove(root_sid);
         Ok(())
     }
 
@@ -2927,6 +2964,7 @@ impl ActorDaemonCoordinator {
                     if let Some(object) = ordered_payload.as_object_mut() {
                         object.remove(TRACE_INGEST_SEQ_FIELD);
                     }
+                    let ordered_payload_root = Self::trace_payload_root_sid(&ordered_payload);
 
                     if let Err(error) = coordinator
                         .clone()
@@ -2940,6 +2978,14 @@ impl ActorDaemonCoordinator {
                         Ordering::SeqCst,
                         |current| Some(current.saturating_sub(1)),
                     );
+                    if let Err(error) = coordinator
+                        .record_trace_payload_processed_root(ordered_payload_root.as_deref())
+                    {
+                        debug_log(&format!(
+                            "daemon trace payload accounting error after ingest: {}",
+                            error
+                        ));
+                    }
                     next_seq = next_seq.saturating_add(1);
                 }
             }
@@ -2975,6 +3021,8 @@ impl ActorDaemonCoordinator {
             .as_ref()
             .cloned()
             .ok_or_else(|| GitAiError::Generic("trace ingest worker not started".to_string()))?;
+        let payload_root = Self::trace_payload_root_sid(&payload);
+        self.record_trace_payload_enqueued(&payload)?;
         self.queued_trace_payloads.fetch_add(1, Ordering::SeqCst);
         let send_result = match tx.try_send(payload) {
             Ok(()) => Ok(()),
@@ -2993,6 +3041,12 @@ impl ActorDaemonCoordinator {
                 Ordering::SeqCst,
                 |current| Some(current.saturating_sub(1)),
             );
+            if let Err(error) = self.record_trace_payload_processed_root(payload_root.as_deref()) {
+                debug_log(&format!(
+                    "daemon trace payload accounting rollback error: {}",
+                    error
+                ));
+            }
             return Err(GitAiError::Generic(
                 "trace ingest queue send failed".to_string(),
             ));
@@ -3779,16 +3833,48 @@ impl ActorDaemonCoordinator {
         }
     }
 
-    async fn sweep_orphan_trace_roots(&self) -> Result<(), GitAiError> {
-        let active_connections = self.active_trace_connection_count();
-        let queued_payloads = self.queued_trace_payloads.load(Ordering::SeqCst) as u64;
-        if active_connections != 0 || queued_payloads != 0 {
+    async fn sweep_orphan_trace_roots_for_family(&self, family: &str) -> Result<(), GitAiError> {
+        let orphan_candidates = {
+            let ingress = self.trace_ingress_state.lock().map_err(|_| {
+                GitAiError::Generic("trace ingress state lock poisoned".to_string())
+            })?;
+            ingress
+                .root_families
+                .iter()
+                .filter_map(|(root_sid, tracked_family)| {
+                    if tracked_family != family
+                        || !Self::trace_root_waits_for_family_settle(&ingress, root_sid)
+                    {
+                        return None;
+                    }
+                    if ingress
+                        .root_open_connections
+                        .get(root_sid)
+                        .copied()
+                        .unwrap_or(0)
+                        > 0
+                    {
+                        return None;
+                    }
+                    Some(root_sid.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut removable_roots = Vec::new();
+        for root_sid in orphan_candidates {
+            if self.queued_trace_payload_count_for_root(&root_sid)? == 0 {
+                removable_roots.push(root_sid);
+            }
+        }
+
+        if removable_roots.is_empty() {
             return Ok(());
         }
 
         let removed_roots = {
             let mut normalizer = self.normalizer.lock().await;
-            normalizer.sweep_orphans()
+            normalizer.sweep_orphans_for_roots(&removable_roots)
         };
 
         for removed in removed_roots {
@@ -3837,8 +3923,9 @@ impl ActorDaemonCoordinator {
     }
 
     async fn family_pending_trace_root_count(&self, family: &str) -> Result<u64, GitAiError> {
+        let _ = self.enqueue_connection_closed_trace_root_fallbacks_for_family(family);
         let _ = self.enqueue_idle_trace_root_fallbacks_for_family(family, 1_500);
-        self.sweep_orphan_trace_roots().await?;
+        self.sweep_orphan_trace_roots_for_family(family).await?;
         let ingress = self
             .trace_ingress_state
             .lock()
@@ -5236,8 +5323,6 @@ impl ActorDaemonCoordinator {
         let start = Instant::now();
         let total_timeout = Duration::from_secs(60);
         let last_status = loop {
-            self.enqueue_connection_closed_trace_root_fallbacks_for_family(&family.0)?;
-
             let status = self.status_for_family(repo_working_dir.clone()).await?;
             if let Some(error) = status.last_error.clone() {
                 return Err(GitAiError::Generic(format!(
@@ -5397,7 +5482,6 @@ fn handle_control_connection_actor(
 fn trace_listener_loop_actor(
     trace_socket_path: PathBuf,
     coordinator: Arc<ActorDaemonCoordinator>,
-    runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
     remove_socket_if_exists(&trace_socket_path)?;
     let listener = LocalSocketListener::bind(trace_socket_path.to_string_lossy().as_ref())
@@ -5411,9 +5495,8 @@ fn trace_listener_loop_actor(
             continue;
         };
         let coord = coordinator.clone();
-        let handle = runtime_handle.clone();
         std::thread::spawn(move || {
-            if let Err(e) = handle_trace_connection_actor(stream, coord, handle) {
+            if let Err(e) = handle_trace_connection_actor(stream, coord) {
                 debug_log(&format!("daemon trace connection error: {}", e));
             }
         });
@@ -5424,21 +5507,7 @@ fn trace_listener_loop_actor(
 fn handle_trace_connection_actor(
     stream: LocalSocketStream,
     coordinator: Arc<ActorDaemonCoordinator>,
-    runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
-    coordinator.trace_connection_opened();
-    struct TraceConnectionGuard {
-        coordinator: Arc<ActorDaemonCoordinator>,
-    }
-    impl Drop for TraceConnectionGuard {
-        fn drop(&mut self) {
-            self.coordinator.trace_connection_closed();
-        }
-    }
-    let _trace_connection_guard = TraceConnectionGuard {
-        coordinator: coordinator.clone(),
-    };
-
     let mut reader = BufReader::new(stream);
     let mut observed_roots = std::collections::BTreeSet::new();
     while let Some(line) = read_json_line(&mut reader)? {
@@ -5467,18 +5536,14 @@ fn handle_trace_connection_actor(
         let roots = observed_roots.into_iter().collect::<Vec<_>>();
         match coordinator.record_trace_connection_close(&roots) {
             Ok(stale_candidates) if !stale_candidates.is_empty() => {
-                let delayed_coordinator = coordinator.clone();
-                runtime_handle.spawn(async move {
-                    sleep(Duration::from_millis(750)).await;
-                    if let Err(error) = delayed_coordinator
-                        .enqueue_stale_connection_close_fallbacks(&stale_candidates)
-                    {
-                        debug_log(&format!(
-                            "daemon trace connection close fallback error: {}",
-                            error
-                        ));
-                    }
-                });
+                if let Err(error) =
+                    coordinator.enqueue_stale_connection_close_fallbacks(&stale_candidates)
+                {
+                    debug_log(&format!(
+                        "daemon trace connection close fallback error: {}",
+                        error
+                    ));
+                }
             }
             Ok(_) => {}
             Err(error) => {
@@ -5532,9 +5597,8 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
 
     let trace_coord = coordinator.clone();
     let trace_shutdown_coord = coordinator.clone();
-    let trace_handle = rt_handle.clone();
     let trace_thread = std::thread::spawn(move || {
-        if let Err(e) = trace_listener_loop_actor(trace_socket_path, trace_coord, trace_handle) {
+        if let Err(e) = trace_listener_loop_actor(trace_socket_path, trace_coord) {
             debug_log(&format!("daemon trace listener exited with error: {}", e));
             trace_shutdown_coord.request_shutdown();
         }
