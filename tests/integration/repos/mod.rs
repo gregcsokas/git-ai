@@ -47,8 +47,9 @@ macro_rules! subdir_test_variants {
 
                         use std::process::Command;
                         use $crate::repos::test_repo::{
-                            get_binary_path, git_command_routes_to_clone_target,
-                            git_command_requires_daemon_sync, GitTestMode,
+                            get_binary_path, git_command_requires_daemon_completion_barrier,
+                            git_command_routes_to_clone_target, git_command_requires_daemon_sync,
+                            GitTestMode,
                         };
 
                         let binary_path = get_binary_path();
@@ -120,11 +121,17 @@ macro_rules! subdir_test_variants {
                         if output.status.success() {
                             if daemon_command_pending {
                                 self.inner.record_daemon_family_expected_completion();
+                                if git_command_requires_daemon_completion_barrier(args, true) {
+                                    self.inner.sync_daemon_force();
+                                }
                             }
                             Ok(if stdout.is_empty() { stderr } else { stdout })
                         } else {
                             if daemon_command_pending {
                                 self.inner.record_daemon_family_expected_completion();
+                                if git_command_requires_daemon_completion_barrier(args, false) {
+                                    self.inner.sync_daemon_force();
+                                }
                             }
                             Err(stderr)
                         }
@@ -145,7 +152,8 @@ macro_rules! subdir_test_variants {
 
                             use std::process::Command;
                             use $crate::repos::test_repo::{
-                                get_binary_path, git_command_routes_to_clone_target,
+                                get_binary_path, git_command_requires_daemon_completion_barrier,
+                                git_command_routes_to_clone_target,
                                 git_command_requires_daemon_sync, GitTestMode,
                             };
 
@@ -222,11 +230,17 @@ macro_rules! subdir_test_variants {
                             if output.status.success() {
                                 if daemon_command_pending {
                                     self.inner.record_daemon_family_expected_completion();
+                                    if git_command_requires_daemon_completion_barrier(args, true) {
+                                        self.inner.sync_daemon_force();
+                                    }
                                 }
                                 Ok(if stdout.is_empty() { stderr } else { stdout })
                             } else {
                                 if daemon_command_pending {
                                     self.inner.record_daemon_family_expected_completion();
+                                    if git_command_requires_daemon_completion_barrier(args, false) {
+                                        self.inner.sync_daemon_force();
+                                    }
                                 }
                                 Err(stderr)
                             }

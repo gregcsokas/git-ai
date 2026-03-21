@@ -512,6 +512,18 @@ pub(crate) fn git_command_requires_daemon_sync(args: &[&str]) -> bool {
     matches!(command, "notes")
 }
 
+pub(crate) fn git_command_requires_daemon_completion_barrier(args: &[&str], success: bool) -> bool {
+    let Some((command, _subcommand)) = git_primary_command(args) else {
+        return false;
+    };
+
+    match command {
+        "reset" | "stash" => success,
+        "cherry-pick" | "rebase" => !success,
+        _ => false,
+    }
+}
+
 fn git_ai_primary_command<'a>(args: &'a [&'a str]) -> Option<&'a str> {
     args.iter().copied().find(|arg| !arg.starts_with('-'))
 }
@@ -1951,6 +1963,9 @@ impl TestRepo {
                         }
                     } else if daemon_command_pending {
                         self.record_daemon_family_expected_completion();
+                        if git_command_requires_daemon_completion_barrier(args, true) {
+                            self.sync_daemon_force();
+                        }
                     }
                 }
                 return Ok(combined);
@@ -1963,6 +1978,9 @@ impl TestRepo {
 
             if daemon_command_pending {
                 self.record_daemon_family_expected_completion();
+                if git_command_requires_daemon_completion_barrier(args, false) {
+                    self.sync_daemon_force();
+                }
             }
             return Err(stderr);
         }
