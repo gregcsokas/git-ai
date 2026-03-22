@@ -280,13 +280,6 @@ fn async_checkpoint_capture_dir(repo: &TestRepo, capture_id: &str) -> PathBuf {
     async_checkpoint_storage_root(repo).join(capture_id)
 }
 
-fn current_head_sha(repo: &TestRepo) -> String {
-    repo.git(&["rev-parse", "HEAD"])
-        .expect("failed to read HEAD")
-        .trim()
-        .to_string()
-}
-
 fn write_captured_checkpoint_fixture(
     repo: &TestRepo,
     capture_id: &str,
