@@ -234,6 +234,24 @@ fn async_checkpoint_manifest_path(capture_id: &str) -> Result<PathBuf, GitAiErro
     Ok(async_checkpoint_capture_dir(capture_id)?.join("manifest.json"))
 }
 
+fn cleanup_failed_captured_checkpoint_prepare(
+    capture_dir: &std::path::Path,
+    capture_id: &str,
+    error: &GitAiError,
+) {
+    if let Err(cleanup_error) = fs::remove_dir_all(capture_dir)
+        && cleanup_error.kind() != std::io::ErrorKind::NotFound
+    {
+        debug_log(&format!(
+            "failed cleaning up incomplete captured checkpoint {} at {} after error {}: {}",
+            capture_id,
+            capture_dir.display(),
+            error,
+            cleanup_error
+        ));
+    }
+}
+
 fn new_async_checkpoint_capture_id() -> String {
     let now_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -731,55 +749,66 @@ pub fn prepare_captured_checkpoint(
 
     let capture_id = new_async_checkpoint_capture_id();
     let capture_dir = async_checkpoint_capture_dir(&capture_id)?;
-    fs::create_dir_all(&capture_dir)?;
-    fs::create_dir_all(capture_dir.join("blobs"))?;
+    let manifest_result = (|| -> Result<PreparedCheckpointManifest, GitAiError> {
+        fs::create_dir_all(&capture_dir)?;
+        fs::create_dir_all(capture_dir.join("blobs"))?;
 
-    let mut files = Vec::with_capacity(resolved.files.len());
-    for file_path in &resolved.files {
-        let source = if let Some(content) = resolved.dirty_files.get(file_path).cloned() {
-            PreparedCheckpointFileSource::DirtyFileContent { content }
-        } else {
-            let content = repo
-                .storage
-                .working_log_for_base_commit(&resolved.base_commit)
-                .read_current_file_content(file_path)?;
-            let mut hasher = Sha256::new();
-            hasher.update(content.as_bytes());
-            let blob_name = format!("{:x}", hasher.finalize());
-            fs::write(capture_dir.join("blobs").join(&blob_name), content)?;
-            PreparedCheckpointFileSource::BlobRef { blob_name }
+        let live_working_log = repo
+            .storage
+            .working_log_for_base_commit(&resolved.base_commit);
+        let mut files = Vec::with_capacity(resolved.files.len());
+        for file_path in &resolved.files {
+            let source = if let Some(content) = resolved.dirty_files.get(file_path).cloned() {
+                PreparedCheckpointFileSource::DirtyFileContent { content }
+            } else {
+                let content = live_working_log.read_current_file_content(file_path)?;
+                let mut hasher = Sha256::new();
+                hasher.update(content.as_bytes());
+                let blob_name = format!("{:x}", hasher.finalize());
+                fs::write(capture_dir.join("blobs").join(&blob_name), content)?;
+                PreparedCheckpointFileSource::BlobRef { blob_name }
+            };
+            files.push(PreparedCheckpointFile {
+                path: file_path.clone(),
+                source,
+            });
+        }
+
+        let mut stored_agent_run_result = agent_run_result.cloned();
+        if let Some(agent_run_result) = stored_agent_run_result.as_mut() {
+            agent_run_result.dirty_files = None;
+        }
+
+        let manifest = PreparedCheckpointManifest {
+            repo_working_dir: repo
+                .workdir()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            base_commit: resolved.base_commit.clone(),
+            captured_at_ms: resolved.ts,
+            kind,
+            author: author.to_string(),
+            reset,
+            is_pre_commit,
+            explicit_path_role,
+            explicit_paths,
+            files,
+            agent_run_result: stored_agent_run_result,
         };
-        files.push(PreparedCheckpointFile {
-            path: file_path.clone(),
-            source,
-        });
-    }
+        fs::write(
+            async_checkpoint_manifest_path(&capture_id)?,
+            serde_json::to_vec(&manifest)?,
+        )?;
+        Ok(manifest)
+    })();
 
-    let mut stored_agent_run_result = agent_run_result.cloned();
-    if let Some(agent_run_result) = stored_agent_run_result.as_mut() {
-        agent_run_result.dirty_files = None;
-    }
-
-    let manifest = PreparedCheckpointManifest {
-        repo_working_dir: repo
-            .workdir()
-            .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        base_commit: resolved.base_commit,
-        captured_at_ms: resolved.ts,
-        kind,
-        author: author.to_string(),
-        reset,
-        is_pre_commit,
-        explicit_path_role,
-        explicit_paths,
-        files,
-        agent_run_result: stored_agent_run_result,
+    let manifest = match manifest_result {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            cleanup_failed_captured_checkpoint_prepare(&capture_dir, &capture_id, &error);
+            return Err(error);
+        }
     };
-    fs::write(
-        async_checkpoint_manifest_path(&capture_id)?,
-        serde_json::to_vec(&manifest)?,
-    )?;
 
     Ok(Some(PreparedCheckpointCapture {
         capture_id,
@@ -802,6 +831,28 @@ fn load_captured_checkpoint_manifest(
     Ok(serde_json::from_str(&manifest)?)
 }
 
+fn validate_captured_checkpoint_manifest_repo(
+    repo: &Repository,
+    manifest: &PreparedCheckpointManifest,
+) -> Result<(), GitAiError> {
+    let manifest_repo_workdir = PathBuf::from(&manifest.repo_working_dir);
+    let canonical_manifest_workdir = manifest_repo_workdir
+        .canonicalize()
+        .unwrap_or(manifest_repo_workdir);
+    let repo_workdir = repo.workdir()?;
+    let canonical_repo_workdir = repo_workdir.canonicalize().unwrap_or(repo_workdir);
+
+    if canonical_manifest_workdir != canonical_repo_workdir {
+        return Err(GitAiError::Generic(format!(
+            "captured checkpoint manifest repo mismatch: manifest {} does not match repo {}",
+            canonical_manifest_workdir.display(),
+            canonical_repo_workdir.display()
+        )));
+    }
+
+    Ok(())
+}
+
 pub fn execute_captured_checkpoint(
     repo: &Repository,
     capture_id: &str,
@@ -810,6 +861,7 @@ pub fn execute_captured_checkpoint(
     debug_log("[BENCHMARK] Starting captured checkpoint replay");
 
     let manifest = load_captured_checkpoint_manifest(capture_id)?;
+    validate_captured_checkpoint_manifest_repo(repo, &manifest)?;
     let mut dirty_files = HashMap::new();
     let capture_dir = async_checkpoint_capture_dir(capture_id)?;
 
@@ -1956,6 +2008,27 @@ mod tests {
         assert_eq!(
             explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&ai_result)),
             None
+        );
+    }
+
+    #[test]
+    fn test_cleanup_failed_captured_checkpoint_prepare_removes_partial_capture_dir() {
+        let temp = tempfile::tempdir().expect("temp dir should be creatable");
+        let capture_dir = temp.path().join("capture-fixture");
+        std::fs::create_dir_all(capture_dir.join("blobs"))
+            .expect("partial capture directory should be creatable");
+        std::fs::write(capture_dir.join("blobs").join("partial-blob"), "partial")
+            .expect("partial blob should be creatable");
+
+        cleanup_failed_captured_checkpoint_prepare(
+            &capture_dir,
+            "capture-fixture",
+            &GitAiError::Generic("synthetic prepare failure".to_string()),
+        );
+
+        assert!(
+            !capture_dir.exists(),
+            "cleanup helper should remove partial capture directories"
         );
     }
 

@@ -620,6 +620,69 @@ fn git_ai_primary_command<'a>(args: &'a [&'a str]) -> Option<&'a str> {
     args.iter().copied().find(|arg| !arg.starts_with('-'))
 }
 
+fn is_known_checkpoint_preset(arg: &str) -> bool {
+    matches!(
+        arg,
+        "claude"
+            | "codex"
+            | "continue-cli"
+            | "cursor"
+            | "gemini"
+            | "github-copilot"
+            | "amp"
+            | "windsurf"
+            | "opencode"
+            | "ai_tab"
+            | "mock_ai"
+            | "droid"
+            | "agent-v1"
+    )
+}
+
+fn normalize_test_git_ai_checkpoint_args(args: &[&str]) -> Vec<String> {
+    let original = args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+    if git_ai_primary_command(args) != Some("checkpoint") || args.len() <= 1 {
+        return original;
+    }
+
+    if args.iter().any(|arg| *arg == "--") {
+        return original;
+    }
+
+    let mut normalized = vec![args[0].to_string()];
+    let mut i = 1usize;
+    while i < args.len() {
+        match args[i] {
+            "--reset" => {
+                normalized.push(args[i].to_string());
+                i += 1;
+            }
+            "--hook-input" => {
+                normalized.push(args[i].to_string());
+                if let Some(value) = args.get(i + 1) {
+                    normalized.push((*value).to_string());
+                }
+                i += 2;
+            }
+            arg if arg.starts_with("--hook-input=") || arg.starts_with('-') => {
+                normalized.push(arg.to_string());
+                i += 1;
+            }
+            arg if is_known_checkpoint_preset(arg) => return original,
+            _ => {
+                normalized.push("--".to_string());
+                normalized.extend(args[i..].iter().map(|arg| (*arg).to_string()));
+                return normalized;
+            }
+        }
+    }
+
+    normalized
+}
+
 fn git_ai_command_requires_daemon_sync(args: &[&str]) -> bool {
     matches!(
         git_ai_primary_command(args),
@@ -1595,21 +1658,6 @@ impl TestRepo {
             return Vec::new();
         }
 
-        let known_presets = [
-            "claude",
-            "codex",
-            "continue-cli",
-            "cursor",
-            "gemini",
-            "github-copilot",
-            "amp",
-            "windsurf",
-            "opencode",
-            "ai_tab",
-            "mock_ai",
-            "droid",
-        ];
-
         let mut candidates = Vec::new();
         let mut i = 1usize;
         let mut seen_separator = false;
@@ -1635,7 +1683,7 @@ impl TestRepo {
                 _ if arg.starts_with("--hook-input=") || arg.starts_with('-') => {
                     i += 1;
                 }
-                _ if i == 1 && known_presets.contains(&arg) => {
+                _ if i == 1 && is_known_checkpoint_preset(arg) => {
                     i += 1;
                 }
                 _ => {
@@ -2174,6 +2222,7 @@ impl TestRepo {
         let binary_path = get_binary_path();
 
         let mut command = Command::new(binary_path);
+        let normalized_args = normalize_test_git_ai_checkpoint_args(args);
 
         let absolute_working_dir = working_dir.canonicalize().map_err(|e| {
             format!(
@@ -2182,7 +2231,9 @@ impl TestRepo {
                 e
             )
         })?;
-        command.args(args).current_dir(&absolute_working_dir);
+        command
+            .args(&normalized_args)
+            .current_dir(&absolute_working_dir);
         self.configure_git_ai_env(&mut command);
 
         if let Some(patch) = &self.config_patch
@@ -2221,9 +2272,10 @@ impl TestRepo {
         }
 
         let binary_path = get_binary_path();
+        let normalized_args = normalize_test_git_ai_checkpoint_args(args);
 
         let mut command = Command::new(binary_path);
-        command.args(args).current_dir(&self.path);
+        command.args(&normalized_args).current_dir(&self.path);
         self.configure_git_ai_env(&mut command);
 
         // Add config patch as environment variable if present
@@ -2274,10 +2326,11 @@ impl TestRepo {
         }
 
         let binary_path = get_binary_path();
+        let normalized_args = normalize_test_git_ai_checkpoint_args(args);
 
         let mut command = Command::new(binary_path);
         command
-            .args(args)
+            .args(&normalized_args)
             .current_dir(&self.path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -2791,4 +2844,54 @@ fn compile_binary() -> PathBuf {
 
 pub fn get_binary_path() -> &'static PathBuf {
     COMPILED_BINARY.get_or_init(compile_binary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_test_git_ai_checkpoint_args_inserts_separator_for_direct_file() {
+        assert_eq!(
+            normalize_test_git_ai_checkpoint_args(&["checkpoint", "src/lib.rs"]),
+            vec!["checkpoint", "--", "src/lib.rs"]
+        );
+        assert_eq!(
+            normalize_test_git_ai_checkpoint_args(&["checkpoint", "--reset", "src/lib.rs"]),
+            vec!["checkpoint", "--reset", "--", "src/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn test_normalize_test_git_ai_checkpoint_args_preserves_known_presets_and_separator() {
+        assert_eq!(
+            normalize_test_git_ai_checkpoint_args(&["checkpoint", "mock_ai", "src/lib.rs"]),
+            vec!["checkpoint", "mock_ai", "src/lib.rs"]
+        );
+        assert_eq!(
+            normalize_test_git_ai_checkpoint_args(&["checkpoint", "--", "src/lib.rs"]),
+            vec!["checkpoint", "--", "src/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn test_normalize_test_git_ai_checkpoint_args_handles_hook_input_before_pathspecs() {
+        assert_eq!(
+            normalize_test_git_ai_checkpoint_args(&[
+                "checkpoint",
+                "--hook-input",
+                "{\"cwd\":\"/tmp/repo\"}",
+                "src/lib.rs",
+                "src/main.rs",
+            ]),
+            vec![
+                "checkpoint",
+                "--hook-input",
+                "{\"cwd\":\"/tmp/repo\"}",
+                "--",
+                "src/lib.rs",
+                "src/main.rs",
+            ]
+        );
+    }
 }

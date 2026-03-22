@@ -888,14 +888,70 @@ fn daemon_test_mode_pathless_mock_ai_uses_waited_live_checkpoint_path() {
 
 #[test]
 #[serial]
+fn daemon_test_mode_human_checkpoint_direct_file_arg_queues_as_scoped_capture() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+
+    fs::write(repo.path().join("human-direct-path.txt"), "base\n").expect("failed to write base");
+    repo.git_og(&["add", "human-direct-path.txt"])
+        .expect("add should succeed");
+    repo.git_og(&["commit", "-m", "base commit"])
+        .expect("base commit should succeed");
+
+    fs::write(repo.path().join("human-direct-path.txt"), "base\nhuman\n")
+        .expect("failed to write human change");
+    let completion_baseline = repo.daemon_total_completion_count();
+
+    let output = repo
+        .git_ai(&["checkpoint", "human-direct-path.txt"])
+        .expect("direct-file human checkpoint should succeed");
+    assert!(
+        output.contains("Checkpoint queued"),
+        "direct-file human checkpoint should be normalized to a scoped captured request: {}",
+        output
+    );
+    assert!(
+        !output.contains("Checkpoint completed"),
+        "scoped human checkpoint should not stay on the waited live path: {}",
+        output
+    );
+
+    repo.wait_for_next_daemon_checkpoint_completion(completion_baseline);
+
+    let git_ai_repo = git_ai::git::repository::find_repository_in_path(
+        repo.path()
+            .to_str()
+            .expect("repo path should be valid UTF-8"),
+    )
+    .expect("repository should still be discoverable");
+    let base_commit = git_ai_repo
+        .head()
+        .ok()
+        .and_then(|head| head.target().ok())
+        .unwrap_or_else(|| "initial".to_string());
+    let checkpoints = git_ai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .read_all_checkpoints()
+        .expect("checkpoints should be readable");
+    assert!(
+        checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.kind == CheckpointKind::Human),
+        "normalized direct-file human checkpoint should still write the human checkpoint side effect"
+    );
+}
+
+#[test]
+#[serial]
 fn daemon_captured_checkpoint_replay_uses_blob_snapshot_after_worktree_changes() {
     let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
     let _daemon = DaemonGuard::start(&repo);
 
     fs::write(repo.path().join("captured-race.txt"), "base\n").expect("failed to write base");
-    repo.git(&["add", "captured-race.txt"])
+    repo.git_og(&["add", "captured-race.txt"])
         .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
+    repo.git_og(&["commit", "-m", "base commit"])
         .expect("base commit should succeed");
 
     fs::write(
@@ -976,9 +1032,9 @@ fn daemon_captured_checkpoint_replay_supports_mixed_dirty_and_blob_sources() {
 
     fs::write(repo.path().join("dirty-source.txt"), "base dirty\n").expect("failed to write base");
     fs::write(repo.path().join("blob-source.txt"), "base blob\n").expect("failed to write base");
-    repo.git(&["add", "dirty-source.txt", "blob-source.txt"])
+    repo.git_og(&["add", "dirty-source.txt", "blob-source.txt"])
         .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
+    repo.git_og(&["commit", "-m", "base commit"])
         .expect("base commit should succeed");
 
     fs::write(
@@ -1078,9 +1134,9 @@ fn daemon_captured_checkpoint_failure_cleans_up_capture_dir() {
     let _daemon = DaemonGuard::start(&repo);
 
     fs::write(repo.path().join("broken-capture.txt"), "base\n").expect("failed to write base");
-    repo.git(&["add", "broken-capture.txt"])
+    repo.git_og(&["add", "broken-capture.txt"])
         .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
+    repo.git_og(&["commit", "-m", "base commit"])
         .expect("base commit should succeed");
 
     let capture_id = "captured-broken-fixture";
@@ -1132,6 +1188,77 @@ fn daemon_captured_checkpoint_failure_cleans_up_capture_dir() {
     assert!(
         !capture_dir.exists(),
         "failed captured replay should still delete the capture fixture"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_captured_checkpoint_rejects_manifest_for_different_repo() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
+    let other_repo = TestRepo::new();
+    let _daemon = DaemonGuard::start(&repo);
+
+    fs::write(repo.path().join("wrong-repo-capture.txt"), "base\n").expect("failed to write base");
+    repo.git_og(&["add", "wrong-repo-capture.txt"])
+        .expect("add should succeed");
+    repo.git_og(&["commit", "-m", "base commit"])
+        .expect("base commit should succeed");
+
+    let capture_id = "captured-wrong-repo-fixture";
+    let capture_dir = write_captured_checkpoint_fixture(
+        &repo,
+        capture_id,
+        &PreparedCheckpointManifest {
+            repo_working_dir: other_repo.path().to_string_lossy().to_string(),
+            base_commit: current_head_sha(&repo),
+            captured_at_ms: 1_700_000_000_003,
+            kind: CheckpointKind::AiAgent,
+            author: "Test User".to_string(),
+            reset: false,
+            is_pre_commit: false,
+            explicit_path_role: PreparedPathRole::Edited,
+            explicit_paths: vec!["wrong-repo-capture.txt".to_string()],
+            files: vec![PreparedCheckpointFile {
+                path: "wrong-repo-capture.txt".to_string(),
+                source: PreparedCheckpointFileSource::BlobRef {
+                    blob_name: "wrong-repo-blob".to_string(),
+                },
+            }],
+            agent_run_result: Some(ai_agent_run_result(
+                &repo,
+                vec!["wrong-repo-capture.txt".to_string()],
+                None,
+            )),
+        },
+        &[("wrong-repo-blob", "captured content\n")],
+    );
+
+    let response = send_control_request(
+        &_daemon.control_socket_path,
+        &ControlRequest::CheckpointRun {
+            request: Box::new(CheckpointRunRequest::Captured(
+                CapturedCheckpointRunRequest {
+                    repo_working_dir: repo_workdir_string(&repo),
+                    capture_id: capture_id.to_string(),
+                },
+            )),
+            wait: Some(true),
+        },
+    )
+    .expect("wrong-repo captured replay request should return a response");
+    assert!(
+        !response.ok,
+        "captured replay should reject manifests for another repository"
+    );
+    let error = response.error.unwrap_or_default();
+    assert!(
+        error.contains("manifest repo mismatch"),
+        "expected repo mismatch error, got: {}",
+        error
+    );
+    assert!(
+        !capture_dir.exists(),
+        "repo-mismatch captured replay should still delete the capture fixture"
     );
 }
 
