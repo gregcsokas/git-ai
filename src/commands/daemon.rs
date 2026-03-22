@@ -1,9 +1,15 @@
-use crate::daemon::{ControlRequest, DaemonConfig, send_control_request};
+use crate::daemon::{
+    ControlRequest, DaemonConfig, local_socket_connects_with_timeout, send_control_request,
+};
 use crate::utils::LockFile;
-use interprocess::local_socket::LocalSocketStream;
+#[cfg(windows)]
+use crate::utils::{
+    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, debug_log,
+};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -99,9 +105,10 @@ pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, S
     }
 
     Err(format!(
-        "timed out after {:?} waiting for daemon socket {}",
+        "timed out after {:?} waiting for daemon sockets {} and {}",
         timeout,
-        config.control_socket_path.display()
+        config.control_socket_path.display(),
+        config.trace_socket_path.display()
     ))
 }
 
@@ -122,19 +129,10 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
 }
 
 fn daemon_is_up(config: &DaemonConfig) -> bool {
-    let socket_path = config.control_socket_path.to_string_lossy().to_string();
-    let (tx, rx) = mpsc::sync_channel(1);
-    let spawn_result = thread::Builder::new()
-        .name("git-ai-daemon-liveness-probe".to_string())
-        .spawn(move || {
-            let ready = LocalSocketStream::connect(socket_path.as_str()).is_ok();
-            let _ = tx.send(ready);
-        });
-    if spawn_result.is_err() {
-        return false;
-    }
-
-    matches!(rx.recv_timeout(Duration::from_millis(100)), Ok(true))
+    local_socket_connects_with_timeout(&config.control_socket_path, Duration::from_millis(100))
+        .is_ok()
+        && local_socket_connects_with_timeout(&config.trace_socket_path, Duration::from_millis(100))
+            .is_ok()
 }
 
 fn wait_for_daemon_up(config: &DaemonConfig, timeout: Duration) -> bool {
@@ -171,7 +169,33 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    child.spawn().map(|_| ()).map_err(|e| e.to_string())
+    #[cfg(windows)]
+    {
+        let preferred_flags =
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
+        child.creation_flags(preferred_flags);
+        return match child.spawn() {
+            Ok(_) => Ok(()),
+            Err(preferred_err) => {
+                debug_log(&format!(
+                    "detached daemon spawn with CREATE_BREAKAWAY_FROM_JOB failed, retrying without it: {}",
+                    preferred_err
+                ));
+                child.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+                child.spawn().map(|_| ()).map_err(|fallback_err| {
+                    format!(
+                        "failed to spawn detached daemon with flags {:#x}: {}; retry without CREATE_BREAKAWAY_FROM_JOB also failed: {}",
+                        preferred_flags, preferred_err, fallback_err
+                    )
+                })
+            }
+        };
+    }
+
+    #[cfg(not(windows))]
+    {
+        child.spawn().map(|_| ()).map_err(|e| e.to_string())
+    }
 }
 
 fn handle_status(repo_working_dir: String) -> Result<(), String> {

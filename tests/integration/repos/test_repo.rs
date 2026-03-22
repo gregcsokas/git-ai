@@ -3,14 +3,16 @@
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::stats::CommitStats;
 use git_ai::config::ConfigPatch;
-use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};
+use git_ai::daemon::{
+    ControlRequest, DaemonConfig, local_socket_connects_with_timeout, send_control_request,
+    send_control_request_with_timeout,
+};
 use git_ai::feature_flags::FeatureFlags;
 use git_ai::git::cli_parser::{ParsedGitInvocation, extract_clone_target_directory};
 use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
 use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
 use insta::{Settings, assert_debug_snapshot};
-use interprocess::local_socket::LocalSocketStream;
 use rand::Rng;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -24,6 +26,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::test_file::TestFile;
+
+const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+const DAEMON_TEST_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitTestMode {
@@ -152,7 +160,6 @@ impl DaemonProcess {
     fn wait_until_ready(&self, repo_path: &Path, child: &mut Child) -> Result<(), String> {
         let repo_working_dir = repo_path.to_string_lossy().to_string();
         let mut last_status_error: Option<String> = None;
-        let trace_socket_addr = self.trace_socket_path.to_string_lossy().to_string();
         for _ in 0..1200 {
             if let Some(status) = child
                 .try_wait()
@@ -182,15 +189,32 @@ impl DaemonProcess {
                 }
             }
 
-            let status = send_control_request(
+            let status = send_control_request_with_timeout(
                 &self.control_socket_path,
                 &ControlRequest::StatusFamily {
                     repo_working_dir: repo_working_dir.clone(),
                 },
+                DAEMON_TEST_CONTROL_TIMEOUT,
             );
             match status {
-                Ok(_) => {
-                    if LocalSocketStream::connect(trace_socket_addr.as_str()).is_ok() {
+                Ok(response) => {
+                    if local_socket_connects_with_timeout(
+                        &self.trace_socket_path,
+                        DAEMON_TEST_PROBE_TIMEOUT,
+                    )
+                    .is_ok()
+                    {
+                        let baseline_seq = response
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("latest_seq"))
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        self.wait_until_trace_pipeline_ready(
+                            repo_path,
+                            &repo_working_dir,
+                            baseline_seq,
+                        )?;
                         return Ok(());
                     }
                 }
@@ -208,6 +232,70 @@ impl DaemonProcess {
             self.trace_socket_path.display(),
             last_status_error.as_deref().unwrap_or("none")
         ) + &stderr_tail)
+    }
+
+    fn wait_until_trace_pipeline_ready(
+        &self,
+        repo_path: &Path,
+        repo_working_dir: &str,
+        baseline_seq: u64,
+    ) -> Result<(), String> {
+        #[cfg(windows)]
+        let null_hooks = "NUL";
+        #[cfg(not(windows))]
+        let null_hooks = "/dev/null";
+
+        let mut command = Command::new(real_git_executable());
+        command
+            .arg("-C")
+            .arg(repo_path)
+            .arg("-c")
+            .arg(format!("core.hooksPath={}", null_hooks))
+            .args(["status", "--short"])
+            .env(
+                "GIT_TRACE2_EVENT",
+                DaemonConfig::trace2_event_target_for_path(&self.trace_socket_path),
+            )
+            .env("GIT_TRACE2_EVENT_NESTING", "10");
+        configure_test_home_env(&mut command, &self.daemon_home);
+
+        let output = command.output().map_err(|error| {
+            format!("failed to run daemon readiness probe git status: {}", error)
+        })?;
+        if !output.status.success() {
+            return Err(format!(
+                "daemon readiness probe git status failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        let start = Instant::now();
+        while start.elapsed() < DAEMON_TEST_TRACE_READY_TIMEOUT {
+            let response = send_control_request_with_timeout(
+                &self.control_socket_path,
+                &ControlRequest::StatusFamily {
+                    repo_working_dir: repo_working_dir.to_string(),
+                },
+                DAEMON_TEST_CONTROL_TIMEOUT,
+            )
+            .map_err(|error| format!("failed polling daemon readiness seq: {}", error))?;
+            let latest_seq = response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("latest_seq"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if latest_seq > baseline_seq {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        Err(format!(
+            "daemon trace pipeline did not advance latest_seq beyond {} for {}",
+            baseline_seq, repo_working_dir
+        ))
     }
 
     fn read_stderr_tail(&self) -> String {
@@ -1307,8 +1395,8 @@ impl TestRepo {
                 last_progress = Instant::now();
                 last_observed_count = observed_count;
             }
-            if start.elapsed() >= Duration::from_secs(30)
-                || last_progress.elapsed() >= Duration::from_secs(8)
+            if start.elapsed() >= DAEMON_TEST_SYNC_TOTAL_TIMEOUT
+                || last_progress.elapsed() >= DAEMON_TEST_SYNC_IDLE_TIMEOUT
             {
                 break;
             }
@@ -1363,8 +1451,8 @@ impl TestRepo {
                 last_observed_count = tracked_entries.len();
                 last_completed_count = completed.len();
             }
-            if start.elapsed() >= Duration::from_secs(30)
-                || last_progress.elapsed() >= Duration::from_secs(8)
+            if start.elapsed() >= DAEMON_TEST_SYNC_TOTAL_TIMEOUT
+                || last_progress.elapsed() >= DAEMON_TEST_SYNC_IDLE_TIMEOUT
             {
                 break;
             }
@@ -1411,8 +1499,8 @@ impl TestRepo {
                 last_progress = Instant::now();
                 last_observed_count = observed_count;
             }
-            if start.elapsed() >= Duration::from_secs(30)
-                || last_progress.elapsed() >= Duration::from_secs(8)
+            if start.elapsed() >= DAEMON_TEST_SYNC_TOTAL_TIMEOUT
+                || last_progress.elapsed() >= DAEMON_TEST_SYNC_IDLE_TIMEOUT
             {
                 break;
             }

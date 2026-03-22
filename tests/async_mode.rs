@@ -1,8 +1,9 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};
-use interprocess::local_socket::LocalSocketStream;
+use git_ai::daemon::{
+    ControlRequest, DaemonConfig, local_socket_connects_with_timeout, send_control_request,
+};
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use std::fs;
@@ -11,6 +12,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::Duration;
+
+const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
 fn git_common_dir(repo: &TestRepo) -> PathBuf {
     let common_dir = repo
@@ -121,7 +124,9 @@ fn wait_for_daemon_sockets(repo: &TestRepo) {
                 repo_working_dir: repo.canonical_path().to_string_lossy().to_string(),
             },
         );
-        if status.is_ok() && LocalSocketStream::connect(trace.to_string_lossy().as_ref()).is_ok() {
+        if status.is_ok()
+            && local_socket_connects_with_timeout(&trace, DAEMON_TEST_PROBE_TIMEOUT).is_ok()
+        {
             return;
         }
         thread::sleep(Duration::from_millis(25));

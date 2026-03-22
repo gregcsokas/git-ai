@@ -22,7 +22,7 @@ use crate::git::rewrite_log::{
 };
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
 use crate::observability;
-use crate::utils::debug_log;
+use crate::utils::{LockFile, debug_log};
 use crate::{
     authorship::post_commit::post_commit_with_final_state,
     authorship::rebase_authorship::{
@@ -35,19 +35,24 @@ use crate::{
     commands::checkpoint_agent::agent_presets::AgentRunResult,
     commands::hooks::{push_hooks, stash_hooks},
 };
-use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
+#[cfg(windows)]
+use interprocess::os::windows::named_pipe::{
+    DuplexPipeStream, local_socket::Stream as WindowsLocalSocketStream, pipe_mode::Bytes,
+};
+use interprocess::{
+    ConnectWaitMode,
+    local_socket::{ConnectOptions, GenericFilePath, ListenerOptions, Name, prelude::*},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant as StdInstant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use tokio::time::Duration;
 
@@ -66,6 +71,11 @@ pub use control_api::{CheckpointRunRequest, ControlRequest, ControlResponse, Fam
 
 const PID_META_FILE: &str = "daemon.pid.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
+const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
+const DAEMON_IO_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 static DAEMON_PROCESS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn daemon_process_active() -> bool {
@@ -235,9 +245,8 @@ struct TestCompletionLogEntry {
     error: Option<String>,
 }
 
-#[derive(Debug)]
 pub struct DaemonLock {
-    _file: File,
+    _lock: LockFile,
 }
 
 impl DaemonLock {
@@ -245,33 +254,10 @@ impl DaemonLock {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)?;
-
-        #[cfg(unix)]
-        {
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if rc != 0 {
-                return Err(GitAiError::Generic(
-                    "git-ai daemon is already running (lock held)".to_string(),
-                ));
-            }
-        }
-
-        Ok(Self { _file: file })
-    }
-}
-
-impl Drop for DaemonLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
-        }
+        let lock = LockFile::try_acquire(path).ok_or_else(|| {
+            GitAiError::Generic("git-ai daemon is already running (lock held)".to_string())
+        })?;
+        Ok(Self { _lock: lock })
     }
 }
 
@@ -334,16 +320,26 @@ fn trace_payload_worktree_hint(payload: &Value) -> Option<PathBuf> {
     {
         return Some(normalize(base_dir));
     }
+    let parsed = parse_git_cli_args(trace_invocation_args(&argv));
     let mut idx = 0usize;
-    while idx < argv.len() {
-        if argv[idx] == "-C" {
-            let path_arg = argv.get(idx + 1)?;
-            return Some(normalize(PathBuf::from(path_arg)));
+    while idx < parsed.global_args.len() {
+        let token = &parsed.global_args[idx];
+        if token == "-C" {
+            let path_arg = parsed.global_args.get(idx + 1)?;
+            let candidate = PathBuf::from(path_arg);
+            if candidate.is_absolute() {
+                return Some(normalize(candidate));
+            }
+            return None;
         }
-        if let Some(path_arg) = argv[idx].strip_prefix("-C")
+        if let Some(path_arg) = token.strip_prefix("-C")
             && !path_arg.is_empty()
         {
-            return Some(normalize(PathBuf::from(path_arg)));
+            let candidate = PathBuf::from(path_arg);
+            if candidate.is_absolute() {
+                return Some(normalize(candidate));
+            }
+            return None;
         }
         idx += 1;
     }
@@ -645,6 +641,22 @@ fn stable_final_state_for_commit_rewrite(
         &target_commit,
     )
     .map(Some)
+}
+
+fn exact_final_state_for_commit_replay(
+    repo: &Repository,
+    rewrite_event: &RewriteLogEvent,
+    carryover_snapshot: Option<&HashMap<String, String>>,
+) -> Result<Option<HashMap<String, String>>, GitAiError> {
+    let mut final_state =
+        stable_final_state_for_commit_rewrite(repo, rewrite_event)?.unwrap_or_default();
+    if let Some(snapshot) = carryover_snapshot {
+        final_state.extend(snapshot.clone());
+    }
+    if final_state.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(final_state))
 }
 
 fn ref_change_span(
@@ -1417,6 +1429,62 @@ fn apply_checkout_switch_working_log_side_effect(
     Ok(())
 }
 
+fn recent_checkout_switch_prerequisite_from_command(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+    carryover_snapshot: Option<&HashMap<String, String>>,
+) -> Option<RecentReplayPrerequisite> {
+    let parsed = parsed_invocation_for_normalized_command(cmd);
+    let old_head = cmd
+        .pre_repo
+        .as_ref()
+        .and_then(|repo| repo.head.as_deref())
+        .unwrap_or_default()
+        .to_string();
+    let new_head = cmd
+        .post_repo
+        .as_ref()
+        .and_then(|repo| repo.head.as_deref())
+        .unwrap_or_default()
+        .to_string();
+
+    if old_head.is_empty() || new_head.is_empty() || old_head == new_head {
+        return None;
+    }
+
+    if cmd.primary_command.as_deref() == Some("checkout") && !parsed.pathspecs().is_empty() {
+        return None;
+    }
+
+    let is_force = match cmd.primary_command.as_deref() {
+        Some("checkout") => parsed.has_command_flag("--force") || parsed.has_command_flag("-f"),
+        Some("switch") => {
+            parsed.has_command_flag("--discard-changes")
+                || parsed.has_command_flag("--force")
+                || parsed.has_command_flag("-f")
+        }
+        _ => false,
+    };
+    if is_force {
+        return None;
+    }
+
+    let is_merge = parsed.has_command_flag("--merge") || parsed.has_command_flag("-m");
+    if is_merge {
+        return carryover_snapshot.and_then(|snapshot| {
+            (!snapshot.is_empty()).then(|| RecentReplayPrerequisite::CheckoutSwitchMerge {
+                target_head: new_head,
+                old_head,
+                final_state: snapshot.clone(),
+            })
+        });
+    }
+
+    Some(RecentReplayPrerequisite::CheckoutSwitchRename {
+        target_head: new_head,
+        old_head,
+    })
+}
+
 fn commit_replay_context_from_rewrite_event(
     rewrite_event: &RewriteLogEvent,
 ) -> Option<(String, String)> {
@@ -1495,6 +1563,14 @@ fn build_human_replay_agent_result(
     }
 }
 
+fn family_key_for_repository(repo: &Repository) -> String {
+    repo.common_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.common_dir().to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
 fn working_log_has_tracked_state_for_base(repo: &Repository, base_commit: &str) -> bool {
     if !repo.storage.has_working_log(base_commit) {
         return false;
@@ -1512,12 +1588,61 @@ fn working_log_has_tracked_state_for_base(repo: &Repository, base_commit: &str) 
         .unwrap_or(false)
 }
 
+fn capture_recent_working_log_snapshot(
+    repo: &Repository,
+    base_commit: &str,
+    human_author: Option<String>,
+) -> Result<Option<RecentWorkingLogSnapshot>, GitAiError> {
+    if base_commit.trim().is_empty()
+        || base_commit == "initial"
+        || !working_log_has_tracked_state_for_base(repo, base_commit)
+    {
+        return Ok(None);
+    }
+
+    let va =
+        crate::authorship::virtual_attribution::VirtualAttributions::from_persisted_working_log(
+            repo.clone(),
+            base_commit.to_string(),
+            human_author,
+        )?;
+    let initial = va.to_initial_working_log_only();
+    if initial.files.is_empty() && initial.prompts.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(RecentWorkingLogSnapshot {
+        file_contents: va.snapshot_contents_for_files(initial.files.keys()),
+        files: initial.files,
+        prompts: initial.prompts,
+    }))
+}
+
+fn restore_recent_working_log_snapshot(
+    repo: &Repository,
+    base_commit: &str,
+    snapshot: &RecentWorkingLogSnapshot,
+) -> Result<bool, GitAiError> {
+    if base_commit.trim().is_empty() || snapshot.is_empty() {
+        return Ok(false);
+    }
+
+    repo.storage
+        .working_log_for_base_commit(base_commit)
+        .write_initial_attributions_with_contents(
+            snapshot.files.clone(),
+            snapshot.prompts.clone(),
+            snapshot.file_contents.clone(),
+        )?;
+    Ok(working_log_has_tracked_state_for_base(repo, base_commit))
+}
+
 fn preceding_merge_squash_for_pending_commit(
     repo: &Repository,
     base_commit: &str,
 ) -> Result<Option<MergeSquashEvent>, GitAiError> {
     let events = repo.storage.read_rewrite_events()?;
-    for event in events.into_iter().rev() {
+    for event in events {
         match event {
             RewriteLogEvent::AuthorshipLogsSynced { .. } => continue,
             RewriteLogEvent::Commit { .. } | RewriteLogEvent::CommitAmend { .. } => continue,
@@ -1527,6 +1652,28 @@ fn preceding_merge_squash_for_pending_commit(
                 return Ok(Some(merge_squash));
             }
             _ => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+fn latest_reset_for_base_commit(
+    repo: &Repository,
+    base_commit: &str,
+) -> Result<Option<ResetEvent>, GitAiError> {
+    for event in repo.storage.read_rewrite_events()? {
+        match event {
+            RewriteLogEvent::AuthorshipLogsSynced { .. } => continue,
+            RewriteLogEvent::Commit { .. } | RewriteLogEvent::CommitAmend { .. } => continue,
+            RewriteLogEvent::Reset { reset }
+                if reset.new_head_sha == base_commit
+                    && reset.old_head_sha != reset.new_head_sha
+                    && !is_zero_oid(&reset.old_head_sha)
+                    && !is_zero_oid(&reset.new_head_sha) =>
+            {
+                return Ok(Some(reset));
+            }
+            _ => continue,
         }
     }
     Ok(None)
@@ -1690,19 +1837,6 @@ fn attempt_materialize_commit_chain_authorship(
     Ok(())
 }
 
-fn attempt_materialize_commit_authorship(
-    repo: &Repository,
-    commit_sha: &str,
-    author: &str,
-) -> Result<(), GitAiError> {
-    if commit_has_authorship_log(repo, commit_sha) {
-        return Ok(());
-    }
-
-    let parent = commit_parent_head_for_capture(repo, commit_sha);
-    attempt_materialize_commit_chain_authorship(repo, parent.as_deref(), commit_sha, author)
-}
-
 fn resolve_reset_old_head_for_base(worktree: &Path, base_commit: &str) -> Option<String> {
     read_ref_oid_for_worktree(worktree, "ORIG_HEAD")
         .filter(|oid| oid != base_commit && is_valid_oid(oid) && !is_zero_oid(oid))
@@ -1712,6 +1846,94 @@ fn resolve_reset_old_head_for_base(worktree: &Path, base_commit: &str) -> Option
                 .flatten()
                 .filter(|oid| oid != base_commit && is_valid_oid(oid) && !is_zero_oid(oid))
         })
+}
+
+fn read_reset_recovery_final_state(
+    repo: &Repository,
+    base_commit: &str,
+    old_head: &str,
+    user_pathspecs: Option<&[String]>,
+    final_state_override: Option<&HashMap<String, String>>,
+) -> Result<HashMap<String, String>, GitAiError> {
+    if let Some(snapshot) = final_state_override {
+        return Ok(snapshot.clone());
+    }
+
+    let all_changed_files = repo.diff_changed_files(base_commit, old_head)?;
+    let pathspecs: Vec<String> = if let Some(user_paths) = user_pathspecs {
+        all_changed_files
+            .into_iter()
+            .filter(|f| {
+                user_paths.iter().any(|p| {
+                    f == p
+                        || (p.ends_with('/') && f.starts_with(p))
+                        || f.starts_with(&format!("{}/", p))
+                })
+            })
+            .collect()
+    } else {
+        all_changed_files
+    };
+
+    let mut final_state = HashMap::new();
+    let workdir = repo.workdir()?;
+    for file_path in pathspecs {
+        let abs_path = workdir.join(&file_path);
+        let content = if abs_path.exists() {
+            fs::read_to_string(&abs_path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        final_state.insert(file_path, content);
+    }
+
+    Ok(final_state)
+}
+
+fn restore_matching_old_head_reset_snapshot(
+    repo: &Repository,
+    base_commit: &str,
+    old_head: &str,
+    author: &str,
+    user_pathspecs: Option<&[String]>,
+    final_state_override: Option<&HashMap<String, String>>,
+) -> Result<bool, GitAiError> {
+    if !repo.storage.has_working_log(old_head) {
+        return Ok(false);
+    }
+
+    let Some(snapshot) =
+        capture_recent_working_log_snapshot(repo, old_head, Some(author.to_string()))?
+    else {
+        return Ok(false);
+    };
+    if snapshot.is_empty() {
+        return Ok(false);
+    }
+
+    let final_state = read_reset_recovery_final_state(
+        repo,
+        base_commit,
+        old_head,
+        user_pathspecs,
+        final_state_override,
+    )?;
+    if final_state.is_empty() {
+        return Ok(false);
+    }
+
+    let matches_current_state = snapshot.file_contents.iter().all(|(file, content)| {
+        final_state
+            .get(file)
+            .is_some_and(|current| current == content)
+    });
+    if !matches_current_state {
+        return Ok(false);
+    }
+
+    restore_recent_working_log_snapshot(repo, base_commit, &snapshot)?;
+    let _ = repo.storage.delete_working_log_for_base_commit(old_head);
+    Ok(true)
 }
 
 fn recover_reset_working_log_for_commit_replay(
@@ -1729,11 +1951,24 @@ fn recover_reset_working_log_for_commit_replay(
         return Ok(false);
     }
 
-    let Some(old_head) = resolve_reset_old_head_for_base(worktree, base_commit) else {
+    let old_head = latest_reset_for_base_commit(repo, base_commit)?
+        .map(|reset| reset.old_head_sha)
+        .or_else(|| resolve_reset_old_head_for_base(worktree, base_commit));
+    let Some(old_head) = old_head else {
         return Ok(false);
     };
     if !repo_is_ancestor(repo, base_commit, &old_head) {
         return Ok(false);
+    }
+    if restore_matching_old_head_reset_snapshot(
+        repo,
+        base_commit,
+        &old_head,
+        author,
+        pathspecs,
+        final_state_override,
+    )? {
+        return Ok(true);
     }
 
     if let Err(error) =
@@ -1799,7 +2034,128 @@ fn seed_merge_squash_working_log_for_commit_replay(
     )
 }
 
+fn recover_recent_replay_prerequisites_for_commit_replay(
+    coordinator: &ActorDaemonCoordinator,
+    repo: &Repository,
+    base_commit: &str,
+    author: &str,
+) -> Result<(), GitAiError> {
+    if base_commit.trim().is_empty() || base_commit == "initial" {
+        return Ok(());
+    }
+
+    let family = family_key_for_repository(repo);
+    for prerequisite in coordinator.recent_replay_prerequisites_for_base(&family, base_commit)? {
+        match prerequisite {
+            RecentReplayPrerequisite::Reset {
+                target_head,
+                old_head,
+                pathspecs,
+                final_state,
+                working_log_snapshot,
+            } => {
+                if target_head != base_commit || old_head.is_empty() {
+                    continue;
+                }
+                if old_head == base_commit && !pathspecs.is_empty() {
+                    remove_working_log_attributions_for_pathspecs(repo, base_commit, &pathspecs)?;
+                    return Ok(());
+                }
+                if working_log_has_tracked_state_for_base(repo, base_commit) {
+                    continue;
+                }
+                if let Some(snapshot) = working_log_snapshot.as_ref()
+                    && restore_recent_working_log_snapshot(repo, base_commit, snapshot)?
+                {
+                    return Ok(());
+                }
+                if let Err(error) = attempt_materialize_commit_chain_authorship(
+                    repo,
+                    Some(base_commit),
+                    &old_head,
+                    author,
+                ) {
+                    debug_log(&format!(
+                        "Failed to backfill recent reset prerequisite notes between {} and {}: {}",
+                        base_commit, old_head, error
+                    ));
+                }
+                reconstruct_working_log_after_reset(
+                    repo,
+                    base_commit,
+                    &old_head,
+                    author,
+                    if pathspecs.is_empty() {
+                        None
+                    } else {
+                        Some(pathspecs.as_slice())
+                    },
+                    final_state,
+                )?;
+            }
+            RecentReplayPrerequisite::CheckoutSwitchRename {
+                target_head,
+                old_head,
+            } => {
+                if working_log_has_tracked_state_for_base(repo, base_commit) {
+                    continue;
+                }
+                if target_head != base_commit
+                    || old_head.is_empty()
+                    || !repo.storage.has_working_log(&old_head)
+                {
+                    continue;
+                }
+                repo.storage.rename_working_log(&old_head, base_commit)?;
+            }
+            RecentReplayPrerequisite::CheckoutSwitchMerge {
+                target_head,
+                old_head,
+                final_state,
+            } => {
+                if working_log_has_tracked_state_for_base(repo, base_commit) {
+                    continue;
+                }
+                if target_head != base_commit
+                    || old_head.is_empty()
+                    || final_state.is_empty()
+                    || !repo.storage.has_working_log(&old_head)
+                {
+                    continue;
+                }
+                restore_working_log_carryover(
+                    repo,
+                    &old_head,
+                    base_commit,
+                    final_state,
+                    Some(author.to_string()),
+                )?;
+                let _ = repo.storage.delete_working_log_for_base_commit(&old_head);
+            }
+            RecentReplayPrerequisite::StashRestore {
+                target_head,
+                stash_sha,
+            } => {
+                if working_log_has_tracked_state_for_base(repo, base_commit) {
+                    continue;
+                }
+                if target_head != base_commit || stash_sha.is_empty() {
+                    continue;
+                }
+                stash_hooks::restore_stash_attributions(repo, base_commit, &stash_sha)?;
+            }
+        }
+
+        if working_log_has_tracked_state_for_base(repo, base_commit) {
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
 fn ensure_rewrite_prerequisites(
+    coordinator: &ActorDaemonCoordinator,
     repo: &Repository,
     worktree: &Path,
     rewrite_event: &RewriteLogEvent,
@@ -1816,13 +2172,13 @@ fn ensure_rewrite_prerequisites(
         return Ok(());
     }
 
-    if base_commit != "initial" {
-        let materialize_result = if matches!(rewrite_event, RewriteLogEvent::CommitAmend { .. }) {
-            materialize_commit_authorship_from_persisted_state_unchecked(repo, &base_commit, author)
-                .map(|_| ())
-        } else {
-            attempt_materialize_commit_authorship(repo, &base_commit, author)
-        };
+    if base_commit != "initial" && matches!(rewrite_event, RewriteLogEvent::CommitAmend { .. }) {
+        let materialize_result = materialize_commit_authorship_from_persisted_state_unchecked(
+            repo,
+            &base_commit,
+            author,
+        )
+        .map(|_| ());
         if let Err(error) = materialize_result {
             debug_log(&format!(
                 "Failed to backfill base commit note for {}: {}",
@@ -1831,6 +2187,9 @@ fn ensure_rewrite_prerequisites(
         }
     }
 
+    let exact_final_state =
+        exact_final_state_for_commit_replay(repo, rewrite_event, carryover_snapshot)?;
+    recover_recent_replay_prerequisites_for_commit_replay(coordinator, repo, &base_commit, author)?;
     seed_merge_squash_working_log_for_commit_replay(repo, &base_commit, author)?;
     if working_log_has_tracked_state_for_base(repo, &base_commit) {
         return Ok(());
@@ -1841,7 +2200,7 @@ fn ensure_rewrite_prerequisites(
         worktree,
         &base_commit,
         author,
-        carryover_snapshot,
+        exact_final_state.as_ref(),
         reset_pathspecs,
     )?;
 
@@ -1880,6 +2239,32 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     if changed_files.is_empty() {
         return Ok(());
     }
+    if !working_log_has_tracked_state_for_base(repo, &base_commit)
+        && let Ok(worktree) = repo.workdir()
+    {
+        let _ = recover_reset_working_log_for_commit_replay(
+            repo,
+            &worktree,
+            &base_commit,
+            author,
+            Some(&dirty_files),
+            None,
+        )?;
+    }
+    if !working_log_has_tracked_state_for_base(repo, &base_commit) {
+        if preceding_merge_squash_for_pending_commit(repo, &base_commit)?.is_some() {
+            return Err(GitAiError::Generic(format!(
+                "commit replay missing merge --squash prerequisite working log for base {}",
+                base_commit
+            )));
+        }
+        if latest_reset_for_base_commit(repo, &base_commit)?.is_some() {
+            return Err(GitAiError::Generic(format!(
+                "commit replay missing reset prerequisite working log for base {}",
+                base_commit
+            )));
+        }
+    }
     let working_log = repo.storage.working_log_for_base_commit(&base_commit);
     let (changed_files, dirty_files) =
         filter_commit_replay_files(&working_log, changed_files, dirty_files);
@@ -1903,25 +2288,27 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
 }
 
 fn apply_rewrite_side_effect(
+    coordinator: &ActorDaemonCoordinator,
+    family: Option<&str>,
     worktree: &str,
     rewrite_event: RewriteLogEvent,
     carryover_snapshot: Option<&HashMap<String, String>>,
     reset_pathspecs: Option<&[String]>,
 ) -> Result<(), GitAiError> {
     let mut repo = find_repository_in_path(worktree)?;
+    let author = repo.git_author_identity().name_or_unknown();
     ensure_rewrite_prerequisites(
+        coordinator,
         &repo,
         Path::new(worktree),
         &rewrite_event,
-        &repo.git_author_identity().name_or_unknown(),
+        &author,
         carryover_snapshot,
         reset_pathspecs,
     )?;
-    if !rewrite_event_needs_authorship_processing(&repo, &rewrite_event)? {
-        let _ = repo.storage.append_rewrite_event(rewrite_event);
-        return Ok(());
-    }
-    let author = repo.git_author_identity().name_or_unknown();
+    let prerequisite_family = family
+        .map(std::borrow::ToOwned::to_owned)
+        .unwrap_or_else(|| family_key_for_repository(&repo));
     if let RewriteLogEvent::Reset { reset } = &rewrite_event {
         apply_reset_working_log_side_effect(
             &repo,
@@ -1930,6 +2317,44 @@ fn apply_rewrite_side_effect(
             carryover_snapshot,
             reset_pathspecs,
         )?;
+        coordinator.record_recent_replay_prerequisite(
+            &prerequisite_family,
+            RecentReplayPrerequisite::Reset {
+                target_head: reset.new_head_sha.clone(),
+                old_head: reset.old_head_sha.clone(),
+                pathspecs: reset_pathspecs
+                    .map(|paths| paths.to_vec())
+                    .unwrap_or_default(),
+                final_state: carryover_snapshot.cloned(),
+                working_log_snapshot: capture_recent_working_log_snapshot(
+                    &repo,
+                    &reset.new_head_sha,
+                    Some(author.clone()),
+                )?,
+            },
+        )?;
+    }
+    if !rewrite_event_needs_authorship_processing(&repo, &rewrite_event)? {
+        let _ = repo.storage.append_rewrite_event(rewrite_event);
+        return Ok(());
+    }
+    match &rewrite_event {
+        RewriteLogEvent::Stash { stash }
+            if matches!(stash.operation, StashOperation::Apply | StashOperation::Pop) =>
+        {
+            if let (Some(head_sha), Some(stash_sha)) =
+                (stash.head_sha.as_ref(), stash.stash_sha.as_ref())
+            {
+                coordinator.record_recent_replay_prerequisite(
+                    &prerequisite_family,
+                    RecentReplayPrerequisite::StashRestore {
+                        target_head: head_sha.clone(),
+                        stash_sha: stash_sha.clone(),
+                    },
+                )?;
+            }
+        }
+        _ => {}
     }
     if let RewriteLogEvent::Stash { stash } = &rewrite_event {
         apply_stash_rewrite_side_effect(&mut repo, stash)?;
@@ -1972,6 +2397,12 @@ fn apply_rewrite_side_effect(
     }
     if let Some((target_commit, carried_va, final_state)) = deferred_commit_carryover {
         restore_virtual_attribution_carryover(&repo, &target_commit, carried_va, final_state)?;
+    }
+    if let Some(family) = family
+        && let Some((base_commit, _)) = commit_replay_context_from_rewrite_event(&rewrite_event)
+        && !base_commit.trim().is_empty()
+    {
+        coordinator.discard_recent_replay_prerequisites_for_base(family, &base_commit)?;
     }
     Ok(())
 }
@@ -2368,7 +2799,11 @@ fn apply_reset_working_log_side_effect(
     carryover_snapshot: Option<&HashMap<String, String>>,
     pathspecs: Option<&[String]>,
 ) -> Result<(), GitAiError> {
-    if reset.old_head_sha.is_empty() || reset.new_head_sha.is_empty() {
+    if reset.old_head_sha.is_empty()
+        || reset.new_head_sha.is_empty()
+        || is_zero_oid(&reset.old_head_sha)
+        || is_zero_oid(&reset.new_head_sha)
+    {
         return Ok(());
     }
 
@@ -2380,6 +2815,17 @@ fn apply_reset_working_log_side_effect(
     }
 
     if reset.old_head_sha == reset.new_head_sha && pathspecs.is_none_or(|paths| paths.is_empty()) {
+        return Ok(());
+    }
+
+    if reset.old_head_sha == reset.new_head_sha {
+        if let Some(pathspecs) = pathspecs.filter(|paths| !paths.is_empty()) {
+            remove_working_log_attributions_for_pathspecs(
+                repository,
+                &reset.old_head_sha,
+                pathspecs,
+            )?;
+        }
         return Ok(());
     }
 
@@ -2513,12 +2959,62 @@ struct PendingRootSlot {
     order: FamilySequencerOrder,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RecentWorkingLogSnapshot {
+    files: HashMap<String, Vec<crate::authorship::attribution_tracker::LineAttribution>>,
+    prompts: HashMap<String, crate::authorship::authorship_log::PromptRecord>,
+    file_contents: HashMap<String, String>,
+}
+
+impl RecentWorkingLogSnapshot {
+    fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.prompts.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+enum RecentReplayPrerequisite {
+    Reset {
+        target_head: String,
+        old_head: String,
+        pathspecs: Vec<String>,
+        final_state: Option<HashMap<String, String>>,
+        working_log_snapshot: Option<RecentWorkingLogSnapshot>,
+    },
+    CheckoutSwitchRename {
+        target_head: String,
+        old_head: String,
+    },
+    CheckoutSwitchMerge {
+        target_head: String,
+        old_head: String,
+        final_state: HashMap<String, String>,
+    },
+    StashRestore {
+        target_head: String,
+        stash_sha: String,
+    },
+}
+
+impl RecentReplayPrerequisite {
+    fn target_head(&self) -> &str {
+        match self {
+            Self::Reset { target_head, .. }
+            | Self::CheckoutSwitchRename { target_head, .. }
+            | Self::CheckoutSwitchMerge { target_head, .. }
+            | Self::StashRestore { target_head, .. } => target_head,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct TraceIngressState {
     root_worktrees: HashMap<String, PathBuf>,
     root_families: HashMap<String, String>,
     root_argv: HashMap<String, Vec<String>>,
     root_pre_repo: HashMap<String, RepoContext>,
+    root_inflight_merge_squash_contexts: HashMap<String, MergeSquashSnapshot>,
+    root_terminal_merge_squash_contexts: HashMap<String, MergeSquashSnapshot>,
     root_mutating: HashMap<String, bool>,
     root_target_repo_only: HashMap<String, bool>,
     root_reflog_refs: HashMap<String, Vec<String>>,
@@ -2556,6 +3052,8 @@ struct ActorDaemonCoordinator {
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
+    recent_replay_prerequisites_by_family:
+        Mutex<HashMap<String, VecDeque<RecentReplayPrerequisite>>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     carryover_snapshots_by_id: Mutex<HashMap<String, HashMap<String, String>>>,
@@ -2596,6 +3094,7 @@ impl ActorDaemonCoordinator {
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
+            recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
             carryover_snapshots_by_id: Mutex::new(HashMap::new()),
@@ -2870,6 +3369,72 @@ impl ActorDaemonCoordinator {
             .and_then(|errors| errors.iter().next_back().map(|(_, error)| error.clone())))
     }
 
+    fn record_recent_replay_prerequisite(
+        &self,
+        family: &str,
+        prerequisite: RecentReplayPrerequisite,
+    ) -> Result<(), GitAiError> {
+        const MAX_RECENT_REPLAY_PREREQUISITES_PER_FAMILY: usize = 256;
+
+        let mut map = self
+            .recent_replay_prerequisites_by_family
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("recent replay prerequisites map lock poisoned".to_string())
+            })?;
+        let entries = map.entry(family.to_string()).or_insert_with(VecDeque::new);
+        entries.push_back(prerequisite);
+        while entries.len() > MAX_RECENT_REPLAY_PREREQUISITES_PER_FAMILY {
+            let _ = entries.pop_front();
+        }
+        Ok(())
+    }
+
+    fn recent_replay_prerequisites_for_base(
+        &self,
+        family: &str,
+        base_commit: &str,
+    ) -> Result<Vec<RecentReplayPrerequisite>, GitAiError> {
+        let map = self
+            .recent_replay_prerequisites_by_family
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("recent replay prerequisites map lock poisoned".to_string())
+            })?;
+        let matches: Vec<RecentReplayPrerequisite> = map
+            .get(family)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .rev()
+                    .filter(|entry| entry.target_head() == base_commit)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(matches)
+    }
+
+    fn discard_recent_replay_prerequisites_for_base(
+        &self,
+        family: &str,
+        base_commit: &str,
+    ) -> Result<(), GitAiError> {
+        let mut map = self
+            .recent_replay_prerequisites_by_family
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("recent replay prerequisites map lock poisoned".to_string())
+            })?;
+        if let Some(entries) = map.get_mut(family) {
+            entries.retain(|entry| entry.target_head() != base_commit);
+            if entries.is_empty() {
+                map.remove(family);
+            }
+        }
+        Ok(())
+    }
+
     fn maybe_append_test_completion_log(
         &self,
         family: &str,
@@ -3087,6 +3652,8 @@ impl ActorDaemonCoordinator {
         ingress.root_families.remove(root_sid);
         ingress.root_argv.remove(root_sid);
         ingress.root_pre_repo.remove(root_sid);
+        ingress.root_inflight_merge_squash_contexts.remove(root_sid);
+        ingress.root_terminal_merge_squash_contexts.remove(root_sid);
         ingress.root_mutating.remove(root_sid);
         ingress.root_target_repo_only.remove(root_sid);
         ingress.root_reflog_refs.remove(root_sid);
@@ -3530,10 +4097,13 @@ impl ActorDaemonCoordinator {
 
         let Some(worktree) = ingress.root_worktrees.get(&root).cloned() else {
             if is_terminal_root_trace_event(&event, &sid, &root) {
+                ingress.root_families.remove(&root);
                 ingress.root_mutating.remove(&root);
                 ingress.root_target_repo_only.remove(&root);
                 ingress.root_argv.remove(&root);
                 ingress.root_pre_repo.remove(&root);
+                ingress.root_inflight_merge_squash_contexts.remove(&root);
+                ingress.root_terminal_merge_squash_contexts.remove(&root);
                 ingress.root_reflog_refs.remove(&root);
                 ingress.root_head_reflog_start_offsets.remove(&root);
                 ingress.root_family_reflog_start_offsets.remove(&root);
@@ -3580,6 +4150,17 @@ impl ActorDaemonCoordinator {
             refs.sort();
             refs.dedup();
         }
+        let cached_inflight_merge_squash = ingress
+            .root_inflight_merge_squash_contexts
+            .get(&root)
+            .cloned();
+        let cached_terminal_merge_squash = ingress
+            .root_terminal_merge_squash_contexts
+            .get(&root)
+            .cloned();
+        drop(ingress);
+
+        let mut inflight_merge_squash_to_cache = None;
         if let Some(object) = payload.as_object_mut() {
             if let Some(repo) = pre_repo.as_ref() {
                 object.insert("git_ai_pre_repo".to_string(), json!(repo));
@@ -3589,12 +4170,19 @@ impl ActorDaemonCoordinator {
                     .get("git_ai_merge_squash_staged_file_blobs")
                     .is_none()
             {
-                match capture_inflight_merge_squash_context_for_commit(
-                    &worktree,
-                    effective_primary.as_deref(),
-                    &effective_argv,
-                ) {
+                let inflight_merge_squash = if let Some(context) = cached_inflight_merge_squash {
+                    Ok(Some(context))
+                } else {
+                    capture_inflight_merge_squash_context_for_commit(
+                        &worktree,
+                        effective_primary.as_deref(),
+                        &effective_argv,
+                    )
+                };
+                match inflight_merge_squash {
                     Ok(Some((source_head, staged_file_blobs))) => {
+                        inflight_merge_squash_to_cache =
+                            Some((source_head.clone(), staged_file_blobs.clone()));
                         object.insert(
                             "git_ai_merge_squash_source_head".to_string(),
                             json!(source_head),
@@ -3658,6 +4246,118 @@ impl ActorDaemonCoordinator {
             }
         }
 
+        let terminal_exit_code = if is_terminal_root_trace_event(&event, &sid, &root) {
+            Some(
+                payload
+                    .get("code")
+                    .or_else(|| payload.get("exit_code"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32,
+            )
+        } else {
+            None
+        };
+        let post_repo = if terminal_exit_code.is_some() {
+            read_head_state_for_worktree(&worktree).map(repo_context_from_head_state)
+        } else {
+            None
+        };
+        let mut terminal_merge_squash_to_cache = None;
+        if is_terminal_root_trace_event(&event, &sid, &root)
+            && let Some(object) = payload.as_object_mut()
+        {
+            if let Some(state) = post_repo.as_ref() {
+                object.insert("git_ai_post_repo".to_string(), json!(state));
+            }
+
+            let terminal_merge_squash = if let Some(context) = cached_terminal_merge_squash {
+                Ok(Some(context))
+            } else {
+                let source_head_result = capture_merge_squash_source_head_for_command(
+                    &worktree,
+                    effective_primary.as_deref(),
+                    &effective_argv,
+                    terminal_exit_code.unwrap_or(0),
+                );
+                let staged_file_blobs_result = capture_merge_squash_staged_file_blobs_for_command(
+                    &worktree,
+                    effective_primary.as_deref(),
+                    &effective_argv,
+                    terminal_exit_code.unwrap_or(0),
+                );
+                match (source_head_result, staged_file_blobs_result) {
+                    (Ok(source_head), Ok(staged_file_blobs)) => {
+                        Ok(match (source_head, staged_file_blobs) {
+                            (Some(source_head), Some(staged_file_blobs)) => {
+                                Some((source_head, staged_file_blobs))
+                            }
+                            _ => None,
+                        })
+                    }
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                }
+            };
+
+            match terminal_merge_squash {
+                Ok(Some((source_head, staged_file_blobs))) => {
+                    terminal_merge_squash_to_cache =
+                        Some((source_head.clone(), staged_file_blobs.clone()));
+                    object.insert(
+                        "git_ai_merge_squash_source_head".to_string(),
+                        json!(source_head),
+                    );
+                    object.insert(
+                        "git_ai_merge_squash_staged_file_blobs".to_string(),
+                        json!(staged_file_blobs),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    debug_log(&format!(
+                        "daemon merge --squash context capture failed sid={}: {}",
+                        sid, error
+                    ));
+                    observability::log_error(
+                        &error,
+                        Some(json!({
+                            "component": "daemon",
+                            "phase": "augment_trace_payload_with_reflog_metadata",
+                            "root_sid": root,
+                            "sid": sid,
+                            "argv": effective_argv,
+                        })),
+                    );
+                }
+            }
+        }
+
+        let mut ingress = match self.trace_ingress_state.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                observability::log_error(
+                    &GitAiError::Generic("trace ingress state lock poisoned".to_string()),
+                    Some(serde_json::json!({
+                        "component": "daemon",
+                        "phase": "augment_trace_payload_with_reflog_metadata",
+                        "sid": sid,
+                        "event": event,
+                    })),
+                );
+                return;
+            }
+        };
+        if let Some(context) = inflight_merge_squash_to_cache {
+            ingress
+                .root_inflight_merge_squash_contexts
+                .entry(root.clone())
+                .or_insert(context);
+        }
+        if let Some(context) = terminal_merge_squash_to_cache {
+            ingress
+                .root_terminal_merge_squash_contexts
+                .entry(root.clone())
+                .or_insert(context);
+        }
         if should_capture_mutation && !target_repo_only {
             if !ingress.root_head_reflog_start_offsets.contains_key(&root)
                 && let Some(offset) = daemon_worktree_head_reflog_offset(&worktree)
@@ -3676,87 +4376,12 @@ impl ActorDaemonCoordinator {
             }
         }
 
-        let terminal_exit_code = if is_terminal_root_trace_event(&event, &sid, &root) {
-            Some(
-                payload
-                    .get("code")
-                    .or_else(|| payload.get("exit_code"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0) as i32,
-            )
-        } else {
-            None
-        };
-
         if is_terminal_root_trace_event(&event, &sid, &root)
             && let Some(object) = payload.as_object_mut()
         {
             let mut terminal_ref_changes: Option<Vec<crate::daemon::domain::RefChange>> = None;
-            let post_repo =
-                read_head_state_for_worktree(&worktree).map(repo_context_from_head_state);
             if let Some(state) = post_repo.as_ref() {
                 object.insert("git_ai_post_repo".to_string(), json!(state));
-            }
-
-            match capture_merge_squash_source_head_for_command(
-                &worktree,
-                effective_primary.as_deref(),
-                &effective_argv,
-                terminal_exit_code.unwrap_or(0),
-            ) {
-                Ok(Some(source_head)) => {
-                    object.insert(
-                        "git_ai_merge_squash_source_head".to_string(),
-                        json!(source_head),
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    debug_log(&format!(
-                        "daemon merge --squash source head capture failed sid={}: {}",
-                        sid, error
-                    ));
-                    observability::log_error(
-                        &error,
-                        Some(json!({
-                            "component": "daemon",
-                            "phase": "augment_trace_payload_with_reflog_metadata",
-                            "root_sid": root,
-                            "sid": sid,
-                            "argv": effective_argv,
-                        })),
-                    );
-                }
-            }
-            match capture_merge_squash_staged_file_blobs_for_command(
-                &worktree,
-                effective_primary.as_deref(),
-                &effective_argv,
-                terminal_exit_code.unwrap_or(0),
-            ) {
-                Ok(Some(staged_file_blobs)) => {
-                    object.insert(
-                        "git_ai_merge_squash_staged_file_blobs".to_string(),
-                        json!(staged_file_blobs),
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    debug_log(&format!(
-                        "daemon merge --squash staged blob capture failed sid={}: {}",
-                        sid, error
-                    ));
-                    observability::log_error(
-                        &error,
-                        Some(json!({
-                            "component": "daemon",
-                            "phase": "augment_trace_payload_with_reflog_metadata",
-                            "root_sid": root,
-                            "sid": sid,
-                            "argv": effective_argv,
-                        })),
-                    );
-                }
             }
             if should_capture_mutation && !target_repo_only {
                 if let Some(start_offset) =
@@ -3921,8 +4546,11 @@ impl ActorDaemonCoordinator {
                 }
             }
             ingress.root_worktrees.remove(&root);
+            ingress.root_families.remove(&root);
             ingress.root_argv.remove(&root);
             ingress.root_pre_repo.remove(&root);
+            ingress.root_inflight_merge_squash_contexts.remove(&root);
+            ingress.root_terminal_merge_squash_contexts.remove(&root);
             ingress.root_mutating.remove(&root);
             ingress.root_target_repo_only.remove(&root);
             ingress.root_reflog_refs.remove(&root);
@@ -4872,6 +5500,7 @@ impl ActorDaemonCoordinator {
     ) -> Result<(), GitAiError> {
         let cmd = &applied.command;
         let events = &applied.analysis.events;
+        let parsed_invocation = parsed_invocation_for_normalized_command(cmd);
         let saw_pull_event = events.iter().any(|event| {
             matches!(
                 event,
@@ -4918,7 +5547,7 @@ impl ActorDaemonCoordinator {
             None
         };
         let reset_pathspecs = if cmd.primary_command.as_deref() == Some("reset") {
-            let pathspecs = parsed_invocation_for_normalized_command(cmd).pathspecs();
+            let pathspecs = parsed_invocation.pathspecs();
             if pathspecs.is_empty() {
                 None
             } else {
@@ -5086,6 +5715,8 @@ impl ActorDaemonCoordinator {
             if let Some(worktree) = cmd.worktree.as_ref() {
                 let worktree = worktree.to_string_lossy().to_string();
                 apply_rewrite_side_effect(
+                    self,
+                    family,
                     &worktree,
                     rewrite_event.clone(),
                     carryover_snapshot.as_ref(),
@@ -5130,6 +5761,20 @@ impl ActorDaemonCoordinator {
         }
 
         if matches!(cmd.primary_command.as_deref(), Some("checkout" | "switch")) {
+            if let Some(prerequisite) =
+                recent_checkout_switch_prerequisite_from_command(cmd, carryover_snapshot.as_ref())
+            {
+                let family = family.map(std::borrow::ToOwned::to_owned).or_else(|| {
+                    cmd.worktree.as_ref().and_then(|worktree| {
+                        find_repository_in_path(&worktree.to_string_lossy())
+                            .ok()
+                            .map(|repo| family_key_for_repository(&repo))
+                    })
+                });
+                if let Some(family) = family {
+                    self.record_recent_replay_prerequisite(&family, prerequisite)?;
+                }
+            }
             apply_checkout_switch_working_log_side_effect(cmd, carryover_snapshot.as_ref())?;
         }
 
@@ -5331,7 +5976,9 @@ fn control_listener_loop_actor(
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
     remove_socket_if_exists(&control_socket_path)?;
-    let listener = LocalSocketListener::bind(control_socket_path.to_string_lossy().as_ref())
+    let listener = ListenerOptions::new()
+        .name(local_socket_name(&control_socket_path)?)
+        .create_sync()
         .map_err(|e| GitAiError::Generic(format!("failed binding control socket: {}", e)))?;
     set_socket_owner_only(&control_socket_path)?;
     for stream in listener.incoming() {
@@ -5388,7 +6035,9 @@ fn trace_listener_loop_actor(
     coordinator: Arc<ActorDaemonCoordinator>,
 ) -> Result<(), GitAiError> {
     remove_socket_if_exists(&trace_socket_path)?;
-    let listener = LocalSocketListener::bind(trace_socket_path.to_string_lossy().as_ref())
+    let listener = ListenerOptions::new()
+        .name(local_socket_name(&trace_socket_path)?)
+        .create_sync()
         .map_err(|e| GitAiError::Generic(format!("failed binding trace socket: {}", e)))?;
     set_socket_owner_only(&trace_socket_path)?;
     for stream in listener.incoming() {
@@ -5511,8 +6160,12 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     coordinator.wait_for_shutdown().await;
 
     // best effort wake listeners to allow clean process exit
-    let _ = LocalSocketStream::connect(config.control_socket_path.to_string_lossy().as_ref());
-    let _ = LocalSocketStream::connect(config.trace_socket_path.to_string_lossy().as_ref());
+    let _ = local_socket_connects_with_timeout(
+        &config.control_socket_path,
+        DAEMON_SOCKET_PROBE_TIMEOUT,
+    );
+    let _ =
+        local_socket_connects_with_timeout(&config.trace_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT);
 
     let _ = control_thread.join();
     let _ = trace_thread.join();
@@ -5523,20 +6176,192 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     Ok(())
 }
 
-pub fn send_control_request(
+fn control_request_response_timeout(request: &ControlRequest) -> Duration {
+    match request {
+        ControlRequest::CheckpointRun {
+            wait: Some(true), ..
+        } => DAEMON_CHECKPOINT_RESPONSE_TIMEOUT,
+        _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
+    }
+}
+
+fn local_socket_name<'a>(socket_path: &'a Path) -> Result<Name<'a>, GitAiError> {
+    socket_path
+        .to_fs_name::<GenericFilePath>()
+        .map_err(|e| GitAiError::Generic(format!("invalid daemon socket path: {}", e)))
+}
+
+pub fn open_local_socket_stream_with_timeout(
+    socket_path: &Path,
+    timeout: Duration,
+) -> Result<LocalSocketStream, GitAiError> {
+    #[cfg(windows)]
+    {
+        let stream = DuplexPipeStream::<Bytes>::connect_by_path_with_wait_mode(
+            socket_path,
+            ConnectWaitMode::Timeout(timeout),
+        )
+        .map_err(|e| {
+            GitAiError::Generic(format!(
+                "timed out after {:?} connecting daemon socket {}: {}",
+                timeout,
+                socket_path.display(),
+                e
+            ))
+        })?;
+        return Ok(LocalSocketStream::from(WindowsLocalSocketStream::from(
+            stream,
+        )));
+    }
+
+    #[cfg(not(windows))]
+    {
+        ConnectOptions::new()
+            .name(local_socket_name(socket_path)?)
+            .wait_mode(ConnectWaitMode::Timeout(timeout))
+            .connect_sync()
+            .map_err(|e| {
+                GitAiError::Generic(format!(
+                    "timed out after {:?} connecting daemon socket {}: {}",
+                    timeout,
+                    socket_path.display(),
+                    e
+                ))
+            })
+    }
+}
+
+pub fn local_socket_connects_with_timeout(
+    socket_path: &Path,
+    timeout: Duration,
+) -> Result<(), GitAiError> {
+    let _stream = open_local_socket_stream_with_timeout(socket_path, timeout)?;
+    Ok(())
+}
+
+fn wait_for_socket_io_retry(
+    deadline: StdInstant,
+    timeout: Duration,
+    socket_path: &Path,
+    operation: &str,
+) -> Result<(), GitAiError> {
+    let now = StdInstant::now();
+    if now >= deadline {
+        return Err(GitAiError::Generic(format!(
+            "timed out after {:?} waiting for daemon {} on {}",
+            timeout,
+            operation,
+            socket_path.display()
+        )));
+    }
+    std::thread::sleep(DAEMON_IO_POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+    Ok(())
+}
+
+fn set_local_socket_nonblocking(
+    stream: &LocalSocketStream,
+    socket_path: &Path,
+) -> Result<(), GitAiError> {
+    stream.set_nonblocking(true).map_err(|e| {
+        GitAiError::Generic(format!(
+            "failed to set daemon socket {} nonblocking: {}",
+            socket_path.display(),
+            e
+        ))
+    })
+}
+
+fn write_all_local_socket_with_timeout(
+    stream: &mut LocalSocketStream,
+    socket_path: &Path,
+    payload: &[u8],
+    timeout: Duration,
+) -> Result<(), GitAiError> {
+    let deadline = StdInstant::now() + timeout;
+    let mut remaining = payload;
+    while !remaining.is_empty() {
+        match stream.write(remaining) {
+            Ok(0) => {
+                return Err(GitAiError::Generic(format!(
+                    "daemon socket {} closed while writing request",
+                    socket_path.display()
+                )));
+            }
+            Ok(written) => {
+                remaining = &remaining[written..];
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                wait_for_socket_io_retry(deadline, timeout, socket_path, "request write")?;
+            }
+            Err(e) => {
+                return Err(GitAiError::Generic(format!(
+                    "failed writing daemon request to {}: {}",
+                    socket_path.display(),
+                    e
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_local_socket_line_with_timeout(
+    reader: &mut BufReader<LocalSocketStream>,
+    socket_path: &Path,
+    timeout: Duration,
+) -> Result<String, GitAiError> {
+    let deadline = StdInstant::now() + timeout;
+    let mut line = String::new();
+    loop {
+        match reader.read_line(&mut line) {
+            Ok(0) if line.is_empty() => {
+                return Err(GitAiError::Generic(format!(
+                    "daemon socket {} closed without a response",
+                    socket_path.display()
+                )));
+            }
+            Ok(0) => return Ok(line),
+            Ok(_) if line.ends_with('\n') => return Ok(line),
+            Ok(_) => {
+                wait_for_socket_io_retry(deadline, timeout, socket_path, "response read")?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                wait_for_socket_io_retry(deadline, timeout, socket_path, "response read")?;
+            }
+            Err(e) => {
+                return Err(GitAiError::Generic(format!(
+                    "failed reading daemon response from {}: {}",
+                    socket_path.display(),
+                    e
+                )));
+            }
+        }
+    }
+}
+
+pub fn send_control_request_with_timeout(
     socket_path: &Path,
     request: &ControlRequest,
+    timeout: Duration,
 ) -> Result<ControlResponse, GitAiError> {
-    let mut stream = LocalSocketStream::connect(socket_path.to_string_lossy().as_ref())
-        .map_err(|e| GitAiError::Generic(format!("failed to connect control socket: {}", e)))?;
-    let body = serde_json::to_string(request)?;
-    stream.write_all(body.as_bytes())?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+    send_control_request_with_timeouts(socket_path, request, timeout, timeout)
+}
+
+fn send_control_request_with_timeouts(
+    socket_path: &Path,
+    request: &ControlRequest,
+    connect_timeout: Duration,
+    response_timeout: Duration,
+) -> Result<ControlResponse, GitAiError> {
+    let mut stream = open_local_socket_stream_with_timeout(socket_path, connect_timeout)?;
+    set_local_socket_nonblocking(&stream, socket_path)?;
+    let mut body = serde_json::to_vec(request)?;
+    body.push(b'\n');
+    write_all_local_socket_with_timeout(&mut stream, socket_path, &body, response_timeout)?;
 
     let mut response_reader = BufReader::new(stream);
-    let mut line = String::new();
-    response_reader.read_line(&mut line)?;
+    let line =
+        read_local_socket_line_with_timeout(&mut response_reader, socket_path, response_timeout)?;
     if line.trim().is_empty() {
         return Err(GitAiError::Generic(
             "empty daemon control response".to_string(),
@@ -5544,4 +6369,16 @@ pub fn send_control_request(
     }
     let resp: ControlResponse = serde_json::from_str(line.trim())?;
     Ok(resp)
+}
+
+pub fn send_control_request(
+    socket_path: &Path,
+    request: &ControlRequest,
+) -> Result<ControlResponse, GitAiError> {
+    send_control_request_with_timeouts(
+        socket_path,
+        request,
+        DAEMON_CONTROL_CONNECT_TIMEOUT,
+        control_request_response_timeout(request),
+    )
 }

@@ -3,11 +3,15 @@
 mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::daemon::{ControlRequest, DaemonConfig, DaemonLock, send_control_request};
-use interprocess::local_socket::LocalSocketStream;
+use git_ai::daemon::{
+    ControlRequest, DaemonConfig, DaemonLock, local_socket_connects_with_timeout,
+    open_local_socket_stream_with_timeout, send_control_request,
+};
+use git_ai::git::find_repository_in_path;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{
-    DaemonTestCompletionLogEntry, GitTestMode, TestRepo, get_binary_path, real_git_executable,
+    DaemonTestCompletionLogEntry, DaemonTestScope, GitTestMode, TestRepo, get_binary_path,
+    real_git_executable,
 };
 use serde_json::Value;
 use serial_test::serial;
@@ -18,29 +22,18 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
-fn local_socket_connects_with_timeout(socket_path: &Path, timeout: Duration) -> Result<(), String> {
-    let start = std::time::Instant::now();
-    loop {
-        match LocalSocketStream::connect(socket_path.to_string_lossy().as_ref()) {
-            Ok(stream) => {
-                drop(stream);
-                return Ok(());
-            }
-            Err(error) => {
-                if start.elapsed() >= timeout {
-                    return Err(format!(
-                        "socket {} was not ready within {:?}: {}",
-                        socket_path.display(),
-                        timeout,
-                        error
-                    ));
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-        }
-    }
+fn repo_storage(repo: &TestRepo) -> git_ai::git::repository::Repository {
+    find_repository_in_path(repo.path().to_str().expect("repo path should be utf-8"))
+        .expect("failed to find repository for daemon test")
+}
+
+fn current_head_sha(repo: &TestRepo) -> String {
+    repo.git(&["rev-parse", "HEAD"])
+        .expect("failed to resolve HEAD")
+        .trim()
+        .to_string()
 }
 
 fn git_common_dir(repo: &TestRepo) -> PathBuf {
@@ -53,6 +46,20 @@ fn git_common_dir(repo: &TestRepo) -> PathBuf {
         common_dir
     } else {
         repo.path().join(common_dir)
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).expect("failed to create destination directory");
+    for entry in fs::read_dir(src).expect("failed to read source directory") {
+        let entry = entry.expect("failed to read directory entry");
+        let dest = dst.join(entry.file_name());
+        let file_type = entry.file_type().expect("failed to read file type");
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest);
+        } else {
+            fs::copy(entry.path(), dest).expect("failed to copy file");
+        }
     }
 }
 
@@ -69,10 +76,9 @@ fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
 }
 
 fn send_trace_frames(trace_socket_path: &Path, payloads: &[Value]) {
-    local_socket_connects_with_timeout(trace_socket_path, DAEMON_TEST_PROBE_TIMEOUT)
-        .expect("failed to observe trace socket readiness");
-    let mut stream = LocalSocketStream::connect(trace_socket_path.to_string_lossy().as_ref())
-        .expect("failed to connect to trace socket");
+    let mut stream =
+        open_local_socket_stream_with_timeout(trace_socket_path, DAEMON_TEST_PROBE_TIMEOUT)
+            .expect("failed to connect to trace socket");
     for payload in payloads {
         let raw = serde_json::to_string(payload).expect("failed to serialize trace payload");
         stream
@@ -154,7 +160,6 @@ impl DaemonGuard {
     }
 
     fn wait_until_ready(&mut self) {
-        let trace_socket_addr = self.trace_socket_path.to_string_lossy().to_string();
         for _ in 0..200 {
             if let Some(status) = self
                 .child
@@ -169,7 +174,13 @@ impl DaemonGuard {
                     repo_working_dir: self.repo_working_dir.clone(),
                 },
             );
-            if status.is_ok() && LocalSocketStream::connect(trace_socket_addr.as_str()).is_ok() {
+            if status.is_ok()
+                && local_socket_connects_with_timeout(
+                    &self.trace_socket_path,
+                    DAEMON_TEST_PROBE_TIMEOUT,
+                )
+                .is_ok()
+            {
                 return;
             }
             thread::sleep(Duration::from_millis(25));
@@ -1484,6 +1495,46 @@ fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
 
 #[test]
 #[serial]
+fn daemon_commit_replay_recovers_stash_restore_when_working_log_is_missing() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+    let mut file = repo.filename("stash-recover.txt");
+
+    file.set_contents(lines!["base top", "base bottom", ""]);
+    repo.stage_all_and_commit("base").unwrap();
+
+    file.insert_at(1, lines!["// AI stash line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai", "stash-recover.txt"])
+        .expect("checkpoint before stash should succeed");
+
+    repo.git(&["stash", "push", "-m", "save ai"])
+        .expect("stash push should succeed");
+    repo.git(&["stash", "apply", "stash@{0}"])
+        .expect("stash apply should succeed");
+    repo.sync_daemon_force();
+
+    let head = current_head_sha(&repo);
+    let git_ai_repo = repo_storage(&repo);
+    git_ai_repo
+        .storage
+        .delete_working_log_for_base_commit(&head)
+        .expect("failed to delete restored stash working log");
+
+    repo.git(&["add", "stash-recover.txt"])
+        .expect("add after stash restore should succeed");
+    repo.git(&["commit", "-m", "stash restore commit"])
+        .expect("commit after stash restore should succeed");
+
+    file = repo.filename("stash-recover.txt");
+    file.assert_lines_and_blame(lines![
+        "base top".human(),
+        "// AI stash line".ai(),
+        "base bottom".human(),
+    ]);
+}
+
+#[test]
+#[serial]
 fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
@@ -1611,6 +1662,180 @@ fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
 
 #[test]
 #[serial]
+fn daemon_commit_replay_recovers_backward_reset_when_working_log_is_missing() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+    let mut file = repo.filename("reset-recover.txt");
+
+    file.set_contents(lines!["base", ""]);
+    let base_commit = repo.stage_all_and_commit("base").unwrap();
+
+    file.insert_at(1, lines!["// AI feature 1".ai()]);
+    repo.stage_all_and_commit("ai feature 1").unwrap();
+
+    file.insert_at(2, lines!["// AI feature 2".ai()]);
+    let latest_commit = repo.stage_all_and_commit("ai feature 2").unwrap();
+    file.insert_at(3, lines!["// AI feature 3".ai()]);
+
+    repo.git(&["reset", "--soft", &base_commit.commit_sha])
+        .expect("backward soft reset should succeed");
+    repo.sync_daemon_force();
+
+    let head = current_head_sha(&repo);
+    let git_ai_repo = repo_storage(&repo);
+    assert!(
+        git_ai_repo.storage.has_working_log(&head),
+        "precondition failed: daemon did not materialize reset working log before simulated loss"
+    );
+    git_ai_repo
+        .storage
+        .rename_working_log(&head, &latest_commit.commit_sha)
+        .expect("failed to restore pre-reset working log to simulate missing reset side effect");
+    fs::write(
+        git_common_dir(&repo).join("ORIG_HEAD"),
+        format!("{}\n", "0".repeat(40)),
+    )
+    .expect("failed to clobber ORIG_HEAD");
+
+    repo.stage_all_and_commit("after backward reset")
+        .expect("commit after backward reset should succeed");
+
+    file = repo.filename("reset-recover.txt");
+    file.assert_lines_and_blame(lines![
+        "base".human(),
+        "// AI feature 1".ai(),
+        "// AI feature 2".ai(),
+        "// AI feature 3".ai(),
+    ]);
+}
+
+#[test]
+#[serial]
+fn daemon_commit_replay_recovers_same_head_pathspec_reset_when_working_log_is_missing() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+    let mut keep = repo.filename("pathspec-keep.txt");
+    let mut drop = repo.filename("pathspec-drop.txt");
+
+    keep.set_contents(lines!["keep base", ""]);
+    drop.set_contents(lines!["drop base", ""]);
+    repo.stage_all_and_commit("base").unwrap();
+
+    keep.insert_at(1, lines!["// keep ai".ai()]);
+    drop.insert_at(1, lines!["// drop ai".ai()]);
+    repo.git(&["add", "-A"])
+        .expect("staging pathspec reset fixtures should succeed");
+
+    let head = current_head_sha(&repo);
+    let git_ai_repo = repo_storage(&repo);
+    let working_log_dir = git_ai_repo.storage.working_log_for_base_commit(&head).dir;
+    let backup_dir = repo.path().join(".git-ai-test-pathspec-reset-backup");
+    if backup_dir.exists() {
+        fs::remove_dir_all(&backup_dir).expect("failed to clear pathspec reset backup");
+    }
+    copy_dir_recursive(&working_log_dir, &backup_dir);
+
+    repo.git(&["reset", "HEAD", "pathspec-drop.txt"])
+        .expect("pathspec reset should succeed");
+    repo.sync_daemon_force();
+
+    git_ai_repo
+        .storage
+        .delete_working_log_for_base_commit(&head)
+        .expect("failed to delete post-reset working log");
+    copy_dir_recursive(&backup_dir, &working_log_dir);
+
+    repo.git(&["commit", "-m", "commit keep only"])
+        .expect("commit after same-head pathspec reset should succeed");
+
+    let new_head = current_head_sha(&repo);
+    let new_working_log = git_ai_repo.storage.working_log_for_base_commit(&new_head);
+    let initial = new_working_log.read_initial_attributions();
+    let note = repo
+        .read_authorship_note(&new_head)
+        .expect("keep-only commit should have an authorship note");
+    assert!(
+        !initial.files.contains_key("pathspec-drop.txt"),
+        "reset pathspec should remove AI carryover for the dropped file"
+    );
+    assert!(
+        !initial.files.contains_key("pathspec-keep.txt"),
+        "kept file should have been consumed by the commit"
+    );
+    assert!(
+        !note.contains("pathspec-drop.txt"),
+        "keep-only commit note should not include the pathspec-reset file"
+    );
+    assert!(
+        note.contains("pathspec-keep.txt"),
+        "keep-only commit note should preserve the staged file attribution"
+    );
+
+    repo.git(&["add", "pathspec-drop.txt"])
+        .expect("staging dropped file after recovery should succeed");
+    repo.git(&["commit", "-m", "commit drop later"])
+        .expect("second commit should succeed");
+
+    keep = repo.filename("pathspec-keep.txt");
+    drop = repo.filename("pathspec-drop.txt");
+    keep.assert_lines_and_blame(lines!["keep base".human(), "// keep ai".ai()]);
+    drop.assert_lines_and_blame(lines!["drop base".human(), "// drop ai".ai()]);
+}
+
+#[test]
+#[serial]
+fn daemon_commit_replay_recovers_squash_prep_when_working_log_is_missing() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+    let mut file = repo.filename("squash-recover.txt");
+    let mut noise = repo.filename("noise.txt");
+    let default_branch = repo.current_branch();
+
+    file.set_contents(lines!["line 1", "line 2", "line 3", ""]);
+    repo.stage_all_and_commit("base").unwrap();
+
+    noise.set_contents(lines!["noise"]);
+    repo.stage_all_and_commit("noise").unwrap();
+    repo.git(&["reset", "--hard", "HEAD~1"])
+        .expect("older unrelated reset should succeed");
+    repo.sync_daemon_force();
+
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("feature checkout should succeed");
+    repo.sync_daemon_force();
+    file = repo.filename("squash-recover.txt");
+    file.insert_at(3, lines!["// feature ai".ai()]);
+    repo.stage_all_and_commit("feature ai").unwrap();
+
+    repo.git(&["checkout", &default_branch])
+        .expect("main checkout should succeed");
+    repo.sync_daemon_force();
+    let base_head = current_head_sha(&repo);
+
+    repo.git(&["merge", "--squash", "feature"])
+        .expect("merge --squash should succeed");
+    repo.sync_daemon_force();
+
+    let git_ai_repo = repo_storage(&repo);
+    git_ai_repo
+        .storage
+        .delete_working_log_for_base_commit(&base_head)
+        .expect("failed to delete squash-prepared working log");
+
+    repo.git(&["commit", "-m", "squash commit"])
+        .expect("commit after missing squash prep should succeed");
+
+    file = repo.filename("squash-recover.txt");
+    file.assert_lines_and_blame(lines![
+        "line 1".human(),
+        "line 2".human(),
+        "line 3".human(),
+        "// feature ai".ai(),
+    ]);
+}
+
+#[test]
+#[serial]
 fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
@@ -1674,6 +1899,52 @@ fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
             .any(|line| line.contains("\"rebase_complete\"")),
         "pure trace socket mode should emit rebase_complete for continue flow"
     );
+}
+
+#[test]
+#[serial]
+fn daemon_commit_replay_recovers_switch_migration_when_working_log_is_missing() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+    let default_branch = repo.current_branch();
+    let mut file = repo.filename("switch-recover.txt");
+    let mut marker = repo.filename("marker.txt");
+
+    file.set_contents(lines!["base", ""]);
+    marker.set_contents(lines!["branch marker", ""]);
+    let main_head = repo.stage_all_and_commit("base").unwrap().commit_sha;
+
+    repo.git(&["switch", "-c", "feature"])
+        .expect("feature switch should succeed");
+    marker.insert_at(1, lines!["feature commit"]);
+    let feature_head = repo
+        .stage_all_and_commit("feature commit")
+        .unwrap()
+        .commit_sha;
+
+    repo.git(&["switch", default_branch.as_str()])
+        .expect("switch back to default branch should succeed");
+    file.insert_at(1, lines!["// AI branch carryover".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai", "switch-recover.txt"])
+        .expect("branch carryover checkpoint should succeed");
+
+    repo.git(&["switch", "feature"])
+        .expect("switch to feature with carried changes should succeed");
+    repo.sync_daemon_force();
+
+    let git_ai_repo = repo_storage(&repo);
+    git_ai_repo
+        .storage
+        .rename_working_log(&feature_head, &main_head)
+        .expect("failed to restore old working log to simulate missing switch side effect");
+
+    repo.git(&["add", "switch-recover.txt"])
+        .expect("add switched file should succeed");
+    repo.git(&["commit", "-m", "switch carryover commit"])
+        .expect("commit after switch should succeed");
+
+    file = repo.filename("switch-recover.txt");
+    file.assert_lines_and_blame(lines!["base".human(), "// AI branch carryover".ai()]);
 }
 
 #[test]

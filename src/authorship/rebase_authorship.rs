@@ -1802,6 +1802,15 @@ pub fn reconstruct_working_log_after_reset(
     user_pathspecs: Option<&[String]>, // Optional user-specified pathspecs for partial reset
     final_state_override: Option<HashMap<String, String>>,
 ) -> Result<(), GitAiError> {
+    if target_commit_sha.trim().is_empty()
+        || old_head_sha.trim().is_empty()
+        || is_zero_oid(target_commit_sha)
+        || is_zero_oid(old_head_sha)
+    {
+        debug_log("Skipping reset working-log reconstruction for invalid zero/empty oid");
+        return Ok(());
+    }
+
     debug_log(&format!(
         "Reconstructing working log after reset from {} to {}",
         old_head_sha, target_commit_sha

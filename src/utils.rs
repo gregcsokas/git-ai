@@ -267,6 +267,12 @@ fn try_lock_exclusive(path: &std::path::Path) -> Option<std::fs::File> {
 /// Windows-specific flag to prevent console window creation
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
+/// Windows-specific flag to start a new process group
+#[cfg(windows)]
+pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+/// Windows-specific flag to allow a child process to break away from the current job object
+#[cfg(windows)]
+pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
 /// Unescape a git-quoted path that may contain octal escape sequences.
 ///
 /// Git quotes filenames containing non-ASCII characters (and some special characters)
@@ -1123,5 +1129,17 @@ mod tests {
     fn test_create_no_window_constant() {
         // Verify the Windows constant is correct
         assert_eq!(CREATE_NO_WINDOW, 0x08000000);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_create_new_process_group_constant() {
+        assert_eq!(CREATE_NEW_PROCESS_GROUP, 0x00000200);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_create_breakaway_from_job_constant() {
+        assert_eq!(CREATE_BREAKAWAY_FROM_JOB, 0x01000000);
     }
 }
