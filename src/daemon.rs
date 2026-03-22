@@ -1623,15 +1623,12 @@ fn first_parent_commit_chain_exclusive(
     )))
 }
 
-fn materialize_commit_authorship_from_persisted_state(
+fn materialize_commit_authorship_from_persisted_state_unchecked(
     repo: &Repository,
     commit_sha: &str,
     author: &str,
 ) -> Result<bool, GitAiError> {
     if commit_has_authorship_log(repo, commit_sha) {
-        return Ok(false);
-    }
-    if !rewrite_log_mentions_commit(repo, commit_sha)? {
         return Ok(false);
     }
 
@@ -1662,6 +1659,18 @@ fn materialize_commit_authorship_from_persisted_state(
     )?;
 
     Ok(true)
+}
+
+fn materialize_commit_authorship_from_persisted_state(
+    repo: &Repository,
+    commit_sha: &str,
+    author: &str,
+) -> Result<bool, GitAiError> {
+    if !rewrite_log_mentions_commit(repo, commit_sha)? {
+        return Ok(false);
+    }
+
+    materialize_commit_authorship_from_persisted_state_unchecked(repo, commit_sha, author)
 }
 
 fn attempt_materialize_commit_chain_authorship(
@@ -1806,13 +1815,19 @@ fn ensure_rewrite_prerequisites(
         return Ok(());
     }
 
-    if base_commit != "initial"
-        && let Err(error) = attempt_materialize_commit_authorship(repo, &base_commit, author)
-    {
-        debug_log(&format!(
-            "Failed to backfill base commit note for {}: {}",
-            base_commit, error
-        ));
+    if base_commit != "initial" {
+        let materialize_result = if matches!(rewrite_event, RewriteLogEvent::CommitAmend { .. }) {
+            materialize_commit_authorship_from_persisted_state_unchecked(repo, &base_commit, author)
+                .map(|_| ())
+        } else {
+            attempt_materialize_commit_authorship(repo, &base_commit, author)
+        };
+        if let Err(error) = materialize_result {
+            debug_log(&format!(
+                "Failed to backfill base commit note for {}: {}",
+                base_commit, error
+            ));
+        }
     }
 
     seed_merge_squash_working_log_for_commit_replay(repo, &base_commit, author)?;

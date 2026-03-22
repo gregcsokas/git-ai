@@ -21,7 +21,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::test_file::TestFile;
 
@@ -1263,7 +1263,10 @@ impl TestRepo {
         baseline_count: u64,
         expected_count: u64,
     ) -> u64 {
-        for _ in 0..800 {
+        let start = Instant::now();
+        let mut last_progress = start;
+        let mut last_observed_count = baseline_count;
+        loop {
             let entries = self.daemon_completion_entries_for_family(family_key);
             let tracked_entries = entries
                 .iter()
@@ -1287,6 +1290,15 @@ impl TestRepo {
             if observed_count >= expected_count {
                 return observed_count;
             }
+            if observed_count > last_observed_count {
+                last_progress = Instant::now();
+                last_observed_count = observed_count;
+            }
+            if start.elapsed() >= Duration::from_secs(30)
+                || last_progress.elapsed() >= Duration::from_secs(8)
+            {
+                break;
+            }
             thread::sleep(Duration::from_millis(10));
         }
 
@@ -1299,7 +1311,11 @@ impl TestRepo {
     fn wait_for_daemon_completion_sessions(&self, family_key: &str, sessions: &[String]) -> u64 {
         let expected: std::collections::HashSet<&str> =
             sessions.iter().map(|session| session.as_str()).collect();
-        for _ in 0..800 {
+        let start = Instant::now();
+        let mut last_progress = start;
+        let mut last_observed_count = 0usize;
+        let mut last_completed_count = 0usize;
+        loop {
             let entries = self.daemon_completion_entries_for_family(family_key);
             let tracked_entries = entries
                 .iter()
@@ -1328,6 +1344,17 @@ impl TestRepo {
             if completed.len() == expected.len() {
                 return tracked_entries.len() as u64;
             }
+            if tracked_entries.len() > last_observed_count || completed.len() > last_completed_count
+            {
+                last_progress = Instant::now();
+                last_observed_count = tracked_entries.len();
+                last_completed_count = completed.len();
+            }
+            if start.elapsed() >= Duration::from_secs(30)
+                || last_progress.elapsed() >= Duration::from_secs(8)
+            {
+                break;
+            }
 
             thread::sleep(Duration::from_millis(10));
         }
@@ -1344,7 +1371,10 @@ impl TestRepo {
         expected_count: u64,
     ) -> u64 {
         let family_key = self.daemon_family_key();
-        for _ in 0..800 {
+        let start = Instant::now();
+        let mut last_progress = start;
+        let mut last_observed_count = baseline_count;
+        loop {
             let entries = self.daemon_completion_entries_for_family(&family_key);
             if let Some(error_entry) = entries
                 .iter()
@@ -1363,6 +1393,15 @@ impl TestRepo {
             let observed_count = entries.len() as u64;
             if observed_count >= expected_count {
                 return observed_count;
+            }
+            if observed_count > last_observed_count {
+                last_progress = Instant::now();
+                last_observed_count = observed_count;
+            }
+            if start.elapsed() >= Duration::from_secs(30)
+                || last_progress.elapsed() >= Duration::from_secs(8)
+            {
+                break;
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -1774,6 +1813,7 @@ impl TestRepo {
             }
             command_args.extend(args.iter().map(|s| s.to_string()));
             command.args(&command_args);
+            configure_test_home_env(&mut command, &self.test_home);
             for (key, value) in envs {
                 command.env(key, value);
             }

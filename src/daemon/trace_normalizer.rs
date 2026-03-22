@@ -481,7 +481,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             None
         };
         let pre_repo = payload_repo_context(payload, "git_ai_pre_repo");
-
         let stash_target_oid = payload_string_field(payload, "git_ai_stash_target_oid");
         let stash_target_error = payload_string_field(payload, "git_ai_stash_target_oid_error");
         let merge_squash_source_head =
