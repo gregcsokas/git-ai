@@ -37,7 +37,6 @@ pub struct PendingTraceCommand {
     pub captured_ref_changes: Vec<RefChange>,
     pub stash_target_oid: Option<String>,
     pub stash_target_error: Option<String>,
-    pub merge_squash_staged_file_blobs: Option<HashMap<String, String>>,
     pub carryover_snapshot_id: Option<String>,
     pub worktree_head_start_offset: Option<u64>,
     pub worktree_head_end_offset: Option<u64>,
@@ -68,7 +67,6 @@ pub struct DeferredRootExit {
     pub reflog_start_cut: Option<ReflogCut>,
     pub reflog_end_cut: Option<ReflogCut>,
     pub captured_ref_changes: Vec<RefChange>,
-    pub merge_squash_staged_file_blobs: Option<HashMap<String, String>>,
     pub carryover_snapshot_id: Option<String>,
 }
 
@@ -319,18 +317,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
     }
 
-    fn merge_pending_merge_squash_staged_file_blobs(
-        &mut self,
-        root_sid: &str,
-        staged_file_blobs: Option<HashMap<String, String>>,
-    ) {
-        if let Some(pending) = self.state.pending.get_mut(root_sid)
-            && let Some(staged_file_blobs) = staged_file_blobs
-        {
-            pending.merge_squash_staged_file_blobs = Some(staged_file_blobs);
-        }
-    }
-
     fn merge_pending_carryover_snapshot_id(
         &mut self,
         root_sid: &str,
@@ -381,10 +367,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             &root_sid,
             payload_string_field(payload, "git_ai_stash_target_oid"),
             payload_string_field(payload, "git_ai_stash_target_oid_error"),
-        );
-        self.merge_pending_merge_squash_staged_file_blobs(
-            &root_sid,
-            payload_string_map_field(payload, "git_ai_merge_squash_staged_file_blobs"),
         );
         self.merge_pending_merge_squash_source_head(
             &root_sid,
@@ -485,8 +467,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
         let stash_target_error = payload_string_field(payload, "git_ai_stash_target_oid_error");
         let merge_squash_source_head =
             payload_string_field(payload, "git_ai_merge_squash_source_head");
-        let merge_squash_staged_file_blobs =
-            payload_string_map_field(payload, "git_ai_merge_squash_staged_file_blobs");
         let carryover_snapshot_id = payload_string_field(payload, "git_ai_carryover_snapshot_id");
 
         let pending = PendingTraceCommand {
@@ -508,7 +488,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             captured_ref_changes: Vec::new(),
             stash_target_oid,
             stash_target_error,
-            merge_squash_staged_file_blobs,
             carryover_snapshot_id,
             worktree_head_start_offset,
             worktree_head_end_offset: None,
@@ -552,10 +531,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             self.merge_pending_merge_squash_source_head(
                 root_sid,
                 deferred.merge_squash_source_head,
-            );
-            self.merge_pending_merge_squash_staged_file_blobs(
-                root_sid,
-                deferred.merge_squash_staged_file_blobs,
             );
             self.merge_pending_carryover_snapshot_id(root_sid, deferred.carryover_snapshot_id);
             return self.finalize_root_exit(root_sid, deferred.exit_code, deferred.finished_at_ns);
@@ -704,8 +679,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
         let payload_ref_changes = payload_reflog_changes(payload);
         let payload_merge_squash_source_head =
             payload_string_field(payload, "git_ai_merge_squash_source_head");
-        let payload_merge_squash_staged_file_blobs =
-            payload_string_map_field(payload, "git_ai_merge_squash_staged_file_blobs");
         let payload_carryover_snapshot_id =
             payload_string_field(payload, "git_ai_carryover_snapshot_id");
 
@@ -726,7 +699,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
                     reflog_start_cut: payload_reflog_start.clone(),
                     reflog_end_cut: payload_reflog_end.clone(),
                     captured_ref_changes: payload_ref_changes.clone(),
-                    merge_squash_staged_file_blobs: payload_merge_squash_staged_file_blobs.clone(),
                     carryover_snapshot_id: payload_carryover_snapshot_id.clone(),
                 });
             deferred.exit_code = exit_code;
@@ -764,9 +736,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 payload_reflog_end,
                 MergeCutMode::Max,
             );
-            if let Some(staged_file_blobs) = payload_merge_squash_staged_file_blobs {
-                deferred.merge_squash_staged_file_blobs = Some(staged_file_blobs);
-            }
             if payload_carryover_snapshot_id.is_some() {
                 deferred.carryover_snapshot_id = payload_carryover_snapshot_id;
             }
@@ -1013,7 +982,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             post_repo: pending.post_repo,
             inflight_rebase_original_head,
             merge_squash_source_head,
-            merge_squash_staged_file_blobs: pending.merge_squash_staged_file_blobs,
             carryover_snapshot_id: pending.carryover_snapshot_id,
             stash_target_oid: pending.stash_target_oid,
             ref_changes,
@@ -1162,19 +1130,6 @@ fn payload_string_field(payload: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_str)
         .map(ToString::to_string)
-}
-
-fn payload_string_map_field(payload: &Value, key: &str) -> Option<HashMap<String, String>> {
-    payload.get(key).and_then(Value::as_object).map(|object| {
-        object
-            .iter()
-            .filter_map(|(map_key, value)| {
-                value
-                    .as_str()
-                    .map(|value| (map_key.clone(), value.to_string()))
-            })
-            .collect::<HashMap<_, _>>()
-    })
 }
 
 #[derive(Clone, Copy)]

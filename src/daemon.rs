@@ -26,7 +26,7 @@ use crate::utils::{LockFile, debug_log};
 use crate::{
     authorship::post_commit::post_commit_with_final_state,
     authorship::rebase_authorship::{
-        committed_file_snapshot_between_commits, prepare_working_log_after_squash,
+        committed_file_snapshot_between_commits, prepare_working_log_after_squash_from_final_state,
         reconstruct_working_log_after_reset, restore_virtual_attribution_carryover,
         restore_working_log_carryover, rewrite_authorship_after_commit_amend_with_snapshot,
         rewrite_authorship_if_needed,
@@ -985,33 +985,12 @@ fn resolve_rebase_original_head_for_worktree(worktree: &Path) -> Option<String> 
         .filter(|oid| is_valid_oid(oid) && !is_zero_oid(oid))
 }
 
-type MergeSquashSnapshot = (String, HashMap<String, String>);
+type MergeSquashSnapshot = String;
 type DeferredCommitCarryover = (
     String,
     crate::authorship::virtual_attribution::VirtualAttributions,
     HashMap<String, String>,
 );
-
-fn capture_merge_squash_staged_file_blobs_for_command(
-    worktree: &Path,
-    _primary_command: Option<&str>,
-    argv: &[String],
-    exit_code: i32,
-) -> Result<Option<HashMap<String, String>>, GitAiError> {
-    if exit_code != 0 {
-        return Ok(None);
-    }
-
-    let parsed = parse_git_cli_args(trace_invocation_args(argv));
-    if parsed.command.as_deref() != Some("merge")
-        || !parsed.command_args.iter().any(|arg| arg == "--squash")
-    {
-        return Ok(None);
-    }
-
-    let repo = discover_repository_in_path_no_git_exec(worktree)?;
-    Ok(Some(repo.get_all_staged_file_blob_oids()?))
-}
 
 fn capture_merge_squash_source_head_for_command(
     worktree: &Path,
@@ -1039,11 +1018,11 @@ fn capture_merge_squash_source_head_for_command(
     Ok(Some(source_head))
 }
 
-fn capture_inflight_merge_squash_context_for_commit(
+fn capture_inflight_merge_squash_source_head_for_commit(
     worktree: &Path,
     primary_command: Option<&str>,
     argv: &[String],
-) -> Result<Option<MergeSquashSnapshot>, GitAiError> {
+) -> Result<Option<String>, GitAiError> {
     if primary_command != Some("commit") {
         return Ok(None);
     }
@@ -1056,9 +1035,7 @@ fn capture_inflight_merge_squash_context_for_commit(
     let Some(source_head) = resolve_squash_source_head_for_worktree(worktree) else {
         return Ok(None);
     };
-    let repo = discover_repository_in_path_no_git_exec(worktree)?;
-    let staged_file_blobs = repo.get_all_staged_file_blob_oids()?;
-    Ok(Some((source_head, staged_file_blobs)))
+    Ok(Some(source_head))
 }
 
 fn tracked_reflog_refs_for_command(
@@ -2011,6 +1988,7 @@ fn seed_merge_squash_working_log_for_commit_replay(
     repo: &Repository,
     base_commit: &str,
     author: &str,
+    exact_final_state: Option<&HashMap<String, String>>,
 ) -> Result<(), GitAiError> {
     if working_log_has_tracked_state_for_base(repo, base_commit) {
         return Ok(());
@@ -2042,11 +2020,18 @@ fn seed_merge_squash_working_log_for_commit_replay(
         "Seeding merge --squash working log before daemon commit replay for base {}",
         base_commit
     ));
-    prepare_working_log_after_squash(
+    let Some(final_state) = exact_final_state else {
+        debug_log(&format!(
+            "Skipping merge --squash commit replay seed for {} because no committed final state was available",
+            base_commit
+        ));
+        return Ok(());
+    };
+    prepare_working_log_after_squash_from_final_state(
         repo,
         &merge_squash.source_head,
         base_commit,
-        &merge_squash.staged_file_blobs,
+        final_state,
         author,
     )
 }
@@ -2207,7 +2192,12 @@ fn ensure_rewrite_prerequisites(
     let exact_final_state =
         exact_final_state_for_commit_replay(repo, rewrite_event, carryover_snapshot)?;
     recover_recent_replay_prerequisites_for_commit_replay(coordinator, repo, &base_commit, author)?;
-    seed_merge_squash_working_log_for_commit_replay(repo, &base_commit, author)?;
+    seed_merge_squash_working_log_for_commit_replay(
+        repo,
+        &base_commit,
+        author,
+        exact_final_state.as_ref(),
+    )?;
     if working_log_has_tracked_state_for_base(repo, &base_commit) {
         return Ok(());
     }
@@ -3023,7 +3013,6 @@ struct CarryoverCaptureInput<'a> {
     finished_at_ns: u128,
     post_repo: Option<&'a RepoContext>,
     ref_changes: &'a [crate::daemon::domain::RefChange],
-    merge_squash_staged_file_blobs: Option<&'a HashMap<String, String>>,
 }
 
 struct ActorDaemonCoordinator {
@@ -3754,9 +3743,6 @@ impl ActorDaemonCoordinator {
                     ))
                 })?;
                 file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
-                if let Some(staged_file_blobs) = input.merge_squash_staged_file_blobs {
-                    file_paths.extend(staged_file_blobs.keys().cloned());
-                }
             }
             "rebase" | "pull" => {
                 if let Some((old_head, new_head)) = stable_heads.clone() {
@@ -4154,31 +4140,22 @@ impl ActorDaemonCoordinator {
             if let Some(repo) = pre_repo.as_ref() {
                 object.insert("git_ai_pre_repo".to_string(), json!(repo));
             }
-            if object.get("git_ai_merge_squash_source_head").is_none()
-                && object
-                    .get("git_ai_merge_squash_staged_file_blobs")
-                    .is_none()
-            {
+            if object.get("git_ai_merge_squash_source_head").is_none() {
                 let inflight_merge_squash = if let Some(context) = cached_inflight_merge_squash {
                     Ok(Some(context))
                 } else {
-                    capture_inflight_merge_squash_context_for_commit(
+                    capture_inflight_merge_squash_source_head_for_commit(
                         &worktree,
                         effective_primary.as_deref(),
                         &effective_argv,
                     )
                 };
                 match inflight_merge_squash {
-                    Ok(Some((source_head, staged_file_blobs))) => {
-                        inflight_merge_squash_to_cache =
-                            Some((source_head.clone(), staged_file_blobs.clone()));
+                    Ok(Some(source_head)) => {
+                        inflight_merge_squash_to_cache = Some(source_head.clone());
                         object.insert(
                             "git_ai_merge_squash_source_head".to_string(),
                             json!(source_head),
-                        );
-                        object.insert(
-                            "git_ai_merge_squash_staged_file_blobs".to_string(),
-                            json!(staged_file_blobs),
                         );
                     }
                     Ok(None) => {}
@@ -4262,42 +4239,20 @@ impl ActorDaemonCoordinator {
             let terminal_merge_squash = if let Some(context) = cached_terminal_merge_squash {
                 Ok(Some(context))
             } else {
-                let source_head_result = capture_merge_squash_source_head_for_command(
+                capture_merge_squash_source_head_for_command(
                     &worktree,
                     effective_primary.as_deref(),
                     &effective_argv,
                     terminal_exit_code.unwrap_or(0),
-                );
-                let staged_file_blobs_result = capture_merge_squash_staged_file_blobs_for_command(
-                    &worktree,
-                    effective_primary.as_deref(),
-                    &effective_argv,
-                    terminal_exit_code.unwrap_or(0),
-                );
-                match (source_head_result, staged_file_blobs_result) {
-                    (Ok(source_head), Ok(staged_file_blobs)) => {
-                        Ok(match (source_head, staged_file_blobs) {
-                            (Some(source_head), Some(staged_file_blobs)) => {
-                                Some((source_head, staged_file_blobs))
-                            }
-                            _ => None,
-                        })
-                    }
-                    (Err(error), _) | (_, Err(error)) => Err(error),
-                }
+                )
             };
 
             match terminal_merge_squash {
-                Ok(Some((source_head, staged_file_blobs))) => {
-                    terminal_merge_squash_to_cache =
-                        Some((source_head.clone(), staged_file_blobs.clone()));
+                Ok(Some(source_head)) => {
+                    terminal_merge_squash_to_cache = Some(source_head.clone());
                     object.insert(
                         "git_ai_merge_squash_source_head".to_string(),
                         json!(source_head),
-                    );
-                    object.insert(
-                        "git_ai_merge_squash_staged_file_blobs".to_string(),
-                        json!(staged_file_blobs),
                     );
                 }
                 Ok(None) => {}
@@ -4488,16 +4443,6 @@ impl ActorDaemonCoordinator {
                             })
                     })
                     .unwrap_or_else(now_unix_nanos);
-                let merge_squash_staged_file_blobs = object
-                    .get("git_ai_merge_squash_staged_file_blobs")
-                    .and_then(Value::as_object)
-                    .map(|map| {
-                        map.iter()
-                            .filter_map(|(file, oid)| {
-                                oid.as_str().map(|oid| (file.clone(), oid.to_string()))
-                            })
-                            .collect::<HashMap<_, _>>()
-                    });
                 match self.capture_carryover_snapshot_for_command(CarryoverCaptureInput {
                     root_sid: &root,
                     worktree: &worktree,
@@ -4507,7 +4452,6 @@ impl ActorDaemonCoordinator {
                     finished_at_ns: terminal_time_ns,
                     post_repo: post_repo.as_ref(),
                     ref_changes: terminal_ref_changes.as_deref().unwrap_or(&[]),
-                    merge_squash_staged_file_blobs: merge_squash_staged_file_blobs.as_ref(),
                 }) {
                     Ok(Some(snapshot_id)) => {
                         object.insert(
@@ -5094,8 +5038,7 @@ impl ActorDaemonCoordinator {
             || cmd
                 .merge_squash_source_head
                 .as_ref()
-                .is_some_and(|value| !value.trim().is_empty())
-            || cmd.merge_squash_staged_file_blobs.is_some();
+                .is_some_and(|value| !value.trim().is_empty());
         if !looks_like_squash {
             return Ok(None);
         }
@@ -5134,19 +5077,12 @@ impl ActorDaemonCoordinator {
             })?;
             Self::resolve_merge_squash_source_head_for_event(cmd, source_ref, "")?
         };
-        let staged_file_blobs = cmd.merge_squash_staged_file_blobs.clone().ok_or_else(|| {
-            GitAiError::Generic(format!(
-                "merge squash fallback missing staged blob snapshot sid={}",
-                cmd.root_sid
-            ))
-        })?;
-
         Ok(Some(MergeSquashEvent::new(
             source_ref.unwrap_or_else(|| resolved_source_head.clone()),
             resolved_source_head,
             base_branch,
             base_head,
-            staged_file_blobs,
+            HashMap::new(),
         )))
     }
 
@@ -5363,19 +5299,12 @@ impl ActorDaemonCoordinator {
                             "merge squash source is not a concrete commit id".to_string(),
                         ));
                     }
-                    let staged_file_blobs =
-                        cmd.merge_squash_staged_file_blobs.clone().ok_or_else(|| {
-                            GitAiError::Generic(format!(
-                                "merge squash missing staged blob snapshot sid={}",
-                                cmd.root_sid
-                            ))
-                        })?;
                     out.push(RewriteLogEvent::merge_squash(MergeSquashEvent::new(
                         source_ref.clone(),
                         resolved_source_head,
                         base_branch.clone().unwrap_or_else(|| "HEAD".to_string()),
                         base_head.clone(),
-                        staged_file_blobs,
+                        HashMap::new(),
                     )));
                 }
                 crate::daemon::domain::SemanticEvent::StashOperation {

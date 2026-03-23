@@ -78,11 +78,17 @@ pub fn rewrite_authorship_if_needed(
                 ));
                 return Ok(());
             }
-
             // --squash always fails if repo is not clean
             // this clears old working logs in the event you reset, make manual changes, reset, try again
             repo.storage
                 .delete_working_log_for_base_commit(&merge_squash.base_head)?;
+            if merge_squash.staged_file_blobs.is_empty() {
+                debug_log(&format!(
+                    "Skipping immediate merge --squash pre-commit prep for {} because no staged snapshot was captured; commit replay will reconstruct from the committed final state",
+                    merge_squash.base_head
+                ));
+                return Ok(());
+            }
 
             // Prepare INITIAL attributions from the squashed changes
             prepare_working_log_after_squash(
@@ -279,6 +285,81 @@ pub fn prepare_working_log_after_squash(
     let initial_attributions = merged_va.to_initial_working_log_only();
 
     // Step 6: Write INITIAL file
+    if !initial_attributions.files.is_empty() {
+        let working_log = repo
+            .storage
+            .working_log_for_base_commit(target_branch_head_sha);
+        let initial_file_contents =
+            merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
+        working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            initial_file_contents,
+        )?;
+    }
+
+    Ok(())
+}
+
+pub fn prepare_working_log_after_squash_from_final_state(
+    repo: &Repository,
+    source_head_sha: &str,
+    target_branch_head_sha: &str,
+    final_state: &HashMap<String, String>,
+    _human_author: &str,
+) -> Result<(), GitAiError> {
+    use crate::authorship::virtual_attribution::{
+        VirtualAttributions, merge_attributions_favoring_first,
+    };
+
+    let merge_base = repo
+        .merge_base(
+            source_head_sha.to_string(),
+            target_branch_head_sha.to_string(),
+        )
+        .ok();
+
+    let changed_files = repo.diff_changed_files(source_head_sha, target_branch_head_sha)?;
+    if changed_files.is_empty() {
+        return Ok(());
+    }
+
+    let repo_clone = repo.clone();
+    let merge_base_clone = merge_base.clone();
+    let source_va = smol::block_on(async {
+        VirtualAttributions::new_for_base_commit(
+            repo_clone,
+            source_head_sha.to_string(),
+            &changed_files,
+            merge_base_clone,
+        )
+        .await
+    })?;
+
+    let repo_clone = repo.clone();
+    let target_va = smol::block_on(async {
+        VirtualAttributions::new_for_base_commit(
+            repo_clone,
+            target_branch_head_sha.to_string(),
+            &changed_files,
+            merge_base,
+        )
+        .await
+    })?;
+
+    let squash_files = changed_files
+        .iter()
+        .filter_map(|file_path| {
+            final_state
+                .get(file_path)
+                .cloned()
+                .map(|content| (file_path.clone(), content))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let merged_va = merge_attributions_favoring_first(target_va, source_va, squash_files)?;
+    let initial_attributions = merged_va.to_initial_working_log_only();
+
     if !initial_attributions.files.is_empty() {
         let working_log = repo
             .storage
