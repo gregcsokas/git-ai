@@ -100,6 +100,12 @@ struct ResolvedCheckpointExecution {
     dirty_files: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BaseOverrideResolutionPolicy {
+    AllowFallback,
+    RequireExplicitSnapshot,
+}
+
 /// Build EventAttributes with repo metadata.
 /// Reused for both AgentUsage and Checkpoint events.
 fn build_checkpoint_attrs(
@@ -332,6 +338,31 @@ pub fn run_with_base_commit_override(
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
 ) -> Result<(usize, usize, usize), GitAiError> {
+    run_with_base_commit_override_with_policy(
+        repo,
+        author,
+        kind,
+        reset,
+        quiet,
+        agent_run_result,
+        is_pre_commit,
+        base_commit_override,
+        BaseOverrideResolutionPolicy::AllowFallback,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_base_commit_override_with_policy(
+    repo: &Repository,
+    author: &str,
+    kind: CheckpointKind,
+    reset: bool,
+    quiet: bool,
+    agent_run_result: Option<AgentRunResult>,
+    is_pre_commit: bool,
+    base_commit_override: Option<&str>,
+    base_override_resolution_policy: BaseOverrideResolutionPolicy,
+) -> Result<(usize, usize, usize), GitAiError> {
     let checkpoint_start = Instant::now();
     debug_log("[BENCHMARK] Starting checkpoint run");
     let resolved = resolve_live_checkpoint_execution(
@@ -340,6 +371,7 @@ pub fn run_with_base_commit_override(
         agent_run_result.as_ref(),
         is_pre_commit,
         base_commit_override,
+        base_override_resolution_policy,
     )?;
     let Some(resolved) = resolved else {
         debug_log(&format!(
@@ -413,34 +445,43 @@ fn resolve_base_override_dirty_file_execution(
     edited_filepaths: &[String],
     dirty_files: &HashMap<String, String>,
     ignore_matcher: &IgnoreMatcher,
-) -> Option<ResolvedCheckpointExecution> {
+) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
     let normalized_dirty_files = dirty_files
         .iter()
         .map(|(path, content)| (normalize_to_posix(path), content.clone()))
         .collect::<HashMap<_, _>>();
     let mut files = Vec::new();
     let mut resolved_dirty_files = HashMap::new();
+    let mut missing_paths = Vec::new();
 
     for path in edited_filepaths {
         if should_ignore_file_with_matcher(path, ignore_matcher) {
             continue;
         }
         let Some(content) = normalized_dirty_files.get(path).cloned() else {
+            missing_paths.push(path.clone());
             continue;
         };
         files.push(path.clone());
         resolved_dirty_files.insert(path.clone(), content);
     }
 
+    if !missing_paths.is_empty() {
+        return Err(GitAiError::Generic(format!(
+            "base override requires dirty snapshot entries for explicit file(s): {}",
+            missing_paths.join(", ")
+        )));
+    }
+
     if files.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(ResolvedCheckpointExecution {
+        Ok(Some(ResolvedCheckpointExecution {
             base_commit: base_commit.to_string(),
             ts,
             files,
             dirty_files: resolved_dirty_files,
-        })
+        }))
     }
 }
 
@@ -451,6 +492,7 @@ fn resolve_live_checkpoint_execution(
     agent_run_result: Option<&AgentRunResult>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
+    base_override_resolution_policy: BaseOverrideResolutionPolicy,
 ) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
     let base_commit = resolve_base_commit(repo, base_commit_override);
 
@@ -509,22 +551,51 @@ fn resolve_live_checkpoint_execution(
     // Base-override replays already provide the exact file list and content snapshot that
     // should be checkpointed. Re-running git status here turns daemon commit replay into a
     // full worktree scan on every commit, which is especially expensive on macOS runners.
-    if base_commit_override.is_some()
-        && let Some(explicit_paths) = filtered_pathspec.as_ref()
-        && let Some(dirty_files) = agent_run_result.and_then(|result| result.dirty_files.as_ref())
-        && let Some(resolved) = resolve_base_override_dirty_file_execution(
-            &base_commit,
-            ts,
-            explicit_paths,
-            dirty_files,
-            &ignore_matcher,
-        )
-    {
-        debug_log(&format!(
-            "[BENCHMARK] Reusing {} explicit dirty file(s) for base override checkpoint",
-            resolved.files.len()
-        ));
-        return Ok(Some(resolved));
+    if base_commit_override.is_some() {
+        match (
+            filtered_pathspec.as_ref(),
+            agent_run_result.and_then(|result| result.dirty_files.as_ref()),
+        ) {
+            (Some(explicit_paths), Some(dirty_files)) => {
+                match resolve_base_override_dirty_file_execution(
+                    &base_commit,
+                    ts,
+                    explicit_paths,
+                    dirty_files,
+                    &ignore_matcher,
+                ) {
+                    Ok(Some(resolved)) => {
+                        debug_log(&format!(
+                            "[BENCHMARK] Reusing {} explicit dirty file(s) for base override checkpoint",
+                            resolved.files.len()
+                        ));
+                        return Ok(Some(resolved));
+                    }
+                    Ok(None) => {
+                        if base_override_resolution_policy
+                            == BaseOverrideResolutionPolicy::RequireExplicitSnapshot
+                        {
+                            return Ok(None);
+                        }
+                    }
+                    Err(e) => {
+                        if base_override_resolution_policy
+                            == BaseOverrideResolutionPolicy::RequireExplicitSnapshot
+                        {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            _ if base_override_resolution_policy
+                == BaseOverrideResolutionPolicy::RequireExplicitSnapshot =>
+            {
+                return Err(GitAiError::Generic(
+                    "base override replay requires explicit in-repository target paths and a matching dirty snapshot".to_string(),
+                ));
+            }
+            _ => {}
+        }
     }
 
     let files_start = Instant::now();
@@ -789,6 +860,7 @@ pub fn prepare_captured_checkpoint(
         agent_run_result,
         is_pre_commit,
         base_commit_override,
+        BaseOverrideResolutionPolicy::AllowFallback,
     )?
     else {
         return Ok(None);
@@ -2250,7 +2322,7 @@ mod tests {
             dirty_files: Some(dirty_files),
         };
 
-        let (entries_len, files_len, _) = run_with_base_commit_override(
+        let (entries_len, files_len, _) = run_with_base_commit_override_with_policy(
             tmp_repo.gitai_repo(),
             "mock-ai",
             CheckpointKind::AiAgent,
@@ -2259,6 +2331,7 @@ mod tests {
             Some(agent_run_result),
             false,
             Some(base_commit.as_str()),
+            BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
         )
         .unwrap();
 
@@ -2269,6 +2342,120 @@ mod tests {
         assert_eq!(
             entries_len, 1,
             "When base override points to commit A, current content from commit B must produce an entry"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_base_override_strict_rejects_missing_dirty_snapshot() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+        use std::fs;
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        let filename = file.filename().to_string();
+
+        file.update("line from commit A\n").unwrap();
+        tmp_repo.commit_with_message("commit A").unwrap();
+        let base_commit = tmp_repo.get_head_commit_sha().unwrap();
+
+        file.update("line from commit B\n").unwrap();
+        tmp_repo.commit_with_message("commit B").unwrap();
+
+        // Keep the worktree dirty so the legacy fallback would succeed if it were used.
+        fs::write(file.path(), "line from uncommitted edit\n").unwrap();
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "mock_ai".to_string(),
+                id: "base-override-strict-missing-snapshot".to_string(),
+                model: "test".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![filename.clone()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+        };
+
+        let error = run_with_base_commit_override_with_policy(
+            tmp_repo.gitai_repo(),
+            "mock-ai",
+            CheckpointKind::AiAgent,
+            false,
+            true,
+            Some(agent_run_result),
+            false,
+            Some(base_commit.as_str()),
+            BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
+        )
+        .expect_err("strict base override should reject missing dirty snapshots");
+
+        assert!(
+            error.to_string().contains(
+                "requires explicit in-repository target paths and a matching dirty snapshot"
+            ),
+            "expected strict snapshot error, got: {}",
+            error
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_base_override_allow_fallback_scans_when_snapshot_missing() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+        use std::fs;
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        let filename = file.filename().to_string();
+
+        file.update("line from commit A\n").unwrap();
+        tmp_repo.commit_with_message("commit A").unwrap();
+        let base_commit = tmp_repo.get_head_commit_sha().unwrap();
+
+        file.update("line from commit B\n").unwrap();
+        tmp_repo.commit_with_message("commit B").unwrap();
+
+        // Without a dirty snapshot the fallback path must rediscover the dirty file from the repo.
+        fs::write(file.path(), "line from uncommitted edit\n").unwrap();
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "mock_ai".to_string(),
+                id: "base-override-allow-fallback".to_string(),
+                model: "test".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![filename]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+        };
+
+        let (entries_len, files_len, _) = run_with_base_commit_override(
+            tmp_repo.gitai_repo(),
+            "mock-ai",
+            CheckpointKind::AiAgent,
+            false,
+            true,
+            Some(agent_run_result),
+            false,
+            Some(base_commit.as_str()),
+        )
+        .expect("allow-fallback base override should still scan the repo");
+
+        assert_eq!(
+            files_len, 1,
+            "fallback path should rediscover the changed file"
+        );
+        assert_eq!(
+            entries_len, 1,
+            "fallback path should still produce checkpoint entries from the worktree scan"
         );
     }
 

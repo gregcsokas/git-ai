@@ -2258,7 +2258,7 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     }
     let replay_agent_result = build_human_replay_agent_result(changed_files, dirty_files);
 
-    crate::commands::checkpoint::run_with_base_commit_override(
+    crate::commands::checkpoint::run_with_base_commit_override_with_policy(
         repo,
         author,
         CheckpointKind::Human,
@@ -2267,6 +2267,7 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         Some(replay_agent_result),
         base_commit != "initial",
         Some(base_commit.as_str()),
+        crate::commands::checkpoint::BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
     )
     .map(|_| ())
 }
@@ -6124,17 +6125,34 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     Ok(())
 }
 
-fn control_request_response_timeout(request: &ControlRequest) -> Duration {
+fn checkpoint_control_timeout_uses_ci_or_test_budget() -> bool {
+    std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+        || std::env::var_os("CI").is_some()
+}
+
+fn checkpoint_control_response_timeout(
+    request: &ControlRequest,
+    use_ci_or_test_budget: bool,
+) -> Duration {
     match request {
-        // Even "queued" checkpoint requests may block while the daemon waits for
-        // trace ingest to catch up to the current high-water mark before it can
-        // safely enqueue the checkpoint. Using the short control timeout here
-        // lets the client tear down captured checkpoint state while the daemon
-        // is still processing the request, which later surfaces as missing
-        // capture manifests or deleted worktree paths under load.
-        ControlRequest::CheckpointRun { .. } => DAEMON_CHECKPOINT_RESPONSE_TIMEOUT,
+        // Queued checkpoint requests can block behind trace-ingest ordering. In
+        // CI/test we allow the longer budget so replay-heavy daemon tests don't
+        // tear down captured state mid-request. Product mode keeps the short
+        // control timeout for all checkpoint requests to preserve responsiveness.
+        ControlRequest::CheckpointRun { .. } if use_ci_or_test_budget => {
+            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
+        }
+        ControlRequest::CheckpointRun { .. } => DAEMON_CONTROL_RESPONSE_TIMEOUT,
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
+}
+
+fn control_request_response_timeout(request: &ControlRequest) -> Duration {
+    checkpoint_control_response_timeout(
+        request,
+        checkpoint_control_timeout_uses_ci_or_test_budget(),
+    )
 }
 
 fn local_socket_name<'a>(socket_path: &'a Path) -> Result<Name<'a>, GitAiError> {
@@ -6477,4 +6495,122 @@ pub fn send_control_request(
         DAEMON_CONTROL_CONNECT_TIMEOUT,
         control_request_response_timeout(request),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::ffi::OsString;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: these tests are serialized via #[serial], so mutating the
+            // process environment is isolated for the duration of each test.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: these tests are serialized via #[serial], so mutating the
+            // process environment is isolated for the duration of each test.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => {
+                    // SAFETY: these tests are serialized via #[serial], so restoring
+                    // process environment state is isolated for the duration of each test.
+                    unsafe {
+                        std::env::set_var(self.key, value);
+                    }
+                }
+                None => {
+                    // SAFETY: these tests are serialized via #[serial], so restoring
+                    // process environment state is isolated for the duration of each test.
+                    unsafe {
+                        std::env::remove_var(self.key);
+                    }
+                }
+            }
+        }
+    }
+
+    fn queued_checkpoint_request() -> ControlRequest {
+        ControlRequest::CheckpointRun {
+            request: Box::new(CheckpointRunRequest::Captured(
+                CapturedCheckpointRunRequest {
+                    repo_working_dir: "/tmp/repo".to_string(),
+                    capture_id: "capture".to_string(),
+                },
+            )),
+            wait: Some(false),
+        }
+    }
+
+    fn waited_checkpoint_request() -> ControlRequest {
+        ControlRequest::CheckpointRun {
+            request: Box::new(CheckpointRunRequest::Live(Box::new(
+                LiveCheckpointRunRequest {
+                    repo_working_dir: "/tmp/repo".to_string(),
+                    kind: Some("human".to_string()),
+                    author: Some("test".to_string()),
+                    reset: Some(false),
+                    quiet: Some(true),
+                    is_pre_commit: Some(false),
+                    agent_run_result: None,
+                },
+            ))),
+            wait: Some(true),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn checkpoint_requests_use_long_timeout_in_ci_or_test_env() {
+        let _unset_ci = EnvVarGuard::unset("CI");
+        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
+        let _test_db = EnvVarGuard::set("GIT_AI_TEST_DB_PATH", "/tmp/git-ai-test.db");
+
+        assert_eq!(
+            control_request_response_timeout(&queued_checkpoint_request()),
+            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
+        );
+        assert_eq!(
+            control_request_response_timeout(&waited_checkpoint_request()),
+            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn checkpoint_requests_use_short_timeout_in_product_env() {
+        let _unset_ci = EnvVarGuard::unset("CI");
+        let _unset_test = EnvVarGuard::unset("GIT_AI_TEST_DB_PATH");
+        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
+
+        assert_eq!(
+            control_request_response_timeout(&queued_checkpoint_request()),
+            DAEMON_CONTROL_RESPONSE_TIMEOUT
+        );
+        assert_eq!(
+            control_request_response_timeout(&waited_checkpoint_request()),
+            DAEMON_CONTROL_RESPONSE_TIMEOUT
+        );
+    }
 }
