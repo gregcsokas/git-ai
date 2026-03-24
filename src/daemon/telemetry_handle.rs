@@ -51,6 +51,7 @@ pub fn init_daemon_telemetry_handle() -> DaemonTelemetryInitResult {
     #[cfg(any(test, feature = "test-support"))]
     {
         let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(None));
+        #[allow(clippy::needless_return)]
         return DaemonTelemetryInitResult::Skipped;
     }
 
