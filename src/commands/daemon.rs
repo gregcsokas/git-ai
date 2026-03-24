@@ -61,7 +61,7 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        return ensure_daemon_running(daemon_startup_timeout()).map(|_| ());
+        ensure_daemon_running(daemon_startup_timeout()).map(|_| ())
     }
 
     #[cfg(not(windows))]
@@ -80,7 +80,7 @@ fn daemon_startup_timeout() -> Duration {
             return Duration::from_secs(12);
         }
 
-        return Duration::from_secs(5);
+        Duration::from_secs(5)
     }
 
     #[cfg(not(windows))]
