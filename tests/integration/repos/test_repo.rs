@@ -29,7 +29,13 @@ use super::test_file::TestFile;
 
 const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 const DAEMON_TEST_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(windows)]
+const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(not(windows))]
 const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(windows)]
+const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(not(windows))]
 const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -1575,9 +1581,18 @@ impl TestRepo {
             thread::sleep(Duration::from_millis(10));
         }
 
+        let final_entries = self.daemon_completion_entries_for_family(&family_key);
+        let observed_count = final_entries.len() as u64;
+        let recent_entries = final_entries
+            .iter()
+            .rev()
+            .take(5)
+            .map(|entry| format!("{}:{:?}:{}", entry.seq, entry.primary_command, entry.status))
+            .collect::<Vec<_>>();
+
         panic!(
-            "daemon completion log for family {} did not reach {} total entries within timeout",
-            family_key, expected_count
+            "daemon completion log for family {} did not reach {} total entries within timeout (observed {}, recent entries {:?})",
+            family_key, expected_count, observed_count, recent_entries
         );
     }
 

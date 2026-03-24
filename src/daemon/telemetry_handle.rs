@@ -11,8 +11,7 @@
 use crate::daemon::control_api::{
     CasSyncPayload, ControlRequest, ControlResponse, TelemetryEnvelope,
 };
-use crate::daemon::open_local_socket_stream_with_timeout;
-use interprocess::local_socket::prelude::*;
+use crate::daemon::{DaemonClientStream, open_local_socket_stream_with_timeout};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -31,17 +30,19 @@ static DAEMON_TELEMETRY_HANDLE: OnceLock<Mutex<Option<DaemonTelemetryHandle>>> =
 
 struct DaemonTelemetryHandle {
     socket_path: PathBuf,
-    conn: BufReader<LocalSocketStream>,
+    conn: BufReader<DaemonClientStream>,
 }
 
 impl DaemonTelemetryHandle {
     /// Apply read/write timeouts to the underlying socket so that I/O never
     /// blocks indefinitely (which would hold the global mutex and stall the
     /// entire process).
-    fn apply_socket_timeouts(stream: &LocalSocketStream) {
-        let timeout = Some(DAEMON_SOCKET_IO_TIMEOUT);
-        let _ = stream.set_recv_timeout(timeout);
-        let _ = stream.set_send_timeout(timeout);
+    fn apply_socket_timeouts(stream: &mut DaemonClientStream, socket_path: &std::path::Path) {
+        let _ = crate::daemon::set_daemon_client_stream_timeouts(
+            stream,
+            socket_path,
+            DAEMON_SOCKET_IO_TIMEOUT,
+        );
     }
 
     /// Send a control request over the persistent connection and read the response.
@@ -55,8 +56,8 @@ impl DaemonTelemetryHandle {
                     &self.socket_path,
                     Duration::from_secs(1),
                 ) {
-                    Ok(stream) => {
-                        Self::apply_socket_timeouts(&stream);
+                    Ok(mut stream) => {
+                        Self::apply_socket_timeouts(&mut stream, &self.socket_path);
                         self.conn = BufReader::new(stream);
                         self.send_inner(request)
                             .map_err(|e| format!("reconnect ok but send failed: {}", e))
@@ -143,8 +144,11 @@ pub fn init_daemon_telemetry_handle() -> DaemonTelemetryInitResult {
             &config.control_socket_path,
             DAEMON_TELEMETRY_CONNECT_TIMEOUT,
         ) {
-            Ok(stream) => {
-                DaemonTelemetryHandle::apply_socket_timeouts(&stream);
+            Ok(mut stream) => {
+                DaemonTelemetryHandle::apply_socket_timeouts(
+                    &mut stream,
+                    &config.control_socket_path,
+                );
                 let handle = DaemonTelemetryHandle {
                     socket_path: config.control_socket_path,
                     conn: BufReader::new(stream),

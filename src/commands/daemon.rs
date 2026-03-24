@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use std::{ffi::OsStr, path::Path};
 
 pub fn handle_daemon(args: &[String]) {
     if args.is_empty() || is_help(args[0].as_str()) {
@@ -57,7 +59,34 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     if has_flag(args, "--mode") {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
-    ensure_daemon_running_attached(Duration::from_secs(2)).map(|_| ())
+    #[cfg(windows)]
+    {
+        return ensure_daemon_running(daemon_startup_timeout()).map(|_| ());
+    }
+
+    #[cfg(not(windows))]
+    {
+        ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
+    }
+}
+
+fn daemon_startup_timeout() -> Duration {
+    #[cfg(windows)]
+    {
+        if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+            || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+            || std::env::var_os("CI").is_some()
+        {
+            return Duration::from_secs(12);
+        }
+
+        return Duration::from_secs(5);
+    }
+
+    #[cfg(not(windows))]
+    {
+        Duration::from_secs(2)
+    }
 }
 
 /// Like `ensure_daemon_running`, but spawns with inherited stderr so the user
@@ -212,20 +241,34 @@ fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
         .ok_or_else(|| "daemon lock path has no parent".to_string())
 }
 
+#[cfg(windows)]
+fn powershell_single_quote_literal(value: &OsStr) -> String {
+    format!("'{}'", value.to_string_lossy().replace('\'', "''"))
+}
+
 fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let runtime_dir = daemon_runtime_dir(config)?;
-    let mut child = Command::new(exe);
-    child
-        .arg("daemon")
-        .arg("run")
-        .current_dir(&runtime_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
 
     #[cfg(windows)]
     {
+        let script = format!(
+            "Start-Process -FilePath {} -ArgumentList @('daemon','run') -WorkingDirectory {} -WindowStyle Hidden",
+            powershell_single_quote_literal(exe.as_os_str()),
+            powershell_single_quote_literal(Path::new(&runtime_dir).as_os_str())
+        );
+        let mut child = Command::new("powershell.exe");
+        child
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-WindowStyle")
+            .arg("Hidden")
+            .arg("-Command")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
         let preferred_flags =
             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
         child.creation_flags(preferred_flags);
@@ -249,6 +292,14 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
 
     #[cfg(not(windows))]
     {
+        let mut child = Command::new(exe);
+        child
+            .arg("daemon")
+            .arg("run")
+            .current_dir(&runtime_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         child.spawn().map(|_| ()).map_err(|e| e.to_string())
     }
 }

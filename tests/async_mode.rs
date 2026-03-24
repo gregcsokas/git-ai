@@ -10,7 +10,7 @@ use git_ai::daemon::{
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -500,9 +500,9 @@ fn daemon_start_survives_deleted_launch_repo_cwd() {
     shutdown_daemon(&launch_repo);
 }
 
-/// Helper: send a ControlRequest over an existing stream and read one response line.
-fn send_on_persistent_conn(
-    reader: &mut BufReader<interprocess::local_socket::prelude::LocalSocketStream>,
+/// Helper: send a ControlRequest over an existing buffered stream and read one response line.
+fn send_on_persistent_conn<R: Read + Write>(
+    reader: &mut BufReader<R>,
     request: &ControlRequest,
 ) -> ControlResponse {
     let mut body = serde_json::to_vec(request).expect("serialize request");
