@@ -16,10 +16,6 @@ use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
-fn running_inside_daemon_process() -> bool {
-    crate::daemon::daemon_process_active()
-}
-
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
 const STATS_SKIP_MAX_HUNKS: usize = 1000;
@@ -159,7 +155,7 @@ pub fn post_commit_with_final_state(
 
     // Long-lived daemon processes should read a fresh config snapshot.
     // Wrapper/hooks mode can use the process-global cached config.
-    let (effective_storage, using_custom_api, custom_attrs) = if running_inside_daemon_process() {
+    let (effective_storage, using_custom_api, custom_attrs) = if crate::daemon::daemon_process_active() {
         let config = Config::fresh();
         (
             config.effective_prompt_storage(&Some(repo.clone())),
