@@ -171,22 +171,22 @@ pub fn install_skills(
         }
 
         // ~/.claude/skills/{skill-name} -> ~/.git-ai/skills/{skill-name}
-        if installed_tools.contains("claude-code") {
-            if let Some(claude_dir) = claude_skills_dir() {
-                let claude_link = claude_dir.join(skill.name);
-                if let Err(e) = link_skill_dir(&skill_dir, &claude_link) {
-                    eprintln!("Warning: Failed to link skill at {:?}: {}", claude_link, e);
-                }
+        if installed_tools.contains("claude-code")
+            && let Some(claude_dir) = claude_skills_dir()
+        {
+            let claude_link = claude_dir.join(skill.name);
+            if let Err(e) = link_skill_dir(&skill_dir, &claude_link) {
+                eprintln!("Warning: Failed to link skill at {:?}: {}", claude_link, e);
             }
         }
 
         // ~/.cursor/skills/{skill-name} -> ~/.git-ai/skills/{skill-name}
-        if installed_tools.contains("cursor") {
-            if let Some(cursor_dir) = cursor_skills_dir() {
-                let cursor_link = cursor_dir.join(skill.name);
-                if let Err(e) = link_skill_dir(&skill_dir, &cursor_link) {
-                    eprintln!("Warning: Failed to link skill at {:?}: {}", cursor_link, e);
-                }
+        if installed_tools.contains("cursor")
+            && let Some(cursor_dir) = cursor_skills_dir()
+        {
+            let cursor_link = cursor_dir.join(skill.name);
+            if let Err(e) = link_skill_dir(&skill_dir, &cursor_link) {
+                eprintln!("Warning: Failed to link skill at {:?}: {}", cursor_link, e);
             }
         }
     }
