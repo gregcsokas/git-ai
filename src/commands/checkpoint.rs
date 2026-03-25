@@ -43,6 +43,7 @@ use crate::authorship::working_log::AgentId;
 
 /// Emit at most one `agent_usage` metric per prompt every 2.5 minutes.
 /// This is half of the server-side bucketing window.
+#[cfg(not(any(test, feature = "test-support")))]
 const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 
 /// Build EventAttributes with repo metadata.
@@ -1088,15 +1089,16 @@ fn get_checkpoint_entry_for_file(
         return Ok(None);
     }
 
-    let (entry, stats) = make_entry_for_file(
-        &file_path,
-        &file_content_hash,
-        author_id.as_ref(),
-        &previous_content,
-        &prev_attributions,
-        &current_content,
+    let (entry, stats) = make_entry_for_file(FileEntryInput {
+        file_path: &file_path,
+        blob_sha: &file_content_hash,
+        author_id: author_id.as_ref(),
+        is_ai_checkpoint: kind != CheckpointKind::Human,
+        previous_content: &previous_content,
+        previous_attributions: &prev_attributions,
+        content: &current_content,
         ts,
-    )?;
+    })?;
     debug_log(&format!(
         "[BENCHMARK] Processing file {} took {:?}",
         file_path,
@@ -1267,15 +1269,31 @@ async fn get_checkpoint_entries(
     Ok((entries, file_stats))
 }
 
-fn make_entry_for_file(
-    file_path: &str,
-    blob_sha: &str,
-    author_id: &str,
-    previous_content: &str,
-    previous_attributions: &[Attribution],
-    content: &str,
+struct FileEntryInput<'a> {
+    file_path: &'a str,
+    blob_sha: &'a str,
+    author_id: &'a str,
+    is_ai_checkpoint: bool,
+    previous_content: &'a str,
+    previous_attributions: &'a [Attribution],
+    content: &'a str,
     ts: u128,
+}
+
+fn make_entry_for_file(
+    input: FileEntryInput<'_>,
 ) -> Result<(WorkingLogEntry, FileLineStats), GitAiError> {
+    let FileEntryInput {
+        file_path,
+        blob_sha,
+        author_id,
+        is_ai_checkpoint,
+        previous_content,
+        previous_attributions,
+        content,
+        ts,
+    } = input;
+
     let tracker = AttributionTracker::new();
 
     let fill_start = Instant::now();
@@ -1292,12 +1310,13 @@ fn make_entry_for_file(
     ));
 
     let update_start = Instant::now();
-    let new_attributions = tracker.update_attributions(
+    let new_attributions = tracker.update_attributions_for_checkpoint(
         previous_content,
         content,
         &filled_in_prev_attributions,
         author_id,
         ts,
+        is_ai_checkpoint,
     )?;
     debug_log(&format!(
         "[BENCHMARK]   update_attributions for {} took {:?}",
@@ -1310,9 +1329,10 @@ fn make_entry_for_file(
 
     let line_attr_start = Instant::now();
     let line_attributions =
-        crate::authorship::attribution_tracker::attributions_to_line_attributions(
+        crate::authorship::attribution_tracker::attributions_to_line_attributions_for_checkpoint(
             &new_attributions,
             content,
+            is_ai_checkpoint,
         );
     debug_log(&format!(
         "[BENCHMARK]   attributions_to_line_attributions for {} took {:?}",

@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -23,12 +23,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -49,9 +49,9 @@ jobs:
             --files 4 \
             --lines-per-file 400 \
             --burst-every 6 \
-            --repetitions 1 \
-            --margin-pct 25 \
-            --margin-baseline current_wrapper \
+            --repetitions 2 \
+            --margin-pct 55 \
+            --margin-baseline main_wrapper \
             --enforce-margin
 
       - name: Upload smoke benchmark artifacts
@@ -69,7 +69,7 @@ jobs:
     timeout-minutes: 480
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -77,12 +77,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry

@@ -148,10 +148,12 @@ mod tests {
 
     #[test]
     fn test_from_file_config_some() {
-        let mut deserializable = DeserializableFeatureFlags::default();
-        deserializable.rewrite_stash = Some(false);
-        deserializable.checkpoint_inter_commit_move = Some(true);
-        deserializable.auth_keyring = Some(true);
+        let deserializable = DeserializableFeatureFlags {
+            rewrite_stash: Some(false),
+            checkpoint_inter_commit_move: Some(true),
+            auth_keyring: Some(true),
+            ..Default::default()
+        };
 
         let flags = FeatureFlags::from_file_config(Some(deserializable));
         assert!(!flags.rewrite_stash);
@@ -161,8 +163,10 @@ mod tests {
 
     #[test]
     fn test_from_file_config_partial() {
-        let mut deserializable = DeserializableFeatureFlags::default();
-        deserializable.rewrite_stash = Some(true);
+        let deserializable = DeserializableFeatureFlags {
+            rewrite_stash: Some(true),
+            ..Default::default()
+        };
         // Other fields remain None, should use defaults
 
         let flags = FeatureFlags::from_file_config(Some(deserializable));
@@ -175,10 +179,12 @@ mod tests {
 
     #[test]
     fn test_from_deserializable() {
-        let mut deserializable = DeserializableFeatureFlags::default();
-        deserializable.rewrite_stash = Some(false);
-        deserializable.checkpoint_inter_commit_move = Some(false);
-        deserializable.auth_keyring = Some(true);
+        let deserializable = DeserializableFeatureFlags {
+            rewrite_stash: Some(false),
+            checkpoint_inter_commit_move: Some(false),
+            auth_keyring: Some(true),
+            ..Default::default()
+        };
 
         let flags = FeatureFlags::from_deserializable(deserializable);
         assert!(!flags.rewrite_stash);
@@ -212,9 +218,11 @@ mod tests {
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
         }
 
-        let mut file_flags = DeserializableFeatureFlags::default();
-        file_flags.rewrite_stash = Some(true);
-        file_flags.auth_keyring = Some(true);
+        let file_flags = DeserializableFeatureFlags {
+            rewrite_stash: Some(true),
+            auth_keyring: Some(true),
+            ..Default::default()
+        };
 
         let flags = FeatureFlags::from_env_and_file(Some(file_flags));
         assert!(flags.rewrite_stash);
