@@ -2930,6 +2930,22 @@ fn pid_metadata_path(config: &DaemonConfig) -> PathBuf {
         .join(PID_META_FILE)
 }
 
+/// Returns the log file path for the currently running daemon, if any.
+/// Reads the PID from daemon.pid.json and constructs the log path.
+pub fn daemon_log_file_path(config: &DaemonConfig) -> Result<PathBuf, GitAiError> {
+    let meta_path = pid_metadata_path(config);
+    let contents = fs::read_to_string(&meta_path).map_err(|e| {
+        GitAiError::Generic(format!(
+            "failed to read daemon pid metadata at {}: {}",
+            meta_path.display(),
+            e
+        ))
+    })?;
+    let meta: DaemonPidMeta = serde_json::from_str(&contents)?;
+    let log_dir = config.internal_dir.join("daemon").join("logs");
+    Ok(log_dir.join(format!("{}.log", meta.pid)))
+}
+
 fn write_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     let meta = DaemonPidMeta {
         pid: std::process::id(),
@@ -2946,6 +2962,115 @@ fn remove_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
         fs::remove_file(path)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn daemon_is_test_mode() -> bool {
+    std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+}
+
+#[cfg(unix)]
+fn daemon_log_dir(config: &DaemonConfig) -> PathBuf {
+    config.internal_dir.join("daemon").join("logs")
+}
+
+/// Redirect stdout and stderr to a per-PID log file inside the daemon logs
+/// directory. Skipped in test mode to keep test output on the console.
+/// Returns a guard that keeps the log file open for the lifetime of the daemon.
+#[cfg(unix)]
+fn maybe_setup_daemon_log_file(config: &DaemonConfig) -> Option<DaemonLogGuard> {
+    if daemon_is_test_mode() {
+        return None;
+    }
+    match setup_daemon_log_file(config) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            debug_log(&format!("daemon log file setup failed: {}", e));
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn maybe_setup_daemon_log_file(_config: &DaemonConfig) -> Option<DaemonLogGuard> {
+    None
+}
+
+struct DaemonLogGuard {
+    _file: File,
+}
+
+#[cfg(unix)]
+fn setup_daemon_log_file(config: &DaemonConfig) -> Result<DaemonLogGuard, GitAiError> {
+    use std::os::unix::io::AsRawFd;
+
+    let log_dir = daemon_log_dir(config);
+    fs::create_dir_all(&log_dir)?;
+
+    let prune_dir = log_dir.clone();
+    std::thread::spawn(move || prune_stale_daemon_logs(&prune_dir));
+
+    let log_path = log_dir.join(format!("{}.log", std::process::id()));
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+
+    let fd = file.as_raw_fd();
+    // SAFETY: dup2 is a standard POSIX call; we redirect stdout/stderr to our
+    // open log file descriptor. The file is kept alive by the returned guard.
+    unsafe {
+        if libc::dup2(fd, libc::STDOUT_FILENO) == -1 {
+            return Err(GitAiError::Generic("dup2 stdout failed".to_string()));
+        }
+        if libc::dup2(fd, libc::STDERR_FILENO) == -1 {
+            return Err(GitAiError::Generic("dup2 stderr failed".to_string()));
+        }
+    }
+
+    Ok(DaemonLogGuard { _file: file })
+}
+
+/// Remove log files from previous daemon runs that are older than one week and
+/// whose PID is no longer alive, to avoid unbounded growth while keeping recent
+/// logs available for debugging.
+#[cfg(unix)]
+fn prune_stale_daemon_logs(log_dir: &Path) {
+    let one_week = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    let entries = match fs::read_dir(log_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let pid: u32 = match stem.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if process_alive(pid) {
+            continue;
+        }
+        let dominated = path
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > one_week);
+        if dominated {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    // kill(pid, 0) checks existence without sending a signal.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 fn read_json_line<R: BufRead>(reader: &mut R) -> Result<Option<String>, GitAiError> {
@@ -6645,6 +6770,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
     write_pid_metadata(&config)?;
+    let _log_guard = maybe_setup_daemon_log_file(&config);
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
 
