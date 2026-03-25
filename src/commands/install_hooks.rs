@@ -1,4 +1,6 @@
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
+use crate::config;
+use crate::daemon::DaemonConfig;
 use crate::error::GitAiError;
 use crate::mdm::agents::get_all_installers;
 use crate::mdm::git_client_installer::GitClientInstallerParams;
@@ -7,9 +9,15 @@ use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
+use crate::utils::LockFile;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+const TRACE2_EVENT_TARGET_KEY: &str = "trace2.eventTarget";
+const TRACE2_EVENT_NESTING_KEY: &str = "trace2.eventNesting";
+const TRACE2_EVENT_NESTING_VALUE: &str = "10";
 
 /// Installation status for a tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +117,178 @@ fn print_amp_plugins_note(installer_id: &str) {
     }
 }
 
+fn set_global_git_config_value(git_cmd: &str, key: &str, value: &str) -> Result<(), GitAiError> {
+    let status = Command::new(git_cmd)
+        .args(["config", "--global", key, value])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(GitAiError::Generic(format!(
+            "failed to set global git config key '{}'",
+            key
+        )))
+    }
+}
+
+fn ensure_global_git_config_dirs() -> Result<(), GitAiError> {
+    if let Ok(path) = std::env::var("GIT_CONFIG_GLOBAL") {
+        let config_path = PathBuf::from(path);
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        fs::create_dir_all(home)?;
+    }
+
+    Ok(())
+}
+
+fn remove_global_git_config_section(git_cmd: &str, section: &str) -> Result<(), GitAiError> {
+    let status = Command::new(git_cmd)
+        .args(["config", "--global", "--remove-section", section])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    // Exit code 128 means the section doesn't exist, which is fine.
+    if status.success() || status.code() == Some(128) {
+        Ok(())
+    } else {
+        Err(GitAiError::Generic(format!(
+            "failed to remove global git config section '{}'",
+            section
+        )))
+    }
+}
+
+fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
+    let runtime_config = config::Config::fresh();
+
+    if !runtime_config.feature_flags().async_mode {
+        if !dry_run {
+            // Async mode is off — clean up any trace2 config we previously wrote.
+            let _ = remove_global_git_config_section(runtime_config.git_cmd(), "trace2");
+        }
+        return Ok(());
+    }
+
+    ensure_global_git_config_dirs()?;
+
+    let daemon_config = DaemonConfig::from_env_or_default_paths()?;
+    let event_target = daemon_config.trace2_event_target();
+
+    if dry_run {
+        return Ok(());
+    }
+
+    // Fully reset any existing trace2 config the user may have set
+    // (e.g. trace2.normalTarget, trace2.perfTarget, trace2.configParams, etc.)
+    // before writing only the keys we need.
+    remove_global_git_config_section(runtime_config.git_cmd(), "trace2")?;
+
+    set_global_git_config_value(
+        runtime_config.git_cmd(),
+        TRACE2_EVENT_TARGET_KEY,
+        &event_target,
+    )?;
+    set_global_git_config_value(
+        runtime_config.git_cmd(),
+        TRACE2_EVENT_NESTING_KEY,
+        TRACE2_EVENT_NESTING_VALUE,
+    )?;
+    Ok(())
+}
+
+fn maybe_teardown_async_mode(dry_run: bool) {
+    if dry_run {
+        return;
+    }
+
+    let runtime_config = config::Config::fresh();
+    if runtime_config.feature_flags().async_mode {
+        return;
+    }
+
+    // Don't touch daemon inside test harnesses
+    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+    {
+        return;
+    }
+
+    // Shut down any leftover daemon from when async_mode was enabled.
+    if let Ok(daemon_config) = DaemonConfig::from_env_or_default_paths()
+        && crate::commands::daemon::daemon_is_up(&daemon_config)
+    {
+        let _ = crate::daemon::send_control_request(
+            &daemon_config.control_socket_path,
+            &crate::daemon::ControlRequest::Shutdown,
+        );
+    }
+}
+
+fn maybe_ensure_daemon(dry_run: bool) {
+    if dry_run {
+        return;
+    }
+
+    let runtime_config = config::Config::fresh();
+    if !runtime_config.feature_flags().async_mode {
+        return;
+    }
+
+    // Don't touch daemon inside test harnesses
+    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+    {
+        return;
+    }
+
+    let Ok(daemon_config) = DaemonConfig::from_env_or_default_paths() else {
+        return;
+    };
+
+    // If daemon is already running, shut it down first so it restarts
+    // with the freshly-written trace2 config.
+    if crate::commands::daemon::daemon_is_up(&daemon_config) {
+        let _ = crate::daemon::send_control_request(
+            &daemon_config.control_socket_path,
+            &crate::daemon::ControlRequest::Shutdown,
+        );
+
+        // Wait for both sockets to go down AND the lock to be released,
+        // so the restart doesn't hit "startup blocked" from the dying process.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let sockets_down = !crate::commands::daemon::daemon_is_up(&daemon_config);
+            let lock_free = LockFile::try_acquire(&daemon_config.lock_path)
+                .map(|l| {
+                    drop(l);
+                    true
+                })
+                .unwrap_or(false);
+            if sockets_down && lock_free {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    // Start daemon (or restart after shutdown above). Best-effort.
+    if let Err(e) =
+        crate::commands::daemon::ensure_daemon_running(std::time::Duration::from_secs(5))
+    {
+        eprintln!("[git-ai] warning: failed to start daemon: {}", e);
+    }
+}
+
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Parse flags
@@ -121,6 +301,18 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
         if arg == "--verbose" || arg == "-v" {
             verbose = true;
         }
+    }
+
+    // In async mode, daemon trace2 config must be in place before any install work starts.
+    // If async mode was disabled, tear down any leftover daemon and trace2 config.
+    maybe_configure_async_mode_daemon_trace2(dry_run)?;
+    maybe_teardown_async_mode(dry_run);
+    maybe_ensure_daemon(dry_run);
+
+    // Now that the daemon is (re)started, initialize the telemetry handle so
+    // that install-hooks metrics and observability events route through it.
+    if config::Config::get().feature_flags().async_mode && !dry_run {
+        let _ = crate::daemon::telemetry_handle::init_daemon_telemetry_handle();
     }
 
     // Get absolute path to the current binary

@@ -178,6 +178,8 @@ pub struct ConfigPatch {
     pub prompt_storage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_flags: Option<serde_json::Value>,
 }
 
 impl Config {
@@ -191,6 +193,14 @@ impl Config {
     /// Access the global configuration. Lazily initializes if not already initialized.
     pub fn get() -> &'static Config {
         CONFIG.get_or_init(build_config)
+    }
+
+    /// Build a fresh config snapshot from disk/env without using the global cache.
+    ///
+    /// This is useful for long-lived daemon processes that must observe runtime
+    /// config updates (for example, prompt sharing/privacy toggles).
+    pub fn fresh() -> Self {
+        build_config()
     }
 
     /// Returns the command to invoke git.
@@ -780,7 +790,7 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
             let p = Path::new(trimmed);
-            if is_executable(p) {
+            if is_executable(p) && !path_is_git_ai_binary(p) {
                 return trimmed.to_string();
             }
         }
@@ -948,6 +958,36 @@ fn is_executable(path: &Path) -> bool {
     true
 }
 
+/// Detect if a path is actually the git-ai binary (or a symlink to it).
+/// This prevents `git_cmd()` from returning the git-ai shim, which would
+/// cause infinite recursion: handle_git() → proxy_to_git() → shim → handle_git() → ...
+fn path_is_git_ai_binary(path: &Path) -> bool {
+    // Check if a sibling "git-ai" exists in the same directory — this is the
+    // telltale sign that `path` is the git shim installed next to git-ai.
+    if let Some(parent) = path.parent() {
+        let git_ai_name = if cfg!(windows) {
+            "git-ai.exe"
+        } else {
+            "git-ai"
+        };
+        if parent.join(git_ai_name).exists() {
+            return true;
+        }
+    }
+
+    // Also check canonical path — the symlink target may be git-ai itself.
+    if let Ok(canonical) = path.canonicalize()
+        && let Some(name) = canonical.file_name().and_then(|n| n.to_str())
+    {
+        let stem = name.strip_suffix(".exe").unwrap_or(name);
+        if stem == "git-ai" || stem.starts_with("git-ai-") || stem.starts_with("git_ai") {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Apply test config patch from environment variable (test-only)
 /// Reads GIT_AI_TEST_CONFIG_PATCH env var containing JSON and applies patches to config
 #[cfg(any(test, feature = "test-support"))]
@@ -992,6 +1032,16 @@ fn apply_test_config_patch(config: &mut Config) {
         }
         if let Some(custom_attributes) = patch.custom_attributes {
             config.custom_attributes = custom_attributes;
+        }
+        if let Some(feature_flags_value) = patch.feature_flags
+            && let Ok(deserialized) = serde_json::from_value::<
+                crate::feature_flags::DeserializableFeatureFlags,
+            >(feature_flags_value)
+        {
+            config.feature_flags = crate::feature_flags::FeatureFlags::merge_with(
+                config.feature_flags.clone(),
+                deserialized,
+            );
         }
     }
 }

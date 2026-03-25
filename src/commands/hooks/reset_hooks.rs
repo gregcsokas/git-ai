@@ -17,7 +17,6 @@ pub fn pre_reset_hook(parsed_args: &ParsedGitInvocation, repository: &mut Reposi
         &human_author,
         CheckpointKind::Human,
         false,
-        false,
         true,
         None,
         true,
@@ -229,6 +228,7 @@ fn handle_reset_preserve_working_dir(
         old_head_sha,
         human_author,
         None, // No user-specified pathspecs for regular resets
+        None,
     ) {
         Ok(_) => {
             debug_log(&format!(
@@ -280,7 +280,16 @@ fn handle_reset_pathspec_preserve_working_dir(
     }
 
     // Backup existing working log for HEAD (non-pathspec files)
-    let working_log = repository.storage.working_log_for_base_commit(old_head_sha);
+    let working_log = match repository.storage.working_log_for_base_commit(old_head_sha) {
+        Ok(wl) => wl,
+        Err(e) => {
+            debug_log(&format!(
+                "Failed to get working log for {}: {}",
+                old_head_sha, e
+            ));
+            return;
+        }
+    };
     let existing_checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
 
     // Filter existing checkpoints to keep only non-pathspec files
@@ -306,6 +315,7 @@ fn handle_reset_pathspec_preserve_working_dir(
         old_head_sha,
         human_author,
         Some(pathspecs), // Pass pathspecs to limit reconstruction
+        None,
     ) {
         Ok(_) => {
             debug_log(&format!(
@@ -323,9 +333,19 @@ fn handle_reset_pathspec_preserve_working_dir(
     }
 
     // Read the newly created working log for target_commit_sha
-    let target_working_log = repository
+    let target_working_log = match repository
         .storage
-        .working_log_for_base_commit(target_commit_sha);
+        .working_log_for_base_commit(target_commit_sha)
+    {
+        Ok(wl) => wl,
+        Err(e) => {
+            debug_log(&format!(
+                "Failed to get working log for {}: {}",
+                target_commit_sha, e
+            ));
+            return;
+        }
+    };
     let pathspec_checkpoints = target_working_log
         .read_all_checkpoints()
         .unwrap_or_default();
@@ -337,7 +357,16 @@ fn handle_reset_pathspec_preserve_working_dir(
     merged_checkpoints.extend(pathspec_checkpoints);
 
     // Save merged working log for HEAD (which hasn't moved)
-    let head_working_log = repository.storage.working_log_for_base_commit(new_head_sha);
+    let head_working_log = match repository.storage.working_log_for_base_commit(new_head_sha) {
+        Ok(wl) => wl,
+        Err(e) => {
+            debug_log(&format!(
+                "Failed to get working log for {}: {}",
+                new_head_sha, e
+            ));
+            return;
+        }
+    };
     let _ = head_working_log.reset_working_log();
     for checkpoint in merged_checkpoints {
         let _ = head_working_log.append_checkpoint(&checkpoint);

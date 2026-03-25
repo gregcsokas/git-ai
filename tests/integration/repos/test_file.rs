@@ -736,6 +736,27 @@ impl<'a> TestFile<'a> {
             .join("\n")
     }
 
+    fn repo_relative_path(&self) -> String {
+        self.file_path
+            .strip_prefix(self.repo.path())
+            .expect("test file path should be inside the test repo")
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    fn run_checkpoint_for_author_type(&self, author_type: &AuthorType) {
+        let relative_path = self.repo_relative_path();
+        let result = if author_type == &AuthorType::Ai {
+            self.repo
+                .git_ai(&["checkpoint", "mock_ai", relative_path.as_str()])
+        } else {
+            self.repo
+                .git_ai(&["checkpoint", "--", relative_path.as_str()])
+        };
+
+        result.unwrap();
+    }
+
     fn write_and_checkpoint(&self, author_type: &AuthorType) {
         // Create parent directories if they don't exist (important for nested paths)
         if let Some(parent) = self.file_path.parent()
@@ -745,11 +766,7 @@ impl<'a> TestFile<'a> {
         }
         let contents = self.contents();
         fs::write(&self.file_path, contents).unwrap();
-        if author_type == &AuthorType::Ai {
-            self.repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
-        } else {
-            self.repo.git_ai(&["checkpoint"]).unwrap();
-        };
+        self.run_checkpoint_for_author_type(author_type);
     }
 
     fn write_and_checkpoint_with_contents(&self, contents: &str, author_type: &AuthorType) {
@@ -764,18 +781,7 @@ impl<'a> TestFile<'a> {
         // Stage the file first
         self.repo.git(&["add", "-A"]).unwrap();
 
-        let result = if author_type == &AuthorType::Ai {
-            self.repo.git_ai(&["checkpoint", "mock_ai"])
-        } else {
-            self.repo.git_ai(&["checkpoint"])
-        };
-
-        // match &result {
-        //     Ok(output) => println!("✓ checkpoint succeeded: {:?}", output),
-        //     Err(error) => println!("✗ checkpoint failed: {:?}", error),
-        // }
-
-        result.unwrap();
+        self.run_checkpoint_for_author_type(author_type);
     }
 
     fn write_and_checkpoint_no_stage(&self, contents: &str, author_type: &AuthorType) {
@@ -788,13 +794,7 @@ impl<'a> TestFile<'a> {
         fs::write(&self.file_path, contents).unwrap();
 
         // Create checkpoint without staging - checkpoints work with unstaged files
-        let result = if author_type == &AuthorType::Ai {
-            self.repo.git_ai(&["checkpoint", "mock_ai"])
-        } else {
-            self.repo.git_ai(&["checkpoint"])
-        };
-
-        result.unwrap();
+        self.run_checkpoint_for_author_type(author_type);
     }
 }
 
