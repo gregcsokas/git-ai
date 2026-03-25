@@ -1,6 +1,7 @@
 use crate::daemon::domain::{AnalysisResult, NormalizedCommand};
 use crate::error::GitAiError;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 pub mod generic;
@@ -79,5 +80,24 @@ impl AnalyzerRegistry {
             }
         }
         self.generic.analyze(cmd, state)
+    }
+}
+
+pub(crate) fn command_args(cmd: &NormalizedCommand) -> Vec<String> {
+    if !cmd.invoked_args.is_empty() {
+        return cmd.invoked_args.clone();
+    }
+    normalized_args(&cmd.raw_argv)
+}
+
+pub(crate) fn normalized_args(argv: &[String]) -> Vec<String> {
+    let start = argv
+        .first()
+        .and_then(|arg| Path::new(arg).file_name().and_then(|name| name.to_str()))
+        .is_some_and(|name| name == "git" || name == "git.exe");
+    if start {
+        argv[1..].to_vec()
+    } else {
+        argv.to_vec()
     }
 }

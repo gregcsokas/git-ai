@@ -1,4 +1,4 @@
-use crate::daemon::analyzers::{AnalysisView, CommandAnalyzer};
+use crate::daemon::analyzers::{AnalysisView, CommandAnalyzer, command_args};
 use crate::daemon::domain::{
     AnalysisResult, CommandClass, Confidence, NormalizedCommand, ResetKind, SemanticEvent,
 };
@@ -7,7 +7,6 @@ use crate::git::cli_parser::{explicit_rebase_branch_arg, parse_git_cli_args};
 use crate::git::repo_state::{is_valid_git_oid, resolve_worktree_head_reflog_old_oid_for_new_head};
 #[cfg(test)]
 use std::fs;
-use std::path::Path;
 
 #[derive(Default)]
 pub struct HistoryAnalyzer;
@@ -130,12 +129,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
                     });
                 }
             }
-            _ => {
-                return Err(GitAiError::Generic(format!(
-                    "history analyzer does not support command '{}'",
-                    name
-                )));
-            }
+            _ => unreachable!("registry should not route '{}' to HistoryAnalyzer", name),
         }
 
         if events.is_empty() {
@@ -151,25 +145,6 @@ impl CommandAnalyzer for HistoryAnalyzer {
                 Confidence::Low
             },
         })
-    }
-}
-
-fn command_args(cmd: &NormalizedCommand) -> Vec<String> {
-    if !cmd.invoked_args.is_empty() {
-        return cmd.invoked_args.clone();
-    }
-    normalized_args(&cmd.raw_argv)
-}
-
-fn normalized_args(argv: &[String]) -> Vec<String> {
-    let start = argv
-        .first()
-        .and_then(|arg| Path::new(arg).file_name().and_then(|name| name.to_str()))
-        .is_some_and(|name| name == "git" || name == "git.exe");
-    if start {
-        argv[1..].to_vec()
-    } else {
-        argv.to_vec()
     }
 }
 

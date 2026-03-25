@@ -1,10 +1,9 @@
-use crate::daemon::analyzers::{AnalysisView, CommandAnalyzer};
+use crate::daemon::analyzers::{AnalysisView, CommandAnalyzer, command_args, normalized_args};
 use crate::daemon::domain::{
     AnalysisResult, CommandClass, Confidence, NormalizedCommand, SemanticEvent, StashOpKind,
 };
 use crate::error::GitAiError;
 use crate::git::cli_parser::stash_target_spec;
-use std::path::Path;
 
 #[derive(Default)]
 pub struct WorkspaceAnalyzer;
@@ -48,12 +47,7 @@ impl CommandAnalyzer for WorkspaceAnalyzer {
                     });
                 }
             }
-            _ => {
-                return Err(GitAiError::Generic(format!(
-                    "workspace analyzer does not support command '{}'",
-                    name
-                )));
-            }
+            _ => unreachable!("registry should not route '{}' to WorkspaceAnalyzer", name),
         }
 
         if events.is_empty() {
@@ -69,25 +63,6 @@ impl CommandAnalyzer for WorkspaceAnalyzer {
                 Confidence::Low
             },
         })
-    }
-}
-
-fn command_args(cmd: &NormalizedCommand) -> Vec<String> {
-    if !cmd.invoked_args.is_empty() {
-        return cmd.invoked_args.clone();
-    }
-    normalized_args(&cmd.raw_argv)
-}
-
-fn normalized_args(argv: &[String]) -> Vec<String> {
-    let start = argv
-        .first()
-        .and_then(|arg| Path::new(arg).file_name().and_then(|name| name.to_str()))
-        .is_some_and(|name| name == "git" || name == "git.exe");
-    if start {
-        argv[1..].to_vec()
-    } else {
-        argv.to_vec()
     }
 }
 
