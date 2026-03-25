@@ -255,7 +255,10 @@ impl CursorInstaller {
             })
             .unwrap_or(false);
 
-        Ok((has_pre_tool_use || has_legacy_before_submit, has_pre_tool_use))
+        Ok((
+            has_pre_tool_use || has_legacy_before_submit,
+            has_pre_tool_use,
+        ))
     }
 
     /// Core install logic. Extracted so tests can supply a custom path without touching the
@@ -409,8 +412,7 @@ impl CursorInstaller {
         // Remove git-ai checkpoint cursor commands from all hook types, including the legacy
         // beforeSubmitPrompt so existing users are fully cleaned up.
         for hook_name in &["preToolUse", "beforeSubmitPrompt", "afterFileEdit"] {
-            if let Some(hooks_array) =
-                hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
+            if let Some(hooks_array) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
             {
                 let original_len = hooks_array.len();
                 hooks_array.retain(|hook| {
@@ -476,7 +478,10 @@ mod tests {
 
         let diff = CursorInstaller::install_hooks_at(&hooks_path, &params, false)
             .expect("install should succeed");
-        assert!(diff.is_some(), "should report a change when creating from scratch");
+        assert!(
+            diff.is_some(),
+            "should report a change when creating from scratch"
+        );
 
         let content: Value =
             serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
@@ -497,12 +502,11 @@ mod tests {
         );
         assert!(
             !hooks.get("beforeSubmitPrompt").is_some_and(|v| {
-                v.as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .any(|h| CursorInstaller::is_cursor_checkpoint_command(
-                        h["command"].as_str().unwrap_or("")
-                    ))
+                v.as_array().unwrap_or(&vec![]).iter().any(|h| {
+                    CursorInstaller::is_cursor_checkpoint_command(
+                        h["command"].as_str().unwrap_or(""),
+                    )
+                })
             }),
             "should not install a beforeSubmitPrompt git-ai hook"
         );
@@ -519,7 +523,11 @@ mod tests {
                 "afterFileEdit": [{ "command": "echo 'other tool after'" }]
             }
         });
-        fs::write(&hooks_path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+        fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
 
         let params = make_params("/usr/local/bin/git-ai");
         CursorInstaller::install_hooks_at(&hooks_path, &params, false).unwrap();
@@ -532,8 +540,14 @@ mod tests {
         // Both arrays should have the existing hook plus the new git-ai hook
         assert_eq!(pre_tool_use.len(), 2);
         assert_eq!(after_edit.len(), 2);
-        assert_eq!(pre_tool_use[0]["command"].as_str().unwrap(), "echo 'other tool pre'");
-        assert_eq!(after_edit[0]["command"].as_str().unwrap(), "echo 'other tool after'");
+        assert_eq!(
+            pre_tool_use[0]["command"].as_str().unwrap(),
+            "echo 'other tool pre'"
+        );
+        assert_eq!(
+            after_edit[0]["command"].as_str().unwrap(),
+            "echo 'other tool after'"
+        );
     }
 
     #[test]
@@ -547,7 +561,11 @@ mod tests {
                 "afterFileEdit": [{ "command": "/old/path/git-ai checkpoint cursor --hook-input stdin" }]
             }
         });
-        fs::write(&hooks_path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+        fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
 
         let params = make_params("/new/path/git-ai");
         CursorInstaller::install_hooks_at(&hooks_path, &params, false).unwrap();
@@ -601,8 +619,14 @@ mod tests {
         fs::write(&hooks_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
 
         let (installed, up_to_date) = CursorInstaller::check_hooks_file(&hooks_path).unwrap();
-        assert!(installed, "legacy beforeSubmitPrompt hook should count as installed");
-        assert!(!up_to_date, "legacy hook should NOT be considered up-to-date");
+        assert!(
+            installed,
+            "legacy beforeSubmitPrompt hook should count as installed"
+        );
+        assert!(
+            !up_to_date,
+            "legacy hook should NOT be considered up-to-date"
+        );
     }
 
     #[test]
@@ -695,10 +719,9 @@ mod tests {
         let content: Value =
             serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
         let has_git_ai = |arr: &Value| {
-            arr.as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .any(|h| CursorInstaller::is_cursor_checkpoint_command(h["command"].as_str().unwrap_or("")))
+            arr.as_array().unwrap_or(&vec![]).iter().any(|h| {
+                CursorInstaller::is_cursor_checkpoint_command(h["command"].as_str().unwrap_or(""))
+            })
         };
         assert!(!has_git_ai(&content["hooks"]["preToolUse"]));
         assert!(!has_git_ai(&content["hooks"]["afterFileEdit"]));
@@ -730,15 +753,24 @@ mod tests {
 
         // git-ai entry gone from beforeSubmitPrompt
         let before_submit = content["hooks"]["beforeSubmitPrompt"].as_array().unwrap();
-        assert_eq!(before_submit.len(), 1, "third-party hook should be preserved");
-        assert_eq!(before_submit[0]["command"].as_str().unwrap(), "echo 'other'");
+        assert_eq!(
+            before_submit.len(),
+            1,
+            "third-party hook should be preserved"
+        );
+        assert_eq!(
+            before_submit[0]["command"].as_str().unwrap(),
+            "echo 'other'"
+        );
 
         // afterFileEdit git-ai entry gone
         let after_edit = content["hooks"]["afterFileEdit"].as_array().unwrap();
         assert!(
-            !after_edit.iter().any(|h| CursorInstaller::is_cursor_checkpoint_command(
-                h["command"].as_str().unwrap_or("")
-            )),
+            !after_edit
+                .iter()
+                .any(|h| CursorInstaller::is_cursor_checkpoint_command(
+                    h["command"].as_str().unwrap_or("")
+                )),
             "afterFileEdit git-ai hook should be removed"
         );
     }
