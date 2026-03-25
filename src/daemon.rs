@@ -716,9 +716,7 @@ fn normalize_commit_carryover_snapshot(
     carryover_snapshot: Option<&HashMap<String, String>>,
     committed_final_state: Option<&HashMap<String, String>>,
 ) -> Option<HashMap<String, String>> {
-    let Some(carryover_snapshot) = carryover_snapshot else {
-        return None;
-    };
+    let carryover_snapshot = carryover_snapshot?;
 
     let mut normalized = carryover_snapshot.clone();
     if let Some(committed_final_state) = committed_final_state {
