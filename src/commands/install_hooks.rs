@@ -274,6 +274,12 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     maybe_configure_async_mode_daemon_trace2(dry_run)?;
     maybe_ensure_daemon(dry_run);
 
+    // Now that the daemon is (re)started, initialize the telemetry handle so
+    // that install-hooks metrics and observability events route through it.
+    if config::Config::get().feature_flags().async_mode && !dry_run {
+        let _ = crate::daemon::telemetry_handle::init_daemon_telemetry_handle();
+    }
+
     // Get absolute path to the current binary
     let binary_path = get_current_binary_path()?;
     persist_install_api_base_config(&binary_path, dry_run)?;
