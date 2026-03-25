@@ -608,8 +608,8 @@ fn resolve_child_git_hooks_path_override(
 /// the daemon-produced authorship note and display stats inline when available.
 /// Mirrors the same skip/display rules as plain wrapper mode in post_commit.rs.
 fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repository) {
-    use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
     use crate::authorship::ignore::effective_ignore_patterns;
+    use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
     use crate::git::cli_parser::is_dry_run;
     use crate::git::refs::show_authorship_note;
     use std::io::IsTerminal;
@@ -626,8 +626,8 @@ fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repos
         return;
     }
 
-    let is_interactive = std::io::stderr().is_terminal()
-        || std::env::var_os("GIT_AI_TEST_FORCE_TTY").is_some();
+    let is_interactive =
+        std::io::stderr().is_terminal() || std::env::var_os("GIT_AI_TEST_FORCE_TTY").is_some();
     if !is_interactive {
         return;
     }

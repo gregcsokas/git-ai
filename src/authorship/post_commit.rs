@@ -370,7 +370,10 @@ pub fn estimate_stats_cost_for_head(
 ) -> Result<StatsSkipEstimate, GitAiError> {
     let commit = repo.find_commit(commit_sha.to_string())?;
     let parent_sha = if commit.parent_count().unwrap_or(0) > 0 {
-        commit.parent(0).map(|p| p.id()).unwrap_or_else(|_| "initial".to_string())
+        commit
+            .parent(0)
+            .map(|p| p.id())
+            .unwrap_or_else(|_| "initial".to_string())
     } else {
         "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
     };
