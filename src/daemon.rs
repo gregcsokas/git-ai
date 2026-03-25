@@ -3910,6 +3910,7 @@ impl ActorDaemonCoordinator {
         ingress.root_head_reflog_start_offsets.remove(root_sid);
         ingress.root_family_reflog_start_offsets.remove(root_sid);
         ingress.root_last_activity_ns.remove(root_sid);
+        ingress.root_definitely_read_only.remove(root_sid);
         ingress.root_open_connections.remove(root_sid);
         ingress.root_close_fallback_enqueued.remove(root_sid);
         let mut queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
