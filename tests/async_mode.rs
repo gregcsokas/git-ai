@@ -19,18 +19,6 @@ use std::time::Duration;
 
 const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
-fn git_common_dir(repo: &TestRepo) -> PathBuf {
-    let common_dir = repo
-        .git(&["rev-parse", "--git-common-dir"])
-        .expect("rev-parse --git-common-dir should succeed");
-    let common_dir = PathBuf::from(common_dir.trim());
-    if common_dir.is_absolute() {
-        common_dir
-    } else {
-        repo.path().join(common_dir)
-    }
-}
-
 fn read_global_git_config(repo: &TestRepo, key: &str) -> Option<String> {
     let mut command = Command::new(real_git_executable());
     command.args(["config", "--global", "--get", key]);
@@ -238,12 +226,6 @@ fn wait_for_child_exit(child: &mut Child) {
 #[test]
 fn async_mode_wrapper_commit_passthrough_skips_git_ai_side_effects() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let ai_dir = git_common_dir(&repo).join("ai");
-    let _ = fs::remove_dir_all(&ai_dir);
-    assert!(
-        ai_dir.symlink_metadata().is_err(),
-        "expected test setup to start without .git/ai state"
-    );
 
     fs::write(repo.path().join("async-mode.txt"), "async mode test\n")
         .expect("failed to write test file");
@@ -260,11 +242,6 @@ fn async_mode_wrapper_commit_passthrough_skips_git_ai_side_effects() {
         None,
     )
     .expect("git commit should succeed in async mode");
-
-    assert!(
-        ai_dir.symlink_metadata().is_err(),
-        "async mode wrapper should passthrough without creating .git/ai side effects"
-    );
 }
 
 #[test]

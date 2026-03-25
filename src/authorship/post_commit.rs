@@ -155,21 +155,22 @@ pub fn post_commit_with_final_state(
 
     // Long-lived daemon processes should read a fresh config snapshot.
     // Wrapper/hooks mode can use the process-global cached config.
-    let (effective_storage, using_custom_api, custom_attrs) = if crate::daemon::daemon_process_active() {
-        let config = Config::fresh();
-        (
-            config.effective_prompt_storage(&Some(repo.clone())),
-            config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
-            config.custom_attributes().clone(),
-        )
-    } else {
-        let config = Config::get();
-        (
-            config.effective_prompt_storage(&Some(repo.clone())),
-            config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
-            config.custom_attributes().clone(),
-        )
-    };
+    let (effective_storage, using_custom_api, custom_attrs) =
+        if crate::daemon::daemon_process_active() {
+            let config = Config::fresh();
+            (
+                config.effective_prompt_storage(&Some(repo.clone())),
+                config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
+                config.custom_attributes().clone(),
+            )
+        } else {
+            let config = Config::get();
+            (
+                config.effective_prompt_storage(&Some(repo.clone())),
+                config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
+                config.custom_attributes().clone(),
+            )
+        };
 
     // Inject custom attributes into all PromptRecords.
     if !custom_attrs.is_empty() {

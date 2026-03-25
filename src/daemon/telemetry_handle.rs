@@ -127,7 +127,8 @@ pub fn init_daemon_telemetry_handle() -> DaemonTelemetryInitResult {
         let socket_path = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
             .ok()
             .filter(|p| !p.trim().is_empty())
-            .map(PathBuf::from);
+            .map(PathBuf::from)
+            .filter(|p| p.exists());
 
         match socket_path {
             Some(path) => {
