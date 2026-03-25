@@ -154,7 +154,7 @@ fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
     canonical_path
 }
 
-fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
+pub(crate) fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
     let path = std::env::current_exe()?;
     Ok(resolve_git_ai_exe_from_invocation_path(path))
 }

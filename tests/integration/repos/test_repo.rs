@@ -1365,6 +1365,12 @@ impl TestRepo {
             .unwrap_or_else(|| DaemonProcess::trace_socket_path_for_home(&self.test_home))
     }
 
+    pub(crate) fn config_patch_json(&self) -> Option<String> {
+        self.config_patch
+            .as_ref()
+            .and_then(|patch| serde_json::to_string(patch).ok())
+    }
+
     fn trace2_nesting_value() -> String {
         std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string())
     }

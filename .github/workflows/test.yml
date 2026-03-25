@@ -37,12 +37,20 @@ jobs:
             test_mode: daemon
             test_threads: 4
             daemon_pool: 4
+          - os: windows-latest
+            test_mode: wrapper-daemon
+            test_threads: 4
+            daemon_pool: 4
           - os: macos-latest
             test_mode: wrapper
             test_threads: 2
             daemon_pool: 2
           - os: macos-latest
             test_mode: daemon
+            test_threads: 2
+            daemon_pool: 2
+          - os: macos-latest
+            test_mode: wrapper-daemon
             test_threads: 2
             daemon_pool: 2
 

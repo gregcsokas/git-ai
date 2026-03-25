@@ -58,7 +58,7 @@
 /// - `gt rename` - Rename branch
 /// - `gt track` / `gt untrack` - Metadata tracking
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::{TestRepo, get_binary_path, real_git_executable};
+use crate::repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Command;
@@ -311,12 +311,32 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         command.env("GIT_TRACE2_EVENT_NESTING", nesting);
     }
 
+    // In WrapperDaemon mode, the shim's target (git-ai wrapper) needs daemon
+    // socket paths and the config patch (with async_mode: true) to initialize
+    // the telemetry handle and send authoritative wrapper state.
+    if repo.mode() == GitTestMode::WrapperDaemon {
+        command.env("GIT_AI_DAEMON_HOME", repo.daemon_home_path());
+        command.env(
+            "GIT_AI_DAEMON_CONTROL_SOCKET",
+            repo.daemon_control_socket_path(),
+        );
+        command.env(
+            "GIT_AI_DAEMON_TRACE_SOCKET",
+            repo.daemon_trace_socket_path(),
+        );
+    }
+
     // Only set hook-mode env in hook-based test modes.
     if repo.mode().uses_hooks() {
         command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
     }
     command.env("GIT_AI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
     command.env("GITAI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
+
+    // Pass config patch (needed for async_mode in wrapper-daemon mode).
+    if let Some(patch) = repo.config_patch_json() {
+        command.env("GIT_AI_TEST_CONFIG_PATCH", patch);
+    }
 
     // Isolate Graphite's config and data directories per test to prevent
     // parallel test corruption of config files and the nuxes SQLite database

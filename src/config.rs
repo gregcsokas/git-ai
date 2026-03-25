@@ -790,7 +790,7 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
             let p = Path::new(trimmed);
-            if is_executable(p) {
+            if is_executable(p) && !path_is_git_ai_binary(p) {
                 return trimmed.to_string();
             }
         }
@@ -956,6 +956,36 @@ fn is_executable(path: &Path) -> bool {
     // Basic check: existence is sufficient for our purposes; OS will enforce exec perms.
     // On Unix we could check permissions, but many filesystems differ. Keep it simple.
     true
+}
+
+/// Detect if a path is actually the git-ai binary (or a symlink to it).
+/// This prevents `git_cmd()` from returning the git-ai shim, which would
+/// cause infinite recursion: handle_git() → proxy_to_git() → shim → handle_git() → ...
+fn path_is_git_ai_binary(path: &Path) -> bool {
+    // Check if a sibling "git-ai" exists in the same directory — this is the
+    // telltale sign that `path` is the git shim installed next to git-ai.
+    if let Some(parent) = path.parent() {
+        let git_ai_name = if cfg!(windows) {
+            "git-ai.exe"
+        } else {
+            "git-ai"
+        };
+        if parent.join(git_ai_name).exists() {
+            return true;
+        }
+    }
+
+    // Also check canonical path — the symlink target may be git-ai itself.
+    if let Ok(canonical) = path.canonicalize()
+        && let Some(name) = canonical.file_name().and_then(|n| n.to_str())
+    {
+        let stem = name.strip_suffix(".exe").unwrap_or(name);
+        if stem == "git-ai" || stem.starts_with("git-ai-") || stem.starts_with("git_ai") {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Apply test config patch from environment variable (test-only)

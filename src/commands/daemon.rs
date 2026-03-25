@@ -254,7 +254,11 @@ fn powershell_single_quote_literal(value: &OsStr) -> String {
 }
 
 fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // Use current_git_ai_exe() instead of current_exe() to resolve through
+    // symlinks. When the current exe is the git shim (e.g. ~/.local/bin/git),
+    // current_exe() would spawn `git daemon run` which re-enters handle_git()
+    // instead of handle_git_ai(), causing a fork bomb in async mode.
+    let exe = crate::utils::current_git_ai_exe().map_err(|e| e.to_string())?;
     let runtime_dir = daemon_runtime_dir(config)?;
 
     #[cfg(windows)]
@@ -315,7 +319,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
 fn spawn_daemon_run_with_piped_stderr(
     config: &DaemonConfig,
 ) -> Result<std::process::Child, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = crate::utils::current_git_ai_exe().map_err(|e| e.to_string())?;
     let runtime_dir = daemon_runtime_dir(config)?;
     let mut child = Command::new(exe);
     child
