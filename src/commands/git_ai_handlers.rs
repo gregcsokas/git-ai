@@ -57,6 +57,9 @@ pub fn handle_git_ai(args: &[String]) {
                 | "daemon"
                 | "debug"
                 | "upgrade"
+                | "install-hooks"
+                | "install"
+                | "uninstall-hooks"
         );
         if needs_daemon {
             use crate::daemon::telemetry_handle::{

@@ -9,6 +9,7 @@ use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
+use crate::utils::LockFile;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -226,8 +227,20 @@ fn maybe_ensure_daemon(dry_run: bool) {
             &crate::daemon::ControlRequest::Shutdown,
         );
 
+        // Wait for both sockets to go down AND the lock to be released,
+        // so the restart doesn't hit "startup blocked" from the dying process.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while crate::commands::daemon::daemon_is_up(&daemon_config) {
+        loop {
+            let sockets_down = !crate::commands::daemon::daemon_is_up(&daemon_config);
+            let lock_free = LockFile::try_acquire(&daemon_config.lock_path)
+                .map(|l| {
+                    drop(l);
+                    true
+                })
+                .unwrap_or(false);
+            if sockets_down && lock_free {
+                break;
+            }
             if std::time::Instant::now() >= deadline {
                 break;
             }
@@ -236,7 +249,11 @@ fn maybe_ensure_daemon(dry_run: bool) {
     }
 
     // Start daemon (or restart after shutdown above). Best-effort.
-    let _ = crate::commands::daemon::ensure_daemon_running(std::time::Duration::from_secs(2));
+    if let Err(e) =
+        crate::commands::daemon::ensure_daemon_running(std::time::Duration::from_secs(5))
+    {
+        eprintln!("[git-ai] warning: failed to start daemon: {}", e);
+    }
 }
 
 /// Main entry point for install-hooks command
