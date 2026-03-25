@@ -26,7 +26,7 @@ impl WindsurfInstaller {
         [
             // for intellej
             codeium.join("hooks.json"),
-            // for windsurf 
+            // for windsurf
             codeium.join("windsurf").join("hooks.json"),
         ]
     }
@@ -220,8 +220,7 @@ impl HookInstaller for WindsurfInstaller {
             }
 
             let content = fs::read_to_string(&hooks_path)?;
-            let existing: Value =
-                serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+            let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
             let has_hooks = HOOK_EVENTS.iter().all(|event| {
                 existing
@@ -265,9 +264,7 @@ impl HookInstaller for WindsurfInstaller {
         let mut all_diffs = Vec::new();
 
         for hooks_path in Self::hooks_paths() {
-            if let Some(diff) =
-                Self::install_hooks_at(&hooks_path, &desired_cmd, dry_run)?
-            {
+            if let Some(diff) = Self::install_hooks_at(&hooks_path, &desired_cmd, dry_run)? {
                 all_diffs.push(diff);
             }
         }
