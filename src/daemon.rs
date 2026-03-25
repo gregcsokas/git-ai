@@ -2948,11 +2948,13 @@ fn remove_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn daemon_is_test_mode() -> bool {
     std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
         || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
 }
 
+#[cfg(unix)]
 fn daemon_log_dir(config: &DaemonConfig) -> PathBuf {
     config.internal_dir.join("daemon").join("logs")
 }
