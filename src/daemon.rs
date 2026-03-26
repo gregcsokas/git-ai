@@ -2770,7 +2770,10 @@ fn resolve_cherry_pick_source_refs(
                     context, src, err
                 ))
             })?;
-            let oid = obj.peel_to_commit().map(|c| c.id()).unwrap_or_else(|_| obj.id());
+            let oid = obj
+                .peel_to_commit()
+                .map(|c| c.id())
+                .unwrap_or_else(|_| obj.id());
             if is_valid_oid(&oid) && !is_zero_oid(&oid) {
                 resolved.push(oid);
             }

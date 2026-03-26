@@ -2559,6 +2559,127 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
 
 #[test]
 #[serial]
+fn daemon_pure_trace_socket_rebase_with_short_sha_emits_complete_event() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let _daemon = DaemonGuard::start(&repo);
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let default_branch = repo.current_branch();
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
+
+    // Create base commit on default branch
+    fs::write(repo.path().join("rebase-short.txt"), "base\n").expect("failed to write base");
+    traced_git_with_env(
+        &repo,
+        &["add", "rebase-short.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "base"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base commit should succeed");
+
+    // Create feature branch with a commit
+    traced_git_with_env(
+        &repo,
+        &["checkout", "-b", "feature-rebase-short"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("feature branch checkout should succeed");
+    fs::write(repo.path().join("feature-only.txt"), "feature content\n")
+        .expect("failed to write feature file");
+    traced_git_with_env(
+        &repo,
+        &["add", "feature-only.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("feature add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "feature change"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("feature commit should succeed");
+
+    // Go back to default branch and add a non-conflicting commit
+    traced_git_with_env(
+        &repo,
+        &["checkout", default_branch.as_str()],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("checkout default should succeed");
+    fs::write(repo.path().join("main-only.txt"), "main content\n")
+        .expect("failed to write main file");
+    traced_git_with_env(
+        &repo,
+        &["add", "main-only.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("main add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "main advance"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("main commit should succeed");
+
+    // Get the short SHA of the latest main commit
+    let main_full_sha = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("HEAD rev-parse should succeed")
+        .trim()
+        .to_string();
+    let main_short_sha = &main_full_sha[..7];
+
+    // Switch to feature branch and rebase onto main using SHORT SHA
+    traced_git_with_env(
+        &repo,
+        &["checkout", "feature-rebase-short"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("checkout feature should succeed");
+    traced_git_with_env(
+        &repo,
+        &["rebase", main_short_sha],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("rebase with short SHA should succeed");
+
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    let rewrite_log = fs::read_to_string(&rewrite_log_path)
+        .expect("rewrite log should exist after rebase with short SHA");
+    assert!(
+        rewrite_log
+            .lines()
+            .any(|line| line.contains("\"rebase_complete\"")),
+        "daemon should emit rebase_complete even when rebase uses a short SHA, rewrite_log: {}",
+        rewrite_log
+    );
+}
+
+#[test]
+#[serial]
 fn daemon_pure_trace_socket_cherry_pick_with_short_sha_emits_complete_event() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
@@ -2660,7 +2781,8 @@ fn daemon_pure_trace_socket_cherry_pick_with_short_sha_emits_complete_event() {
             assert!(
                 line.contains(&topic_full_sha),
                 "cherry_pick_complete event should contain full resolved SHA {}, got: {}",
-                topic_full_sha, line
+                topic_full_sha,
+                line
             );
             assert!(
                 !line.contains(&format!("\"{}\"", topic_short_sha))
