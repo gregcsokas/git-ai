@@ -101,7 +101,8 @@ impl SystemGitBackend {
             .map_err(|_| GitAiError::Generic("alias cache lock poisoned".to_string()))?;
 
         if let Some(entry) = cache.get(&family_key) {
-            let result = entry.aliases.get(alias_name).cloned();
+            let normalized_alias = alias_name.to_ascii_lowercase();
+            let result = entry.aliases.get(&normalized_alias).cloned();
             if entry.refreshed_at.elapsed().as_secs() >= ALIAS_CACHE_TTL_SECS
                 && !entry.refresh_in_progress
             {
@@ -130,9 +131,10 @@ impl SystemGitBackend {
             .alias_cache
             .lock()
             .map_err(|_| GitAiError::Generic("alias cache lock poisoned".to_string()))?;
+        let normalized_alias = alias_name.to_ascii_lowercase();
         Ok(cache
             .get(&family_key)
-            .and_then(|entry| entry.aliases.get(alias_name).cloned()))
+            .and_then(|entry| entry.aliases.get(&normalized_alias).cloned()))
     }
 
     /// Synchronously load all aliases for a family into the cache.
@@ -204,7 +206,7 @@ fn read_all_aliases_from_config(config: &gix_config::File<'_>) -> HashMap<String
                 continue;
             }
             if let Some(value) = body.value(&key_str) {
-                aliases.insert(key_str, value.to_string());
+                aliases.insert(key_str.to_ascii_lowercase(), value.to_string());
             }
         }
     }
