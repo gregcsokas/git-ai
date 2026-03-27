@@ -3988,7 +3988,7 @@ fn daemon_restart_hard_kills_and_restarts() {
 
 #[test]
 #[serial]
-fn daemon_shutdown_hard_when_not_running_is_not_error() {
+fn daemon_shutdown_hard_when_not_running_fails_gracefully() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     // Don't start any daemon — just run shutdown --hard on a cold config.

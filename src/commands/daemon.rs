@@ -503,7 +503,7 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
             // Attempt soft shutdown; escalate to hard kill on timeout.
             let _ = soft_shutdown_daemon(&config);
             if !wait_for_daemon_dead(&config, GRACEFUL_SHUTDOWN_TIMEOUT) {
-                eprintln!("graceful shutdown timed out, sending SIGKILL");
+                eprintln!("graceful shutdown timed out, force-killing daemon");
                 hard_kill_daemon(&config)?;
             }
         }
