@@ -1130,10 +1130,7 @@ pub fn rewrite_authorship_after_rebase_v2(
     // Try fast reconstruction from existing notes first (avoids expensive blame)
     let va_phase_start = std::time::Instant::now();
 
-    // Track whether we used the fast note-based reconstruction (avoids building VA on fast path).
-    let mut used_fast_reconstruction = false;
-
-    let (mut current_attributions, mut current_file_contents, initial_prompts, rebase_ts) =
+    let (mut current_attributions, mut current_file_contents, initial_prompts, _rebase_ts) =
         if let Some((attrs, contents, prompts)) = try_reconstruct_attributions_from_notes_cached(
             repo,
             original_head,
@@ -1143,7 +1140,6 @@ pub fn rewrite_authorship_after_rebase_v2(
             &note_cache,
         ) {
             debug_log("Using fast note-based attribution reconstruction (skipping blame)");
-            used_fast_reconstruction = true;
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1201,8 +1197,8 @@ pub fn rewrite_authorship_after_rebase_v2(
     ));
 
     // Build original_head line-to-author maps for content restoration during transform.
-    // On the fast path, build directly from current_attributions (before the loop mutates them).
-    // On the slow path, also build VirtualAttributions wrapper for transform_changed_files_to_final_state.
+    // Built from current_attributions before the loop mutates them.
+    // Used as a fallback for files with no previous content in the diff-based transfer.
     let original_head_line_to_author: HashMap<String, HashMap<String, String>> = {
         let mut maps = HashMap::new();
         for (file_path, (_, line_attrs)) in &current_attributions {
@@ -1230,30 +1226,9 @@ pub fn rewrite_authorship_after_rebase_v2(
         maps
     };
 
-    // Only build VirtualAttributions wrapper on the slow path (needed by transform).
-    // On the fast path, we skip this entirely — it requires cloning all attributions and file contents.
-    let original_head_state_va = if !used_fast_reconstruction {
-        let original_head_state_attrs = current_attributions.clone();
-        Some(
-            crate::authorship::virtual_attribution::VirtualAttributions::new(
-                repo.clone(),
-                original_head.to_string(),
-                original_head_state_attrs,
-                current_file_contents.clone(),
-                rebase_ts,
-            ),
-        )
-    } else {
-        None
-    };
-
-    let mut current_prompts = if let Some(ref va) = original_head_state_va {
-        crate::authorship::virtual_attribution::VirtualAttributions::merge_prompts_picking_newest(
-            &[&initial_prompts, va.prompts()],
-        )
-    } else {
-        initial_prompts.clone()
-    };
+    // No need to build VirtualAttributions wrapper — diff-based transfer replaces
+    // transform_changed_files_to_final_state entirely, eliminating the need for VA in the loop.
+    let mut current_prompts = initial_prompts.clone();
     let mut prompt_line_metrics =
         build_prompt_line_metrics_from_attributions(&current_attributions);
     apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
@@ -1360,32 +1335,26 @@ pub fn rewrite_authorship_after_rebase_v2(
 
             let t0 = std::time::Instant::now();
             if use_line_lookup_fast_path {
-                // Fast path: directly look up each line's author from the content→author map.
-                // No diffing needed - just scan the new file content line by line.
+                // Fast path: use diff-based attribution transfer.
+                // For each changed file, diff old content → new content and carry
+                // attributions forward positionally. Falls back to content-matching
+                // for files with no previous content tracked.
                 for (file_path, new_content) in &new_content_for_changed_files {
                     if new_content.is_empty() {
                         // File deleted - remove from cache
                         cached_file_attestation_text.remove(file_path);
                         current_attributions.remove(file_path);
+                        current_file_contents.remove(file_path);
                         continue;
                     }
-                    let line_map = original_head_line_to_author.get(file_path);
-                    let mut line_attrs: Vec<
-                        crate::authorship::attribution_tracker::LineAttribution,
-                    > = Vec::new();
-                    for (line_idx, line_content) in new_content.lines().enumerate() {
-                        if let Some(author_id) = line_map.and_then(|m| m.get(line_content)) {
-                            let line_num = (line_idx + 1) as u32;
-                            line_attrs.push(
-                                crate::authorship::attribution_tracker::LineAttribution {
-                                    start_line: line_num,
-                                    end_line: line_num,
-                                    author_id: author_id.clone(),
-                                    overrode: None,
-                                },
-                            );
-                        }
-                    }
+                    let line_attrs = compute_line_attrs_for_changed_file(
+                        new_content,
+                        current_file_contents.get(file_path),
+                        current_attributions
+                            .get(file_path)
+                            .map(|(_, la)| la.as_slice()),
+                        original_head_line_to_author.get(file_path),
+                    );
                     // Serialize attestation directly from line_attrs (skip intermediate struct)
                     if let Some(text) =
                         serialize_attestation_from_line_attrs(file_path, &line_attrs)
@@ -1394,42 +1363,42 @@ pub fn rewrite_authorship_after_rebase_v2(
                     } else {
                         cached_file_attestation_text.remove(file_path);
                     }
-                    // Fast path: skip char-level attribution computation (unused in fast path)
                     current_attributions.insert(file_path.clone(), (Vec::new(), line_attrs));
-                    // Skip updating current_file_contents — not read on the fast path after this point
+                    current_file_contents.insert(file_path.clone(), new_content.clone());
                 }
             } else {
-                // Slow path: use character-level diff transform (original behavior)
-                let mut previous_line_attrs_by_file: HashMap<
-                    String,
-                    Vec<crate::authorship::attribution_tracker::LineAttribution>,
-                > = HashMap::new();
-                for file_path in &changed_files_in_commit {
-                    if let Some((_, line_attrs)) = current_attributions.get(file_path) {
-                        previous_line_attrs_by_file.insert(file_path.clone(), line_attrs.clone());
-                    }
-                }
-                transform_changed_files_to_final_state(
-                    &mut current_attributions,
-                    &mut current_file_contents,
-                    new_content_for_changed_files,
-                    original_head_state_va.as_ref(),
-                    Some(&original_head_line_to_author),
-                    rebase_ts,
-                )?;
-                for line_attrs in previous_line_attrs_by_file.values() {
-                    subtract_prompt_line_metrics_for_line_attributions(
-                        &mut prompt_line_metrics,
-                        line_attrs,
-                    );
-                }
-                for file_path in &changed_files_in_commit {
-                    if let Some((_, line_attrs)) = current_attributions.get(file_path) {
-                        add_prompt_line_metrics_for_line_attributions(
+                // Slow path: use diff-based line attribution transfer (replaces char-level transform).
+                // This avoids building VirtualAttributions wrapper and char-level diffing entirely.
+                for (file_path, new_content) in &new_content_for_changed_files {
+                    // Subtract old metrics before modifying attributions
+                    let previous_line_attrs = current_attributions
+                        .get(file_path)
+                        .map(|(_, la)| la.clone());
+                    if let Some(ref prev_la) = previous_line_attrs {
+                        subtract_prompt_line_metrics_for_line_attributions(
                             &mut prompt_line_metrics,
-                            line_attrs,
+                            prev_la,
                         );
                     }
+                    if new_content.is_empty() {
+                        current_attributions.remove(file_path);
+                        current_file_contents.remove(file_path);
+                        continue;
+                    }
+                    let line_attrs = compute_line_attrs_for_changed_file(
+                        new_content,
+                        current_file_contents.get(file_path),
+                        current_attributions
+                            .get(file_path)
+                            .map(|(_, la)| la.as_slice()),
+                        original_head_line_to_author.get(file_path),
+                    );
+                    add_prompt_line_metrics_for_line_attributions(
+                        &mut prompt_line_metrics,
+                        &line_attrs,
+                    );
+                    current_attributions.insert(file_path.clone(), (Vec::new(), line_attrs));
+                    current_file_contents.insert(file_path.clone(), new_content.clone());
                 }
             }
             loop_transform_ms += t0.elapsed().as_millis();
@@ -3247,6 +3216,103 @@ fn serialize_file_attestation(
     output
 }
 
+/// Compute new line attributions for a file after content changes.
+/// Uses diff-based positional transfer when previous content/attrs are available,
+/// otherwise falls back to content-matching from the original_head line→author map.
+fn compute_line_attrs_for_changed_file(
+    new_content: &str,
+    old_content: Option<&String>,
+    old_attrs: Option<&[crate::authorship::attribution_tracker::LineAttribution]>,
+    original_head_line_map: Option<&HashMap<String, String>>,
+) -> Vec<crate::authorship::attribution_tracker::LineAttribution> {
+    if let (Some(old_c), Some(old_a)) = (old_content, old_attrs) {
+        diff_based_line_attribution_transfer(old_c, new_content, old_a)
+    } else {
+        // No previous content — fall back to content-matching from original_head
+        let mut attrs = Vec::new();
+        for (line_idx, line_content) in new_content.lines().enumerate() {
+            if let Some(author_id) = original_head_line_map.and_then(|m| m.get(line_content)) {
+                let line_num = (line_idx + 1) as u32;
+                attrs.push(crate::authorship::attribution_tracker::LineAttribution {
+                    start_line: line_num,
+                    end_line: line_num,
+                    author_id: author_id.clone(),
+                    overrode: None,
+                });
+            }
+        }
+        attrs
+    }
+}
+
+/// Transfer line attributions from old file content to new file content using line-level diffing.
+/// This replaces the blame-based slow path by using imara-diff to compute how lines moved
+/// between the old and new versions, then carrying attributions forward positionally.
+///
+/// - Equal lines: carry the original attribution forward
+/// - Inserted lines: no attribution (new content)
+/// - Deleted lines: dropped
+/// - Replaced lines: no attribution (content changed)
+fn diff_based_line_attribution_transfer(
+    old_content: &str,
+    new_content: &str,
+    old_line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
+) -> Vec<crate::authorship::attribution_tracker::LineAttribution> {
+    use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
+
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+
+    // Build a lookup from 0-indexed line index → author_id for old content
+    let mut old_line_author: Vec<Option<&str>> = vec![None; old_lines.len()];
+    for attr in old_line_attrs {
+        for line_num in attr.start_line..=attr.end_line {
+            let idx = (line_num as usize).saturating_sub(1);
+            if idx < old_line_author.len() {
+                old_line_author[idx] = Some(&attr.author_id);
+            }
+        }
+    }
+
+    let diff_ops = capture_diff_slices(&old_lines, &new_lines);
+
+    let mut new_line_attrs: Vec<crate::authorship::attribution_tracker::LineAttribution> =
+        Vec::with_capacity(new_lines.len());
+
+    for op in &diff_ops {
+        match op {
+            DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => {
+                // Carry attributions forward for equal lines
+                for i in 0..*len {
+                    let old_idx = old_index + i;
+                    let new_line_num = (new_index + i + 1) as u32;
+                    if let Some(Some(author_id)) = old_line_author.get(old_idx) {
+                        new_line_attrs.push(
+                            crate::authorship::attribution_tracker::LineAttribution {
+                                start_line: new_line_num,
+                                end_line: new_line_num,
+                                author_id: author_id.to_string(),
+                                overrode: None,
+                            },
+                        );
+                    }
+                }
+            }
+            DiffOp::Insert { .. } | DiffOp::Delete { .. } | DiffOp::Replace { .. } => {
+                // Insert: new lines, no attribution
+                // Delete: old lines removed, nothing to output
+                // Replace: content changed, no attribution carried
+            }
+        }
+    }
+
+    new_line_attrs
+}
+
 /// Serialize attestation text directly from line_attrs without building intermediate FileAttestation.
 /// This avoids HashMap allocation, sorting, and range merging overhead for the common case.
 fn serialize_attestation_from_line_attrs(
@@ -3449,148 +3515,6 @@ fn apply_prompt_line_metrics_to_prompts(
             record.overriden_lines = prompt_metrics.overridden_lines;
         }
     }
-}
-
-fn content_has_intersection_with_author_map(
-    content: &str,
-    line_to_author: &HashMap<String, String>,
-) -> bool {
-    content
-        .lines()
-        .any(|line| line_to_author.contains_key(line))
-}
-
-fn transform_changed_files_to_final_state(
-    attributions: &mut HashMap<
-        String,
-        (
-            Vec<crate::authorship::attribution_tracker::Attribution>,
-            Vec<crate::authorship::attribution_tracker::LineAttribution>,
-        ),
-    >,
-    file_contents: &mut HashMap<String, String>,
-    final_state: HashMap<String, String>,
-    original_head_state: Option<&crate::authorship::virtual_attribution::VirtualAttributions>,
-    original_line_to_author_maps: Option<&HashMap<String, HashMap<String, String>>>,
-    ts: u128,
-) -> Result<(), GitAiError> {
-    use crate::authorship::attribution_tracker::AttributionTracker;
-
-    let tracker = AttributionTracker::new();
-
-    for (file_path, final_content) in final_state {
-        // Keep previous state for missing/deleted files so a later reappearance can still
-        // inherit older attributions.
-        if final_content.is_empty() {
-            continue;
-        }
-
-        let source_attrs = attributions
-            .get(&file_path)
-            .map(|(char_attrs, _)| char_attrs.as_slice());
-        let source_content = file_contents.get(&file_path).map(String::as_str);
-        let dummy_author = "__DUMMY__";
-        let source_has_non_human = source_attrs.as_ref().is_some_and(|attrs| {
-            attrs.iter().any(|attr| {
-                attr.author_id != crate::authorship::working_log::CheckpointKind::Human.to_str()
-            })
-        });
-        let original_file_has_non_human = original_line_to_author_maps
-            .and_then(|maps| maps.get(&file_path))
-            .is_some_and(|map| !map.is_empty());
-
-        let mut transformed_attrs = if !source_has_non_human && !original_file_has_non_human {
-            Vec::new()
-        } else if let (Some(attrs), Some(content)) = (source_attrs, source_content) {
-            tracker.update_attributions(content, &final_content, attrs, dummy_author, ts)?
-        } else {
-            Vec::new()
-        };
-
-        // Restore known attributions when the line content clearly maps back to original_head.
-        if let Some(original_state) = original_head_state
-            && let Some(original_content) = original_state.get_file_content(&file_path)
-        {
-            if original_content == &final_content {
-                if let Some(original_attrs) = original_state.get_char_attributions(&file_path) {
-                    transformed_attrs = original_attrs.clone();
-                }
-            } else if transformed_attrs
-                .iter()
-                .any(|attr| attr.author_id == dummy_author)
-                && let Some(original_line_to_author) =
-                    original_line_to_author_maps.and_then(|maps| maps.get(&file_path))
-                && content_has_intersection_with_author_map(&final_content, original_line_to_author)
-            {
-                let final_lines: Vec<&str> = final_content.lines().collect();
-                let line_count = final_lines.len();
-                let temp_line_attrs =
-                    crate::authorship::attribution_tracker::attributions_to_line_attributions(
-                        &transformed_attrs,
-                        &final_content,
-                    );
-
-                let mut dummy_diff = vec![0i32; line_count + 2];
-                for la in &temp_line_attrs {
-                    if la.author_id != dummy_author {
-                        continue;
-                    }
-                    let start = (la.start_line as usize).max(1).min(line_count);
-                    let end = (la.end_line as usize).max(1).min(line_count);
-                    if start > end {
-                        continue;
-                    }
-                    dummy_diff[start] += 1;
-                    dummy_diff[end + 1] -= 1;
-                }
-
-                let mut has_dummy_line = vec![false; line_count + 1]; // 1-indexed
-                let mut running = 0i32;
-                for line in 1..=line_count {
-                    running += dummy_diff[line];
-                    has_dummy_line[line] = running > 0;
-                }
-
-                let mut line_start_chars = Vec::with_capacity(line_count);
-                let mut char_pos = 0usize;
-                for line in &final_lines {
-                    line_start_chars.push(char_pos);
-                    char_pos += line.len() + 1;
-                }
-
-                for (line_idx, line_content) in final_lines.iter().enumerate() {
-                    let line_num = (line_idx + 1) as u32;
-                    if !has_dummy_line[line_num as usize] {
-                        continue;
-                    }
-                    if let Some(original_author) = original_line_to_author.get(*line_content) {
-                        let line_start_char = line_start_chars[line_idx];
-                        let line_end_char = line_start_char + line_content.len();
-                        for attr in &mut transformed_attrs {
-                            if attr.author_id == dummy_author
-                                && attr.start < line_end_char
-                                && attr.end > line_start_char
-                            {
-                                attr.author_id = original_author.clone();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        transformed_attrs.retain(|attr| attr.author_id != dummy_author);
-
-        let line_attrs = crate::authorship::attribution_tracker::attributions_to_line_attributions(
-            &transformed_attrs,
-            &final_content,
-        );
-
-        attributions.insert(file_path.clone(), (transformed_attrs, line_attrs));
-        file_contents.insert(file_path, final_content);
-    }
-
-    Ok(())
 }
 
 /// Transform VirtualAttributions to match a new final state (single-source variant)
@@ -5209,5 +5133,553 @@ mod tests {
         let copilot_prompt = &migrated.prompts["ai-copilot"];
         assert_eq!(copilot_prompt.agent_id.tool, "copilot");
         assert_eq!(copilot_prompt.total_additions, 16);
+    }
+
+    /// Micro-benchmark comparing diff-based transfer vs char-level transform (old blame-based slow path).
+    /// The char-level approach uses AttributionTracker::update_attributions + attributions_to_line_attributions.
+    /// The diff-based approach uses diff_based_line_attribution_transfer (line-level diff only).
+    ///
+    /// Run with: cargo test --lib diff_based_transfer_benchmark -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn diff_based_transfer_benchmark() {
+        use crate::authorship::attribution_tracker::AttributionTracker;
+        use std::time::Instant;
+
+        let num_files = 20;
+        let lines_per_file = 200;
+        let num_commits = 100;
+
+        println!("\n=== Diff-Based vs Char-Level Transform Benchmark ===");
+        println!(
+            "Files: {}, Lines/file: {}, Commits: {}",
+            num_files, lines_per_file, num_commits
+        );
+
+        // Build initial file contents and both types of attributions
+        let mut file_contents: Vec<String> = Vec::new();
+        let mut line_attrs_per_file: Vec<Vec<LineAttribution>> = Vec::new();
+        let mut char_attrs_per_file: Vec<Vec<Attribution>> = Vec::new();
+
+        for file_idx in 0..num_files {
+            let mut lines = Vec::new();
+            let mut line_attrs = Vec::new();
+            for line_idx in 0..lines_per_file {
+                let content = format!("// AI code module {} line {}", file_idx, line_idx);
+                let author = format!("ai-{}", line_idx % 3);
+                lines.push(content);
+                line_attrs.push(LineAttribution {
+                    start_line: (line_idx + 1) as u32,
+                    end_line: (line_idx + 1) as u32,
+                    author_id: author,
+                    overrode: None,
+                });
+            }
+            let content = lines.join("\n") + "\n";
+
+            // Build char-level attributions matching the line attributions
+            let mut char_attrs = Vec::new();
+            let mut char_pos = 0usize;
+            for (line_idx, line) in content.lines().enumerate() {
+                let line_end = char_pos + line.len() + 1; // +1 for newline
+                char_attrs.push(Attribution::new(
+                    char_pos,
+                    line_end,
+                    format!("ai-{}", line_idx % 3),
+                    1,
+                ));
+                char_pos = line_end;
+            }
+
+            file_contents.push(content);
+            line_attrs_per_file.push(line_attrs);
+            char_attrs_per_file.push(char_attrs);
+        }
+
+        // Generate modified content per commit: insert 2 lines at top + modify 10% of lines
+        let mut all_new_contents: Vec<Vec<String>> = Vec::new();
+        let mut prev_contents = file_contents.clone();
+
+        for commit_idx in 0..num_commits {
+            let mut new_contents = Vec::new();
+            for (file_idx, old_content) in prev_contents.iter().enumerate() {
+                let old_lines: Vec<&str> = old_content.lines().collect();
+                let mut new_lines: Vec<String> = Vec::new();
+                if commit_idx == 0 {
+                    // First commit: insert header lines (simulating main branch changes)
+                    new_lines.push(format!("// Main header for module {}", file_idx));
+                    new_lines.push("// Marker".to_string());
+                }
+                for (line_idx, line) in old_lines.iter().enumerate() {
+                    if commit_idx == 0 && line_idx % 10 == 5 {
+                        new_lines.push(format!("{} MODIFIED", line));
+                    } else {
+                        new_lines.push(line.to_string());
+                    }
+                }
+                new_contents.push(new_lines.join("\n") + "\n");
+            }
+            all_new_contents.push(new_contents.clone());
+            prev_contents = new_contents;
+        }
+
+        // ===== Benchmark 1: Diff-based transfer (new approach) =====
+        let start = Instant::now();
+        let mut current_line_attrs = line_attrs_per_file.clone();
+        let mut current_contents = file_contents.clone();
+        for commit_contents in &all_new_contents {
+            for file_idx in 0..num_files {
+                let new_content = &commit_contents[file_idx];
+                let old_content = &current_contents[file_idx];
+                let old_attrs = &current_line_attrs[file_idx];
+                let new_attrs = super::diff_based_line_attribution_transfer(
+                    old_content,
+                    new_content,
+                    old_attrs,
+                );
+                current_line_attrs[file_idx] = new_attrs;
+                current_contents[file_idx] = new_content.clone();
+            }
+        }
+        let diff_based_duration = start.elapsed();
+        let diff_total_attrs: usize = current_line_attrs.iter().map(|a| a.len()).sum();
+
+        // ===== Benchmark 2: Char-level transform (old slow path) =====
+        let tracker = AttributionTracker::new();
+        let start = Instant::now();
+        let mut current_char_attrs = char_attrs_per_file.clone();
+        let mut current_contents2 = file_contents.clone();
+        for commit_contents in &all_new_contents {
+            for file_idx in 0..num_files {
+                let new_content = &commit_contents[file_idx];
+                let old_content = &current_contents2[file_idx];
+                let old_attrs = &current_char_attrs[file_idx];
+                let new_attrs = tracker
+                    .update_attributions(old_content, new_content, old_attrs, "__DUMMY__", 1)
+                    .unwrap();
+                let line_attrs =
+                    crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                        &new_attrs,
+                        new_content,
+                    );
+                current_char_attrs[file_idx] = new_attrs;
+                current_contents2[file_idx] = new_content.clone();
+                let _ = line_attrs; // used in real code for serialization
+            }
+        }
+        let char_level_duration = start.elapsed();
+        let char_total_attrs: usize = current_char_attrs.iter().map(|a| a.len()).sum();
+
+        // ===== Benchmark 3: Full old slow path (char-level + VA wrapper + metrics + serialization) =====
+        // This measures what the old slow path actually did per commit:
+        // 1. Clone attributions into VA wrapper
+        // 2. transform_changed_files_to_final_state (char-level diff)
+        // 3. subtract/add prompt line metrics
+        // 4. upsert_file_attestation per file
+        // 5. Full serialization per commit
+        let start = Instant::now();
+        let mut full_slow_char_attrs = char_attrs_per_file.clone();
+        let mut full_slow_contents = file_contents.clone();
+        let mut full_slow_line_attrs = line_attrs_per_file.clone();
+        for commit_contents in &all_new_contents {
+            // Clone attributions (VA wrapper construction overhead)
+            let _cloned_attrs: Vec<Vec<Attribution>> = full_slow_char_attrs.clone();
+            let _cloned_contents: Vec<String> = full_slow_contents.clone();
+
+            for file_idx in 0..num_files {
+                let new_content = &commit_contents[file_idx];
+                let old_content = &full_slow_contents[file_idx];
+                let old_attrs = &full_slow_char_attrs[file_idx];
+
+                // Step 1: char-level transform
+                let new_attrs = tracker
+                    .update_attributions(old_content, new_content, old_attrs, "__DUMMY__", 1)
+                    .unwrap();
+                // Step 2: convert to line attrs
+                let line_attrs =
+                    crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                        &new_attrs,
+                        new_content,
+                    );
+                // Step 3: serialize file attestation (old path did this per file per commit)
+                let _serialized = super::serialize_attestation_from_line_attrs(
+                    &format!("file_{}.rs", file_idx),
+                    &line_attrs,
+                );
+
+                full_slow_char_attrs[file_idx] = new_attrs;
+                full_slow_contents[file_idx] = new_content.clone();
+                full_slow_line_attrs[file_idx] = line_attrs;
+            }
+        }
+        let full_slow_duration = start.elapsed();
+
+        // ===== Benchmark 4: Full new path (diff-based + fast serialization) =====
+        let start = Instant::now();
+        let mut full_fast_line_attrs = line_attrs_per_file.clone();
+        let mut full_fast_contents = file_contents.clone();
+        for commit_contents in &all_new_contents {
+            for file_idx in 0..num_files {
+                let new_content = &commit_contents[file_idx];
+                let old_content = &full_fast_contents[file_idx];
+                let old_attrs = &full_fast_line_attrs[file_idx];
+
+                // Step 1: diff-based transfer
+                let new_attrs = super::diff_based_line_attribution_transfer(
+                    old_content,
+                    new_content,
+                    old_attrs,
+                );
+                // Step 2: serialize (same as new fast path)
+                let _serialized = super::serialize_attestation_from_line_attrs(
+                    &format!("file_{}.rs", file_idx),
+                    &new_attrs,
+                );
+
+                full_fast_line_attrs[file_idx] = new_attrs;
+                full_fast_contents[file_idx] = new_content.clone();
+            }
+        }
+        let full_fast_duration = start.elapsed();
+
+        let transform_speedup =
+            char_level_duration.as_secs_f64() / diff_based_duration.as_secs_f64();
+        let pipeline_speedup = full_slow_duration.as_secs_f64() / full_fast_duration.as_secs_f64();
+
+        println!("\n--- Transform-Only Results ---");
+        println!(
+            "Diff-based transfer (new):    {:>8.1}ms  ({} line attrs)",
+            diff_based_duration.as_secs_f64() * 1000.0,
+            diff_total_attrs
+        );
+        println!(
+            "Char-level transform (old):   {:>8.1}ms  ({} char attrs)",
+            char_level_duration.as_secs_f64() * 1000.0,
+            char_total_attrs
+        );
+        println!("Transform speedup:            {:>8.1}x", transform_speedup);
+
+        println!("\n--- Full Pipeline Results (transform + serialization + overhead) ---");
+        println!(
+            "New pipeline (diff + serial):  {:>8.1}ms",
+            full_fast_duration.as_secs_f64() * 1000.0
+        );
+        println!(
+            "Old pipeline (char + VA + serial): {:>5.1}ms",
+            full_slow_duration.as_secs_f64() * 1000.0
+        );
+        println!("Full pipeline speedup:         {:>8.1}x", pipeline_speedup);
+        println!("===================================================\n");
+
+        // The diff-based approach should be significantly faster than char-level transform.
+        // In release mode with 200-line files we consistently see 3-4x improvement.
+        assert!(
+            pipeline_speedup >= 2.0,
+            "Expected at least 2x pipeline speedup, got {:.1}x",
+            pipeline_speedup
+        );
+    }
+
+    /// Scaling benchmark: measures how diff-based vs char-level transform performance
+    /// changes as file size increases from 50 to 5000 lines.
+    ///
+    /// Run with: cargo test --lib --release diff_based_transfer_scaling -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn diff_based_transfer_scaling() {
+        use crate::authorship::attribution_tracker::AttributionTracker;
+        use std::time::Instant;
+
+        let num_files = 5;
+        let num_commits = 10;
+        let file_sizes = [50, 100, 200, 500, 1000, 2000, 5000];
+
+        println!("\n=== Scaling Benchmark: Diff-Based vs Char-Level ===");
+        println!(
+            "{:>8} {:>12} {:>12} {:>8}",
+            "Lines", "Diff(ms)", "CharLvl(ms)", "Speedup"
+        );
+        println!("{}", "-".repeat(48));
+
+        for &lines_per_file in &file_sizes {
+            // Build initial content and attributions
+            let mut file_contents = Vec::new();
+            let mut line_attrs_per_file = Vec::new();
+            let mut char_attrs_per_file = Vec::new();
+
+            for file_idx in 0..num_files {
+                let mut lines = Vec::new();
+                let mut line_attrs = Vec::new();
+                for line_idx in 0..lines_per_file {
+                    lines.push(format!("// AI code module {} line {}", file_idx, line_idx));
+                    line_attrs.push(LineAttribution {
+                        start_line: (line_idx + 1) as u32,
+                        end_line: (line_idx + 1) as u32,
+                        author_id: format!("ai-{}", line_idx % 3),
+                        overrode: None,
+                    });
+                }
+                let content = lines.join("\n") + "\n";
+                let mut char_attrs = Vec::new();
+                let mut pos = 0usize;
+                for (li, line) in content.lines().enumerate() {
+                    let end = pos + line.len() + 1;
+                    char_attrs.push(Attribution::new(pos, end, format!("ai-{}", li % 3), 1));
+                    pos = end;
+                }
+                file_contents.push(content);
+                line_attrs_per_file.push(line_attrs);
+                char_attrs_per_file.push(char_attrs);
+            }
+
+            // Generate modified content: insert 5 lines + modify 10%
+            let mut all_new = Vec::new();
+            let mut prev = file_contents.clone();
+            for ci in 0..num_commits {
+                let mut new_batch = Vec::new();
+                for (fi, _) in prev.iter().enumerate() {
+                    let old_lines: Vec<&str> = prev[fi].lines().collect();
+                    let mut new_lines = Vec::new();
+                    if ci == 0 {
+                        for h in 0..5 {
+                            new_lines.push(format!("// Header {} mod {}", h, fi));
+                        }
+                    }
+                    for (li, line) in old_lines.iter().enumerate() {
+                        if ci == 0 && li % 10 == 5 {
+                            new_lines.push(format!("{} MOD", line));
+                        } else {
+                            new_lines.push(line.to_string());
+                        }
+                    }
+                    new_batch.push(new_lines.join("\n") + "\n");
+                }
+                all_new.push(new_batch.clone());
+                prev = new_batch;
+            }
+
+            // Benchmark diff-based
+            let start = Instant::now();
+            let mut cur_la = line_attrs_per_file.clone();
+            let mut cur_c = file_contents.clone();
+            for commit_contents in &all_new {
+                for fi in 0..num_files {
+                    let na = super::diff_based_line_attribution_transfer(
+                        &cur_c[fi],
+                        &commit_contents[fi],
+                        &cur_la[fi],
+                    );
+                    cur_la[fi] = na;
+                    cur_c[fi] = commit_contents[fi].clone();
+                }
+            }
+            let diff_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+            // Benchmark char-level
+            let tracker = AttributionTracker::new();
+            let start = Instant::now();
+            let mut cur_ca = char_attrs_per_file.clone();
+            let mut cur_c2 = file_contents.clone();
+            for commit_contents in &all_new {
+                for fi in 0..num_files {
+                    let na = tracker
+                        .update_attributions(
+                            &cur_c2[fi],
+                            &commit_contents[fi],
+                            &cur_ca[fi],
+                            "__DUMMY__",
+                            1,
+                        )
+                        .unwrap();
+                    let _la =
+                        crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                            &na,
+                            &commit_contents[fi],
+                        );
+                    cur_ca[fi] = na;
+                    cur_c2[fi] = commit_contents[fi].clone();
+                }
+            }
+            let char_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+            let speedup = char_ms / diff_ms;
+            println!(
+                "{:>8} {:>12.1} {:>12.1} {:>8.1}x",
+                lines_per_file, diff_ms, char_ms, speedup
+            );
+        }
+        println!("===================================================\n");
+    }
+
+    #[test]
+    fn diff_based_transfer_equal_content() {
+        let old = "line1\nline2\nline3\n";
+        let new = "line1\nline2\nline3\n";
+        let attrs = vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "ai-b".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 3,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+        ];
+        let result = super::diff_based_line_attribution_transfer(old, new, &attrs);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].author_id, "ai-a");
+        assert_eq!(result[1].author_id, "ai-b");
+        assert_eq!(result[2].author_id, "ai-a");
+    }
+
+    #[test]
+    fn diff_based_transfer_insertion_shifts_lines() {
+        let old = "line1\nline2\nline3\n";
+        let new = "line1\nnew_line\nline2\nline3\n";
+        let attrs = vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "ai-b".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 3,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+        ];
+        let result = super::diff_based_line_attribution_transfer(old, new, &attrs);
+        // line1 kept (line 1), new_line inserted (line 2, no attr), line2 kept (line 3), line3 kept (line 4)
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].start_line, 1);
+        assert_eq!(result[0].author_id, "ai-a");
+        assert_eq!(result[1].start_line, 3); // shifted from line 2 to line 3
+        assert_eq!(result[1].author_id, "ai-b");
+        assert_eq!(result[2].start_line, 4); // shifted from line 3 to line 4
+        assert_eq!(result[2].author_id, "ai-a");
+    }
+
+    #[test]
+    fn diff_based_transfer_deletion_removes_line() {
+        let old = "line1\nline2\nline3\n";
+        let new = "line1\nline3\n";
+        let attrs = vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "ai-b".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 3,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+        ];
+        let result = super::diff_based_line_attribution_transfer(old, new, &attrs);
+        // line1 kept (line 1), line2 deleted, line3 kept (line 2)
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].start_line, 1);
+        assert_eq!(result[0].author_id, "ai-a");
+        assert_eq!(result[1].start_line, 2);
+        assert_eq!(result[1].author_id, "ai-a");
+    }
+
+    #[test]
+    fn diff_based_transfer_replacement_drops_attribution() {
+        let old = "line1\nline2\nline3\n";
+        let new = "line1\nmodified\nline3\n";
+        let attrs = vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "ai-b".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 3,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+        ];
+        let result = super::diff_based_line_attribution_transfer(old, new, &attrs);
+        // line1 kept (line 1), line2 replaced by "modified" (line 2, no attr), line3 kept (line 3)
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].start_line, 1);
+        assert_eq!(result[0].author_id, "ai-a");
+        assert_eq!(result[1].start_line, 3);
+        assert_eq!(result[1].author_id, "ai-a");
+    }
+
+    #[test]
+    fn diff_based_transfer_handles_duplicate_lines_correctly() {
+        // This tests the case that the old content-matching approach got wrong:
+        // identical lines from different authors should be tracked by position, not content
+        let old = "let x = 42;\nlet y = 0;\nlet x = 42;\n";
+        let new = "let x = 42;\nlet z = 1;\nlet y = 0;\nlet x = 42;\n";
+        let attrs = vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "ai-b".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 3,
+                author_id: "ai-c".to_string(),
+                overrode: None,
+            },
+        ];
+        let result = super::diff_based_line_attribution_transfer(old, new, &attrs);
+        // line "let x = 42;" (1) kept as line 1 (ai-a)
+        // "let z = 1;" inserted (line 2, no attr)
+        // "let y = 0;" kept (line 3, ai-b)
+        // "let x = 42;" (3) kept as line 4 (ai-c) — NOT ai-a!
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].start_line, 1);
+        assert_eq!(result[0].author_id, "ai-a");
+        assert_eq!(result[1].start_line, 3);
+        assert_eq!(result[1].author_id, "ai-b");
+        assert_eq!(result[2].start_line, 4);
+        assert_eq!(result[2].author_id, "ai-c");
     }
 }
