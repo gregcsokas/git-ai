@@ -3391,6 +3391,12 @@ impl ActorDaemonCoordinator {
             let _ = tx.take();
         }
         self.shutdown_notify.notify_waiters();
+        // Hold the condvar mutex so notify_all cannot race with the
+        // check-then-wait sequence in daemon_update_check_loop.
+        let _guard = self
+            .shutdown_condvar_mutex
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         self.shutdown_condvar.notify_all();
     }
 
@@ -6947,6 +6953,9 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
                 .shutdown_condvar_mutex
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            if coordinator.is_shutting_down() {
+                return;
+            }
             let _ = coordinator
                 .shutdown_condvar
                 .wait_timeout(guard, std::time::Duration::from_secs(interval));
