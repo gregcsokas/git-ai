@@ -1276,7 +1276,7 @@ pub fn rewrite_authorship_after_rebase_v2(
         })
         .collect();
 
-    let mut current_authorship_log = build_authorship_log_from_state(
+    let current_authorship_log = build_authorship_log_from_state(
         original_head,
         &current_prompts,
         &current_attributions,
@@ -1320,7 +1320,6 @@ pub fn rewrite_authorship_after_rebase_v2(
     let loop_start = std::time::Instant::now();
     let mut loop_transform_ms = 0u128;
     let mut loop_serialize_ms = 0u128;
-    let mut loop_attestation_ms = 0u128;
     let mut loop_metrics_ms = 0u128;
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
         debug_log(&format!(
@@ -1401,21 +1400,6 @@ pub fn rewrite_authorship_after_rebase_v2(
             let t0 = std::time::Instant::now();
             apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
             loop_metrics_ms += t0.elapsed().as_millis();
-
-            // Update authorship_log with attestations for files touched by this commit.
-            let t0 = std::time::Instant::now();
-            for file_path in &changed_files_in_commit {
-                upsert_file_attestation(
-                    &mut current_authorship_log,
-                    file_path,
-                    current_attributions
-                        .get(file_path)
-                        .map(|(_, line_attrs)| line_attrs.as_slice())
-                        .unwrap_or(&[]),
-                    existing_files.contains(file_path),
-                );
-            }
-            loop_attestation_ms += t0.elapsed().as_millis();
         }
 
         // Serialize note for this commit using fast cached assembly.
@@ -1471,7 +1455,6 @@ pub fn rewrite_authorship_after_rebase_v2(
     ));
     timing_phases.push(("  loop:transform".to_string(), loop_transform_ms));
     timing_phases.push(("  loop:serialize".to_string(), loop_serialize_ms));
-    timing_phases.push(("  loop:attestation".to_string(), loop_attestation_ms));
     timing_phases.push(("  loop:metrics".to_string(), loop_metrics_ms));
 
     let phase_start = std::time::Instant::now();
@@ -3443,25 +3426,6 @@ fn diff_based_line_attribution_transfer(
     }
 
     new_line_attrs
-}
-
-fn upsert_file_attestation(
-    authorship_log: &mut AuthorshipLog,
-    file_path: &str,
-    line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
-    file_exists: bool,
-) {
-    authorship_log
-        .attestations
-        .retain(|attestation| attestation.file_path != file_path);
-    if !file_exists {
-        return;
-    }
-    if let Some(file_attestation) =
-        build_file_attestation_from_line_attributions(file_path, line_attrs)
-    {
-        authorship_log.attestations.push(file_attestation);
-    }
 }
 
 fn build_authorship_log_from_state(

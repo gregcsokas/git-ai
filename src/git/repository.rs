@@ -3108,13 +3108,11 @@ pub fn exec_git_stdin_with_profile(
 
     let output = child.wait_with_output().map_err(GitAiError::IoError)?;
 
-    if let Some(handle) = stdin_handle {
-        if let Err(e) = handle.join().expect("stdin writer thread panicked") {
-            // Broken pipe is expected if the child exits before consuming all input
-            if e.kind() != std::io::ErrorKind::BrokenPipe {
-                return Err(GitAiError::IoError(e));
-            }
-        }
+    if let Some(handle) = stdin_handle
+        && let Err(e) = handle.join().expect("stdin writer thread panicked")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(GitAiError::IoError(e));
     }
 
     if !output.status.success() {
@@ -3184,12 +3182,11 @@ pub fn exec_git_stdin_with_env_with_profile(
 
     let output = child.wait_with_output().map_err(GitAiError::IoError)?;
 
-    if let Some(handle) = stdin_handle {
-        if let Err(e) = handle.join().expect("stdin writer thread panicked") {
-            if e.kind() != std::io::ErrorKind::BrokenPipe {
-                return Err(GitAiError::IoError(e));
-            }
-        }
+    if let Some(handle) = stdin_handle
+        && let Err(e) = handle.join().expect("stdin writer thread panicked")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(GitAiError::IoError(e));
     }
 
     if !output.status.success() {
