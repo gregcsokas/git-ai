@@ -20,6 +20,9 @@ on:
 env:
   GIT_AI_DEBUG: "1"
   CARGO_INCREMENTAL: "0"
+  # Force wrapper mode (not async/daemon) so post-commit hooks fire
+  # synchronously and attribution notes are written in-process.
+  GIT_AI_ASYNC_MODE: "false"
 
 jobs:
   # ── Version Resolution ─────────────────────────────────────────────────────
