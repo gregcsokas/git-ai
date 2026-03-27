@@ -1273,26 +1273,8 @@ pub fn rewrite_authorship_after_rebase_v2(
     // This is possible when we successfully reconstructed from notes.
     let use_line_lookup_fast_path = !original_head_line_to_author.is_empty();
 
-    // For the fast path, pre-serialize the metadata JSON template once (only base_commit_sha changes).
     // Cache per-file attestation text so we only re-serialize changed files.
     let mut cached_file_attestation_text: HashMap<String, String> = HashMap::new();
-    // Pre-split the metadata JSON template at the placeholder for O(1) per-commit assembly.
-    let metadata_json_template_parts: Option<(String, String)> = if use_line_lookup_fast_path {
-        let mut template_meta = current_authorship_log.metadata.clone();
-        template_meta.base_commit_sha = "BASE_COMMIT_SHA_PLACEHOLDER".to_string();
-        template_meta.prompts = flatten_prompts_for_metadata(&current_prompts);
-        serde_json::to_string_pretty(&template_meta)
-            .ok()
-            .map(|template| {
-                let parts: Vec<&str> = template.splitn(2, "BASE_COMMIT_SHA_PLACEHOLDER").collect();
-                (
-                    parts[0].to_string(),
-                    parts.get(1).unwrap_or(&"").to_string(),
-                )
-            })
-    } else {
-        None
-    };
 
     // Pre-cache attestation text for all files in the initial state
     if use_line_lookup_fast_path {
@@ -1340,10 +1322,27 @@ pub fn rewrite_authorship_after_rebase_v2(
                 // attributions forward positionally. Falls back to content-matching
                 // for files with no previous content tracked.
                 for (file_path, new_content) in &new_content_for_changed_files {
+                    // Subtract old metrics before modifying attributions
+                    let previous_line_attrs = current_attributions
+                        .get(file_path)
+                        .map(|(_, la)| la.clone());
+                    if let Some(ref prev_la) = previous_line_attrs {
+                        subtract_prompt_line_metrics_for_line_attributions(
+                            &mut prompt_line_metrics,
+                            prev_la,
+                        );
+                    }
                     if new_content.is_empty() {
                         // File deleted - remove from serialization cache but keep
                         // attributions and contents so a later reappearance can
                         // inherit them via diff-based positional transfer.
+                        // Re-add subtracted metrics to preserve balance.
+                        if let Some(ref prev_la) = previous_line_attrs {
+                            add_prompt_line_metrics_for_line_attributions(
+                                &mut prompt_line_metrics,
+                                prev_la,
+                            );
+                        }
                         cached_file_attestation_text.remove(file_path);
                         continue;
                     }
@@ -1354,6 +1353,10 @@ pub fn rewrite_authorship_after_rebase_v2(
                             .get(file_path)
                             .map(|(_, la)| la.as_slice()),
                         original_head_line_to_author.get(file_path),
+                    );
+                    add_prompt_line_metrics_for_line_attributions(
+                        &mut prompt_line_metrics,
+                        &line_attrs,
                     );
                     // Serialize attestation directly from line_attrs (skip intermediate struct)
                     if let Some(text) =
@@ -1412,11 +1415,14 @@ pub fn rewrite_authorship_after_rebase_v2(
             }
             loop_transform_ms += t0.elapsed().as_millis();
 
-            if !use_line_lookup_fast_path {
+            // Update prompt metrics for both paths (metrics are now tracked on fast path too).
+            {
                 let t0 = std::time::Instant::now();
                 apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
                 loop_metrics_ms += t0.elapsed().as_millis();
+            }
 
+            if !use_line_lookup_fast_path {
                 // Update only files touched by this commit (slow path updates authorship_log).
                 let t0 = std::time::Instant::now();
                 for file_path in &changed_files_in_commit {
@@ -1436,9 +1442,10 @@ pub fn rewrite_authorship_after_rebase_v2(
 
         let t0 = std::time::Instant::now();
         let authorship_json = if use_line_lookup_fast_path {
-            // Fast serialization: assemble note from cached per-file text + templated metadata
+            // Fast serialization: assemble note from cached per-file text + per-commit metadata
             let has_attestations = cached_file_attestation_text.values().any(|v| !v.is_empty());
-            if has_attestations || metadata_json_template_parts.is_some() {
+            let has_prompts = !current_prompts.is_empty();
+            if has_attestations || has_prompts {
                 let mut output = String::with_capacity(4096);
                 // Write cached attestation sections (only existing files)
                 for (file_path, text) in &cached_file_attestation_text {
@@ -1447,10 +1454,12 @@ pub fn rewrite_authorship_after_rebase_v2(
                     }
                 }
                 output.push_str("---\n");
-                if let Some((ref prefix, ref suffix)) = metadata_json_template_parts {
-                    output.push_str(prefix);
-                    output.push_str(new_commit);
-                    output.push_str(suffix);
+                // Serialize metadata with current prompt metrics (updated per commit)
+                let mut commit_meta = current_authorship_log.metadata.clone();
+                commit_meta.base_commit_sha = new_commit.clone();
+                commit_meta.prompts = flatten_prompts_for_metadata(&current_prompts);
+                if let Ok(meta_json) = serde_json::to_string_pretty(&commit_meta) {
+                    output.push_str(&meta_json);
                 }
                 Some(output)
             } else {
