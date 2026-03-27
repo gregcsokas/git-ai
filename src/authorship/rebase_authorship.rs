@@ -921,7 +921,7 @@ fn try_reconstruct_attributions_from_notes_cached(
 
         if !line_attrs.is_empty() {
             line_attrs.sort_by_key(|a| a.start_line);
-            // Skip char-level attribution computation — only line_attrs are used in the fast path
+            // Skip char-level attribution computation — only line_attrs are used for rebase
             attributions.insert(file_path.clone(), (Vec::new(), line_attrs));
         }
     }
@@ -5117,7 +5117,7 @@ mod tests {
                     new_content,
                     old_attrs,
                 );
-                // Step 2: serialize (same as new fast path)
+                // Step 2: serialize attestation from line attributions
                 let _serialized = super::build_file_attestation_from_line_attributions(
                     &format!("file_{}.rs", file_idx),
                     &new_attrs,

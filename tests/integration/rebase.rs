@@ -1517,9 +1517,9 @@ fn test_rebase_preserves_custom_attributes_from_config() {
     feature_file.assert_lines_and_blame(crate::lines!["// AI feature code".ai()]);
 }
 
-/// Regression test: prompt metrics (accepted_lines) must update per commit on the fast
-/// path, not be frozen from the initial state. When commit 1 has 2 AI lines and commit 2
-/// adds 2 more (total 4), the rebased notes should reflect different accepted_lines.
+/// Regression test: prompt metrics (accepted_lines) must update per commit, not be frozen
+/// from the initial state. When commit 1 has 2 AI lines and commit 2 adds 2 more
+/// (total 4), the rebased notes should reflect different accepted_lines.
 #[test]
 fn test_rebase_prompt_metrics_update_per_commit() {
     let repo = TestRepo::new();
