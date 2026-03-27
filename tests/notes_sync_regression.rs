@@ -102,7 +102,8 @@ worktree_test_wrappers! {
 
 worktree_test_wrappers! {
     fn notes_sync_clone_relative_target_from_external_cwd_fetches_authorship_notes() {
-        if TestRepo::git_mode() != GitTestMode::Daemon {
+        // Hooks mode can't intercept clone (no repo exists to have hooks installed)
+        if TestRepo::git_mode() == GitTestMode::Hooks {
             return;
         }
 
@@ -162,6 +163,83 @@ worktree_test_wrappers! {
         assert!(
             cloned_note.is_some(),
             "cloned repository should have fetched authorship notes for commit {}",
+            seed_sha
+        );
+    }
+}
+
+// Regression test: clone from a non-repo directory is the exact scenario that
+// triggered the wrapper state timeout bug. The wrapper has worktree=None so no
+// wrapper state is sent; the daemon must handle notes sync purely via trace2 events.
+worktree_test_wrappers! {
+    fn notes_sync_clone_from_non_repo_directory_fetches_authorship_notes() {
+        // Hooks mode can't intercept clone (no repo exists to have hooks installed)
+        if TestRepo::git_mode() == GitTestMode::Hooks {
+            return;
+        }
+
+        let (local, upstream) = TestRepo::new_with_remote();
+
+        fs::write(local.path().join("non-repo-clone-seed.txt"), "seed\n")
+            .expect("failed to write seed file");
+        local
+            .git_og(&["add", "non-repo-clone-seed.txt"])
+            .expect("add should succeed");
+        local
+            .git_og(&["commit", "-m", "seed commit"])
+            .expect("seed commit should succeed");
+
+        let seed_sha = local
+            .git_og(&["rev-parse", "HEAD"])
+            .expect("rev-parse should succeed")
+            .trim()
+            .to_string();
+
+        local
+            .git_og(&[
+                "notes",
+                "--ref=ai",
+                "add",
+                "-m",
+                "non-repo-clone-seed-note",
+                seed_sha.as_str(),
+            ])
+            .expect("adding notes should succeed");
+        local
+            .git_og(&["push", "-u", "origin", "HEAD"])
+            .expect("pushing branch should succeed");
+        local
+            .git_og(&["push", "origin", "refs/notes/ai"])
+            .expect("pushing notes should succeed");
+
+        // Clone from a non-repo directory (not inside any git repository).
+        // This is the common production scenario and the one that triggers the
+        // wrapper state timeout because the wrapper can't determine a worktree.
+        let external_cwd = unique_temp_path("notes-sync-clone-non-repo-cwd");
+        let _ = fs::remove_dir_all(&external_cwd);
+        fs::create_dir_all(&external_cwd).expect("failed to create non-repo cwd");
+
+        let clone_target = "cloned-repo";
+        let upstream_str = upstream.path().to_string_lossy().to_string();
+
+        local
+            .git_from_working_dir(
+                &external_cwd,
+                &["clone", upstream_str.as_str(), clone_target],
+            )
+            .expect("clone from non-repo cwd should succeed");
+
+        let clone_dir = external_cwd.join(clone_target);
+        assert!(
+            clone_dir.exists(),
+            "clone target should exist at {}",
+            clone_dir.display()
+        );
+
+        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha, TestRepo::git_mode());
+        assert!(
+            cloned_note.is_some(),
+            "cloned repository should have fetched authorship notes for commit {} (clone from non-repo directory)",
             seed_sha
         );
     }

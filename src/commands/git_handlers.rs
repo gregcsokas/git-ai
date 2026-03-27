@@ -129,6 +129,23 @@ pub fn handle_git(args: &[String]) {
             exit_with_status(exit_status);
         }
 
+        // Repo-creating commands (clone, init) have no meaningful pre/post
+        // repo state — the target repo doesn't exist yet. The wrapper would
+        // either capture nothing (clone from outside a repo) or the wrong
+        // repo (clone from inside a different repo). Skip the invocation_id
+        // so the daemon doesn't wait for wrapper state that never arrives or
+        // is misleading; trace2 events still flow normally (trace2 suppression
+        // requires *both* no invocation_id and a read-only command).
+        let is_repo_creating = parsed
+            .command
+            .as_deref()
+            .is_some_and(|cmd| matches!(cmd, "clone" | "init"));
+
+        if is_repo_creating {
+            let exit_status = proxy_to_git(args, false, None, None);
+            exit_with_status(exit_status);
+        }
+
         // Initialize the daemon telemetry handle so we can send wrapper state
         if let crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Failed(e) =
             crate::daemon::telemetry_handle::init_daemon_telemetry_handle()
