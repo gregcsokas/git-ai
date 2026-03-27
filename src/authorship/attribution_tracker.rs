@@ -440,8 +440,8 @@ impl AttributionTracker {
         // lines) to avoid misattributing unchanged lines that are only in the hunk
         // due to newline boundary changes.
         if is_ai_checkpoint {
-            let old_line_count = old_end_line - old_start_line + 1;
-            let new_line_count = new_end_line - new_start_line + 1;
+            let old_line_count = old_end_line - old_start_line;
+            let new_line_count = new_end_line - new_start_line;
             if old_line_count == new_line_count && old_line_count > 1 {
                 append_range_diffs(
                     &mut computation.diffs,
