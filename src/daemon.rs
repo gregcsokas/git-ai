@@ -2640,17 +2640,6 @@ fn is_ancestor_commit(repository: &Repository, ancestor: &str, descendant: &str)
     crate::git::repository::exec_git(&args).is_ok()
 }
 
-/// Resolve the first parent of a commit, returning `None` on any error
-/// (e.g. root commits with no parents).  Used to provide an `onto_head`
-/// hint that constrains commit walks in `build_rebase_commit_mappings`.
-fn first_parent_oid(repository: &Repository, commit_oid: &str) -> Option<String> {
-    repository
-        .find_commit(commit_oid.to_string())
-        .ok()
-        .and_then(|c| c.parent(0).ok())
-        .map(|p| p.id().to_string())
-}
-
 fn maybe_rebase_mappings_from_repository(
     repository: &Repository,
     old_head: &str,
@@ -5631,13 +5620,12 @@ impl ActorDaemonCoordinator {
                         if let Ok(repository) = repository_for_rewrite_context(cmd, "reset_rewrite")
                             && !is_ancestor_commit(&repository, new_head, old_head)
                         {
-                            let onto_hint = first_parent_oid(&repository, new_head);
                             if let Some((original_commits, new_commits)) =
                                 maybe_rebase_mappings_from_repository(
                                     &repository,
                                     old_head,
                                     new_head,
-                                    onto_hint.as_deref(),
+                                    None,
                                     "reset_rewrite",
                                 )?
                             {
@@ -5943,16 +5931,15 @@ impl ActorDaemonCoordinator {
                         && !is_zero_oid(new)
                         && let Ok(repository) =
                             repository_for_rewrite_context(cmd, "update_ref_rewrite")
-                        && let Some((original_commits, new_commits)) = {
-                            let onto_hint = first_parent_oid(&repository, new);
+                        && !is_ancestor_commit(&repository, new, old)
+                        && let Some((original_commits, new_commits)) =
                             maybe_rebase_mappings_from_repository(
                                 &repository,
                                 old,
                                 new,
-                                onto_hint.as_deref(),
+                                None,
                                 "update_ref_rewrite",
                             )?
-                        }
                     {
                         out.push(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
                             old.clone(),
