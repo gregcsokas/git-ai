@@ -6567,8 +6567,9 @@ fn control_listener_loop_actor(
                 })
                 .is_err()
             {
-                debug_log("daemon control listener: failed to spawn handler thread");
-                break;
+                return Err(GitAiError::Generic(
+                    "daemon control listener: failed to spawn handler thread".to_string(),
+                ));
             }
         }
         Ok(())
@@ -6762,8 +6763,9 @@ fn trace_listener_loop_actor(
                 })
                 .is_err()
             {
-                debug_log("daemon trace listener: failed to spawn handler thread");
-                break;
+                return Err(GitAiError::Generic(
+                    "daemon trace listener: failed to spawn handler thread".to_string(),
+                ));
             }
         }
         Ok(())
