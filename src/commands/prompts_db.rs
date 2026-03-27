@@ -978,11 +978,11 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                 if let Ok(cas_obj) = serde_json::from_str::<CasMessagesObject>(&cached_json) {
                     if let Ok(messages_json) = serde_json::to_string(&cas_obj.messages) {
                         resolved_messages.insert(hash.clone(), messages_json);
+                        continue;
                     }
                 }
-            } else {
-                hashes_needing_fetch.push(hash.clone());
             }
+            hashes_needing_fetch.push(hash.clone());
         }
     } else {
         hashes_needing_fetch = hash_to_indices.keys().cloned().collect();
