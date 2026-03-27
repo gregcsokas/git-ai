@@ -707,7 +707,8 @@ fn try_reconstruct_attributions_from_notes_cached(
     use crate::authorship::attribution_tracker::LineAttribution;
     use crate::authorship::authorship_log_serialization::AuthorshipLog;
 
-    // Get file contents at original_head for all pathspecs in one batch call
+    // Get file contents at original_head for all pathspecs in one batch call.
+    // We need all pathspec contents to build line-to-author maps from note attestations.
     let file_contents = batch_read_file_contents_at_commit(repo, original_head, pathspecs).ok()?;
 
     let pathspec_set: HashSet<&str> = pathspecs.iter().map(String::as_str).collect();
@@ -1126,8 +1127,24 @@ pub fn rewrite_authorship_after_rebase_v2(
         return Ok(());
     }
 
-    // Step 2: Create attribution state from original_head (before rebase)
-    // Try fast reconstruction from existing notes first (avoids expensive blame)
+    // Step 2a: Run diff-tree to discover which files actually change during the rebase.
+    // This is fast (single subprocess) and tells us which files we need to load.
+    let diff_tree_start = std::time::Instant::now();
+    let diff_tree_result =
+        run_diff_tree_for_commits(repo, &commits_to_process, &pathspecs_lookup, &pathspecs)?;
+    let actually_changed_files = diff_tree_result.all_changed_files();
+    timing_phases.push((
+        format!(
+            "diff_tree ({} commits, {} changed files, {} blobs)",
+            commits_to_process.len(),
+            actually_changed_files.len(),
+            diff_tree_result.all_blob_oids.len(),
+        ),
+        diff_tree_start.elapsed().as_millis(),
+    ));
+
+    // Step 2b: Create attribution state from original_head (before rebase)
+    // Only load file contents for files that actually change — skip unchanged files.
     let va_phase_start = std::time::Instant::now();
 
     let (mut current_attributions, mut current_file_contents, initial_prompts, _rebase_ts) =
@@ -1196,6 +1213,20 @@ pub fn rewrite_authorship_after_rebase_v2(
         va_phase_start.elapsed().as_millis(),
     ));
 
+    // Step 2c: Read blob contents in parallel (multiple git cat-file --batch processes).
+    let blob_phase_start = std::time::Instant::now();
+    let blob_contents = batch_read_blob_contents_parallel(repo, &diff_tree_result.all_blob_oids)?;
+    let mut changed_contents_by_commit =
+        assemble_changed_contents(diff_tree_result.commit_deltas, &blob_contents);
+    drop(blob_contents); // free memory early
+    timing_phases.push((
+        format!(
+            "blob_read_parallel ({} blobs)",
+            diff_tree_result.all_blob_oids.len()
+        ),
+        blob_phase_start.elapsed().as_millis(),
+    ));
+
     // Build original_head line-to-author maps for content restoration during transform.
     // Built from current_attributions before the loop mutates them.
     // Used as a fallback for files with no previous content in the diff-based transfer.
@@ -1251,18 +1282,6 @@ pub fn rewrite_authorship_after_rebase_v2(
         &current_attributions,
         &existing_files,
     );
-
-    let phase_start = std::time::Instant::now();
-    let mut changed_contents_by_commit = collect_changed_file_contents_for_commits(
-        repo,
-        &commits_to_process,
-        &pathspecs_lookup,
-        &pathspecs,
-    )?;
-    timing_phases.push((
-        format!("collect_contents ({} commits)", commits_to_process.len()),
-        phase_start.elapsed().as_millis(),
-    ));
     let mut pending_note_entries: Vec<(String, String)> =
         Vec::with_capacity(commits_to_process.len());
     let mut pending_note_debug: Vec<(String, usize)> = Vec::with_capacity(commits_to_process.len());
@@ -1962,16 +1981,35 @@ fn load_commit_metadata_batch(
 }
 
 /// Collect changed file contents for a list of commit SHAs using a single diff-tree --stdin call.
-/// This is more efficient than build_first_parent_tree_pairs + collect_changed_file_contents_for_commit_pairs
-/// because it avoids the commit metadata batch reads (saves 1-2 git subprocess calls).
-fn collect_changed_file_contents_for_commits(
+/// Result of parsing diff-tree output: per-commit deltas and the set of all blob OIDs needed.
+struct DiffTreeResult {
+    commit_deltas: Vec<(String, CommitTrackedDelta)>,
+    all_blob_oids: Vec<String>, // sorted, deduplicated
+}
+
+impl DiffTreeResult {
+    fn all_changed_files(&self) -> HashSet<String> {
+        let mut files = HashSet::new();
+        for (_commit, delta) in &self.commit_deltas {
+            files.extend(delta.changed_files.iter().cloned());
+        }
+        files
+    }
+}
+
+/// Run `git diff-tree --stdin` to discover which files changed in each commit and collect blob OIDs.
+/// This is the fast metadata-only phase — no blob contents are read.
+fn run_diff_tree_for_commits(
     repo: &Repository,
     commit_shas: &[String],
     pathspecs_lookup: &HashSet<&str>,
     pathspecs: &[String],
-) -> Result<ChangedFileContentsByCommit, GitAiError> {
+) -> Result<DiffTreeResult, GitAiError> {
     if commit_shas.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(DiffTreeResult {
+            commit_deltas: Vec::new(),
+            all_blob_oids: Vec::new(),
+        });
     }
 
     let mut args = repo.global_args_for_exec();
@@ -2063,8 +2101,18 @@ fn collect_changed_file_contents_for_commits(
 
     let mut blob_oid_list: Vec<String> = all_blob_oids.into_iter().collect();
     blob_oid_list.sort();
-    let blob_contents = batch_read_blob_contents(repo, &blob_oid_list)?;
 
+    Ok(DiffTreeResult {
+        commit_deltas,
+        all_blob_oids: blob_oid_list,
+    })
+}
+
+/// Assemble per-commit changed file contents from diff-tree deltas and blob contents.
+fn assemble_changed_contents(
+    commit_deltas: Vec<(String, CommitTrackedDelta)>,
+    blob_contents: &HashMap<String, String>,
+) -> ChangedFileContentsByCommit {
     let mut result = HashMap::new();
     for (commit_sha, delta) in commit_deltas {
         let mut contents = HashMap::new();
@@ -2077,8 +2125,63 @@ fn collect_changed_file_contents_for_commits(
         }
         result.insert(commit_sha, (delta.changed_files, contents));
     }
+    result
+}
 
-    Ok(result)
+/// Read blob contents in parallel using multiple `git cat-file --batch` processes.
+/// Falls back to a single call for small batches.
+const MAX_PARALLEL_BLOB_READS: usize = 4;
+const BLOB_BATCH_CHUNK_SIZE: usize = 200;
+
+fn batch_read_blob_contents_parallel(
+    repo: &Repository,
+    blob_oids: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if blob_oids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    if blob_oids.len() <= BLOB_BATCH_CHUNK_SIZE {
+        return batch_read_blob_contents(repo, blob_oids);
+    }
+
+    let global_args = repo.global_args_for_exec();
+    let chunks: Vec<Vec<String>> = blob_oids
+        .chunks(BLOB_BATCH_CHUNK_SIZE)
+        .map(|c| c.to_vec())
+        .collect();
+
+    let results = smol::block_on(async {
+        let semaphore = std::sync::Arc::new(smol::lock::Semaphore::new(MAX_PARALLEL_BLOB_READS));
+        let mut tasks = Vec::new();
+
+        for chunk in chunks {
+            let args = global_args.clone();
+            let sem = std::sync::Arc::clone(&semaphore);
+
+            let task = smol::spawn(async move {
+                let _permit = sem.acquire().await;
+                smol::unblock(move || {
+                    let mut cat_args = args;
+                    cat_args.push("cat-file".to_string());
+                    cat_args.push("--batch".to_string());
+                    let stdin_data = chunk.join("\n") + "\n";
+                    let output = exec_git_stdin(&cat_args, stdin_data.as_bytes())?;
+                    parse_cat_file_batch_output_with_oids(&output.stdout)
+                })
+                .await
+            });
+
+            tasks.push(task);
+        }
+
+        futures::future::join_all(tasks).await
+    });
+
+    let mut merged = HashMap::new();
+    for result in results {
+        merged.extend(result?);
+    }
+    Ok(merged)
 }
 
 pub fn rewrite_authorship_after_commit_amend(
