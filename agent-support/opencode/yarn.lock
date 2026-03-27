@@ -2,18 +2,18 @@
 # yarn lockfile v1
 
 
-"@opencode-ai/plugin@^1.3.0":
-  version "1.3.0"
-  resolved "https://registry.yarnpkg.com/@opencode-ai/plugin/-/plugin-1.3.0.tgz#297156a583cd355f61f1c54470adf7463b8fcb63"
-  integrity sha512-mR1Kdcpr3Iv+KS7cL2DRFB6QAcSoR6/DojmwuxYF/pMCahMtaCLiqZGQjoSNl12+gQ6RsIJJyUh/jX3JVlOx8A==
+"@opencode-ai/plugin@^1.3.3":
+  version "1.3.3"
+  resolved "https://registry.yarnpkg.com/@opencode-ai/plugin/-/plugin-1.3.3.tgz#af5490595a8828a342211df6fa0a8a4b6d6f878a"
+  integrity sha512-pxI4LanjnQb8sUd/zfQilzlGHyrdjmZuQ1XsUFbm+rij4yq0mUPtXcPGfuZJBEcGchKn57tA3/LB6RmipLQpXg==
   dependencies:
-    "@opencode-ai/sdk" "1.3.0"
+    "@opencode-ai/sdk" "1.3.3"
     zod "4.1.8"
 
-"@opencode-ai/sdk@1.3.0":
-  version "1.3.0"
-  resolved "https://registry.yarnpkg.com/@opencode-ai/sdk/-/sdk-1.3.0.tgz#76b0b46d94d0a3b2dbfc091ada0a42cdf1a4587e"
-  integrity sha512-5WyYEpcV6Zk9otXOMIrvZRbJm1yxt/c8EXSBn1p6Sw1yagz8HRljkoUTJFxzD0x2+/6vAZItr3OrXDZfE+oA2g==
+"@opencode-ai/sdk@1.3.3":
+  version "1.3.3"
+  resolved "https://registry.yarnpkg.com/@opencode-ai/sdk/-/sdk-1.3.3.tgz#93902d4b8b5ce6ab320d241ea85f19a3e6fdf6cc"
+  integrity sha512-qg7DwEVUpZArsYajs0DcaHqmIYB3EfHCuuTdMJir7Yc976DUWDfLR/5y9h8fKb9HAMJXe4TZkAIEr0/3OmK67g==
 
 "@types/node@^25.x":
   version "25.5.0"
