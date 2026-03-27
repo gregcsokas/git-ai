@@ -475,6 +475,49 @@ macro_rules! worktree_test_wrappers {
                 type TestRepo = WorktreeTestRepo;
                 $body
             }
+
+            #[test]
+            fn [<test_ $test_name _in_worktree_wrapper_daemon_mode>]() {
+                struct WorktreeTestRepo {
+                    inner: $crate::repos::test_repo::TestRepo,
+                }
+
+                #[allow(dead_code)]
+                impl WorktreeTestRepo {
+                    fn new() -> Self {
+                        Self {
+                            inner: $crate::repos::test_repo::TestRepo::new_worktree_with_mode(
+                                $crate::repos::test_repo::GitTestMode::WrapperDaemon,
+                            ),
+                        }
+                    }
+
+                    fn new_with_remote() -> (Self, Self) {
+                        let (local, upstream) =
+                            $crate::repos::test_repo::TestRepo::new_with_remote_with_mode(
+                                $crate::repos::test_repo::GitTestMode::WrapperDaemon,
+                            );
+                        (
+                            Self { inner: local },
+                            Self { inner: upstream },
+                        )
+                    }
+
+                    fn git_mode() -> $crate::repos::test_repo::GitTestMode {
+                        $crate::repos::test_repo::GitTestMode::WrapperDaemon
+                    }
+                }
+
+                impl std::ops::Deref for WorktreeTestRepo {
+                    type Target = $crate::repos::test_repo::TestRepo;
+                    fn deref(&self) -> &Self::Target {
+                        &self.inner
+                    }
+                }
+
+                type TestRepo = WorktreeTestRepo;
+                $body
+            }
         }
     };
 }

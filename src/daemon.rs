@@ -6150,7 +6150,12 @@ impl ActorDaemonCoordinator {
             for event in events {
                 match event {
                     crate::daemon::domain::SemanticEvent::CloneCompleted { .. } => {
-                        let _ = apply_clone_notes_sync_side_effect(&worktree);
+                        if let Err(e) = apply_clone_notes_sync_side_effect(&worktree) {
+                            debug_log(&format!(
+                                "daemon clone notes side effect failed for {}: {}",
+                                worktree, e
+                            ));
+                        }
                     }
                     crate::daemon::domain::SemanticEvent::PullCompleted { .. } => {
                         let _ = apply_pull_notes_sync_side_effect(
