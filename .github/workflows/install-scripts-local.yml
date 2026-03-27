@@ -19,6 +19,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  # Force wrapper mode (not async/daemon) so post-commit hooks fire
+  # synchronously and attribution notes are written in-process.
+  GIT_AI_ASYNC_MODE: "false"
+
 jobs:
   install-local-unix:
     name: E2E ${{ matrix.agent.name }} on ${{ matrix.os }}

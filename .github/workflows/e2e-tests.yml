@@ -7,6 +7,11 @@ on:
     types: [labeled]
   workflow_dispatch:
 
+env:
+  # Force wrapper mode (not async/daemon) so post-commit hooks fire
+  # synchronously and attribution notes are written in-process.
+  GIT_AI_ASYNC_MODE: "false"
+
 jobs:
   e2e-tests:
     runs-on: ubuntu-latest
