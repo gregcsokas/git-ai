@@ -2629,6 +2629,17 @@ fn processed_rebase_new_heads(repository: &Repository) -> Result<HashSet<String>
     Ok(out)
 }
 
+/// Resolve the first parent of a commit, returning `None` on any error
+/// (e.g. root commits with no parents).  Used to provide an `onto_head`
+/// hint that constrains commit walks in `build_rebase_commit_mappings`.
+fn first_parent_oid(repository: &Repository, commit_oid: &str) -> Option<String> {
+    repository
+        .find_commit(commit_oid.to_string())
+        .ok()
+        .and_then(|c| c.parent(0).ok())
+        .map(|p| p.id().to_string())
+}
+
 fn maybe_rebase_mappings_from_repository(
     repository: &Repository,
     old_head: &str,
@@ -5608,12 +5619,13 @@ impl ActorDaemonCoordinator {
                     {
                         if let Ok(repository) = repository_for_rewrite_context(cmd, "reset_rewrite")
                         {
+                            let onto_hint = first_parent_oid(&repository, new_head);
                             if let Some((original_commits, new_commits)) =
                                 maybe_rebase_mappings_from_repository(
                                     &repository,
                                     old_head,
                                     new_head,
-                                    None,
+                                    onto_hint.as_deref(),
                                     "reset_rewrite",
                                 )?
                             {
@@ -5919,14 +5931,16 @@ impl ActorDaemonCoordinator {
                         && !is_zero_oid(new)
                         && let Ok(repository) =
                             repository_for_rewrite_context(cmd, "update_ref_rewrite")
-                        && let Some((original_commits, new_commits)) =
+                        && let Some((original_commits, new_commits)) = {
+                            let onto_hint = first_parent_oid(&repository, new);
                             maybe_rebase_mappings_from_repository(
                                 &repository,
                                 old,
                                 new,
-                                None,
+                                onto_hint.as_deref(),
                                 "update_ref_rewrite",
                             )?
+                        }
                     {
                         out.push(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
                             old.clone(),
