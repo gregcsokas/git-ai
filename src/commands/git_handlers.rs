@@ -130,11 +130,10 @@ pub fn handle_git(args: &[String]) {
         }
 
         // Initialize the daemon telemetry handle so we can send wrapper state
-        match crate::daemon::telemetry_handle::init_daemon_telemetry_handle() {
-            crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Failed(e) => {
-                debug_log(&format!("wrapper: daemon telemetry init failed: {}", e));
-            }
-            _ => {}
+        if let crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Failed(e) =
+            crate::daemon::telemetry_handle::init_daemon_telemetry_handle()
+        {
+            debug_log(&format!("wrapper: daemon telemetry init failed: {}", e));
         }
 
         let repository = find_repository(&parsed.global_args).ok();
@@ -767,7 +766,9 @@ fn send_wrapper_post_state_to_daemon(
     post_state: &Option<crate::git::repo_state::HeadState>,
 ) {
     let Some(wt) = worktree else { return };
-    let Some(post) = post_state.clone() else { return };
+    let Some(post) = post_state.clone() else {
+        return;
+    };
     let wt_str = wt.to_string_lossy().to_string();
     if let Err(e) = crate::daemon::telemetry_handle::send_wrapper_post_state(
         invocation_id,
