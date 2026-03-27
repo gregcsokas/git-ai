@@ -3045,6 +3045,20 @@ fn write_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     Ok(())
 }
 
+/// Read the PID of the currently running daemon from the pid metadata file.
+pub fn read_daemon_pid(config: &DaemonConfig) -> Result<u32, GitAiError> {
+    let meta_path = pid_metadata_path(config);
+    let contents = fs::read_to_string(&meta_path).map_err(|e| {
+        GitAiError::Generic(format!(
+            "failed to read daemon pid metadata at {}: {}",
+            meta_path.display(),
+            e
+        ))
+    })?;
+    let meta: DaemonPidMeta = serde_json::from_str(&contents)?;
+    Ok(meta.pid)
+}
+
 fn remove_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     let path = pid_metadata_path(config);
     if path.exists() {
