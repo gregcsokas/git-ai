@@ -320,12 +320,12 @@ fn test_ai_rewrites_markdown_table_byte_identical_separator_attributed_to_ai() {
     ]);
     repo.stage_all_and_commit("AI rewrites table").unwrap();
 
-    // ALL table lines should be AI, even the byte-identical separator
+    // Changed lines should be AI; byte-identical separator stays human (git didn't see it change)
     file.assert_lines_and_blame(crate::lines![
         "# Data".human(),
         "".human(),
         "| Name | Score |".ai(),
-        "| --- | --- |".ai(),
+        "| --- | --- |".human(),
         "| gamma | 100 |".ai(),
         "| delta | 200 |".ai(),
     ]);
@@ -387,16 +387,16 @@ fn test_ai_rewrite_with_byte_identical_line_in_gap() {
     repo.stage_all_and_commit("AI updates config values")
         .unwrap();
 
-    // The byte-identical separator between AI lines should be attributed to AI
+    // Changed lines are AI; byte-identical separator stays human (git didn't see it change)
     file.assert_lines_and_blame(crate::lines![
         "key1: gamma".ai(),
-        "---".ai(),
+        "---".human(),
         "key2: delta".ai(),
     ]);
 }
 
 #[test]
-fn test_gap_filling_does_not_affect_large_human_sections() {
+fn test_ai_edits_around_large_human_section_preserves_human_attribution() {
     let repo = TestRepo::new();
     let mut file = repo.filename("mixed.py");
 
@@ -425,7 +425,7 @@ fn test_gap_filling_does_not_affect_large_human_sections() {
     repo.stage_all_and_commit("AI updates header and footer")
         .unwrap();
 
-    // Large gap (5 lines) should NOT be filled — human lines stay human
+    // Human lines between AI edits should stay human
     file.assert_lines_and_blame(crate::lines![
         "# new header".ai(),
         "line1 = 1".human(),
@@ -451,5 +451,5 @@ crate::reuse_tests_in_worktree!(
     test_ai_rewrites_markdown_table_byte_identical_separator_attributed_to_ai,
     test_ai_rewrites_table_reformatted_lines_all_attributed_to_ai,
     test_ai_rewrite_with_byte_identical_line_in_gap,
-    test_gap_filling_does_not_affect_large_human_sections,
+    test_ai_edits_around_large_human_section_preserves_human_attribution,
 );
