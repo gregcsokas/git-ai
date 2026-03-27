@@ -1282,6 +1282,34 @@ pub fn rewrite_authorship_after_rebase_v2(
         &current_attributions,
         &existing_files,
     );
+
+    // Fast serialization: pre-cache per-file attestation text and metadata template.
+    // Instead of calling serialize_to_string() per commit (which rebuilds the entire JSON),
+    // we cache each file's attestation text and only update changed files. Assembly is
+    // pure string concatenation.
+    let mut cached_file_attestation_text: HashMap<String, String> = HashMap::new();
+    for file_attestation in &current_authorship_log.attestations {
+        cached_file_attestation_text.insert(
+            file_attestation.file_path.clone(),
+            serialize_file_attestation(file_attestation),
+        );
+    }
+    // Pre-split metadata JSON template at a placeholder so we only swap the commit SHA per commit.
+    let metadata_json_template_parts: Option<(String, String)> = {
+        let mut template_meta = current_authorship_log.metadata.clone();
+        template_meta.base_commit_sha = "BASE_COMMIT_SHA_PLACEHOLDER".to_string();
+        template_meta.prompts = flatten_prompts_for_metadata(&current_prompts);
+        serde_json::to_string_pretty(&template_meta)
+            .ok()
+            .map(|template| {
+                let parts: Vec<&str> = template.splitn(2, "BASE_COMMIT_SHA_PLACEHOLDER").collect();
+                (
+                    parts[0].to_string(),
+                    parts.get(1).unwrap_or(&"").to_string(),
+                )
+            })
+    };
+
     let mut pending_note_entries: Vec<(String, String)> =
         Vec::with_capacity(commits_to_process.len());
     let mut pending_note_debug: Vec<(String, usize)> = Vec::with_capacity(commits_to_process.len());
@@ -1344,6 +1372,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                             prev_la,
                         );
                     }
+                    cached_file_attestation_text.remove(file_path);
                     continue;
                 }
                 let line_attrs = compute_line_attrs_for_changed_file(
@@ -1358,6 +1387,12 @@ pub fn rewrite_authorship_after_rebase_v2(
                     &mut prompt_line_metrics,
                     &line_attrs,
                 );
+                // Update fast serialization cache for this file
+                if let Some(text) = serialize_attestation_from_line_attrs(file_path, &line_attrs) {
+                    cached_file_attestation_text.insert(file_path.clone(), text);
+                } else {
+                    cached_file_attestation_text.remove(file_path);
+                }
                 current_attributions.insert(file_path.clone(), (Vec::new(), line_attrs));
                 current_file_contents.insert(file_path.clone(), new_content.clone());
             }
@@ -1383,20 +1418,24 @@ pub fn rewrite_authorship_after_rebase_v2(
             loop_attestation_ms += t0.elapsed().as_millis();
         }
 
-        // Serialize note for this commit.
+        // Serialize note for this commit using fast cached assembly.
         let t0 = std::time::Instant::now();
-        current_authorship_log
-            .attestations
-            .retain(|attestation| existing_files.contains(&attestation.file_path));
-        current_authorship_log.metadata.base_commit_sha = new_commit.clone();
-        current_authorship_log.metadata.prompts = flatten_prompts_for_metadata(&current_prompts);
-
-        let computed_note_has_payload = !current_authorship_log.attestations.is_empty()
-            || !current_authorship_log.metadata.prompts.is_empty();
-        let authorship_json = if computed_note_has_payload {
-            Some(current_authorship_log.serialize_to_string().map_err(|_| {
-                GitAiError::Generic("Failed to serialize authorship log".to_string())
-            })?)
+        let has_attestations = cached_file_attestation_text.values().any(|v| !v.is_empty());
+        let authorship_json = if has_attestations || metadata_json_template_parts.is_some() {
+            // Fast path: assemble note from cached per-file text + templated metadata.
+            let mut output = String::with_capacity(4096);
+            for (file_path, text) in &cached_file_attestation_text {
+                if existing_files.contains(file_path) && !text.is_empty() {
+                    output.push_str(text);
+                }
+            }
+            output.push_str("---\n");
+            if let Some((ref prefix, ref suffix)) = metadata_json_template_parts {
+                output.push_str(prefix);
+                output.push_str(new_commit);
+                output.push_str(suffix);
+            }
+            Some(output)
         } else {
             if !original_note_content_loaded {
                 // Build from cached note contents instead of another git call
@@ -1414,7 +1453,10 @@ pub fn rewrite_authorship_after_rebase_v2(
         };
         loop_serialize_ms += t0.elapsed().as_millis();
         if let Some(authorship_json) = authorship_json {
-            let file_count = current_authorship_log.attestations.len();
+            let file_count = cached_file_attestation_text
+                .values()
+                .filter(|v| !v.is_empty())
+                .count();
             pending_note_entries.push((new_commit.clone(), authorship_json));
             pending_note_debug.push((new_commit.clone(), file_count));
         }
@@ -3186,6 +3228,124 @@ fn build_file_attestation_from_line_attributions(
     } else {
         Some(file_attestation)
     }
+}
+
+/// Serialize a FileAttestation into the text format used in authorship notes.
+fn serialize_file_attestation(
+    file_attestation: &crate::authorship::authorship_log_serialization::FileAttestation,
+) -> String {
+    use std::fmt::Write;
+    let mut output = String::with_capacity(256);
+    let file_path = if file_attestation.file_path.contains(' ')
+        || file_attestation.file_path.contains('\t')
+        || file_attestation.file_path.contains('\n')
+    {
+        format!("\"{}\"", &file_attestation.file_path)
+    } else {
+        file_attestation.file_path.clone()
+    };
+    output.push_str(&file_path);
+    output.push('\n');
+    for entry in &file_attestation.entries {
+        output.push_str("  ");
+        output.push_str(&entry.hash);
+        output.push(' ');
+        let mut first = true;
+        for range in &entry.line_ranges {
+            if !first {
+                output.push(',');
+            }
+            first = false;
+            match range {
+                crate::authorship::authorship_log::LineRange::Single(line) => {
+                    let _ = write!(output, "{}", line);
+                }
+                crate::authorship::authorship_log::LineRange::Range(start, end) => {
+                    let _ = write!(output, "{}-{}", start, end);
+                }
+            }
+        }
+        output.push('\n');
+    }
+    output
+}
+
+/// Serialize attestation text directly from line_attrs without building intermediate FileAttestation.
+/// This avoids HashMap allocation, sorting, and range merging overhead.
+fn serialize_attestation_from_line_attrs(
+    file_path: &str,
+    line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
+) -> Option<String> {
+    use std::fmt::Write;
+
+    if line_attrs.is_empty() {
+        return None;
+    }
+
+    let human_id = crate::authorship::working_log::CheckpointKind::Human.to_str();
+
+    // Collect runs of (author_id, start, end) merging adjacent lines
+    let mut runs: Vec<(&str, u32, u32)> = Vec::new();
+    for attr in line_attrs {
+        if attr.author_id == human_id {
+            continue;
+        }
+        match runs.last_mut() {
+            Some((last_author, _, last_end))
+                if *last_author == attr.author_id.as_str() && attr.start_line <= *last_end + 1 =>
+            {
+                *last_end = (*last_end).max(attr.end_line);
+            }
+            _ => {
+                runs.push((attr.author_id.as_str(), attr.start_line, attr.end_line));
+            }
+        }
+    }
+
+    if runs.is_empty() {
+        return None;
+    }
+
+    let mut output = String::with_capacity(128);
+    if file_path.contains(' ') || file_path.contains('\t') || file_path.contains('\n') {
+        let _ = write!(output, "\"{}\"", file_path);
+    } else {
+        output.push_str(file_path);
+    }
+    output.push('\n');
+
+    // Group runs by author_id, preserving order of first appearance
+    let mut author_order: Vec<&str> = Vec::new();
+    let mut author_ranges: HashMap<&str, Vec<(u32, u32)>> = HashMap::new();
+    for &(author, start, end) in &runs {
+        let entry = author_ranges.entry(author).or_default();
+        if entry.is_empty() {
+            author_order.push(author);
+        }
+        entry.push((start, end));
+    }
+
+    for author in &author_order {
+        output.push_str("  ");
+        output.push_str(author);
+        output.push(' ');
+        let ranges = &author_ranges[author];
+        let mut first = true;
+        for &(start, end) in ranges {
+            if !first {
+                output.push(',');
+            }
+            first = false;
+            if start == end {
+                let _ = write!(output, "{}", start);
+            } else {
+                let _ = write!(output, "{}-{}", start, end);
+            }
+        }
+        output.push('\n');
+    }
+
+    Some(output)
 }
 
 /// Compute new line attributions for a file after content changes.
