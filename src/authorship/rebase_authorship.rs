@@ -1269,23 +1269,6 @@ pub fn rewrite_authorship_after_rebase_v2(
     let mut original_note_content_by_new_commit: HashMap<String, String> = HashMap::new();
     let mut original_note_content_loaded = false;
 
-    // Determine whether we can use the fast line-lookup path (no char-level diffs).
-    // This is possible when we successfully reconstructed from notes.
-    let use_line_lookup_fast_path = !original_head_line_to_author.is_empty();
-
-    // Cache per-file attestation text so we only re-serialize changed files.
-    let mut cached_file_attestation_text: HashMap<String, String> = HashMap::new();
-
-    // Pre-cache attestation text for all files in the initial state
-    if use_line_lookup_fast_path {
-        for file_attestation in &current_authorship_log.attestations {
-            cached_file_attestation_text.insert(
-                file_attestation.file_path.clone(),
-                serialize_file_attestation(file_attestation),
-            );
-        }
-    }
-
     // Step 3: Process each new commit in order (oldest to newest)
     let loop_start = std::time::Instant::now();
     let mut loop_transform_ms = 0u128;
@@ -1315,195 +1298,104 @@ pub fn rewrite_authorship_after_rebase_v2(
                 }
             }
 
+            // Diff-based line attribution transfer: for each changed file, diff
+            // old content → new content and carry attributions forward positionally.
+            // Falls back to content-matching for files with no previous content.
             let t0 = std::time::Instant::now();
-            if use_line_lookup_fast_path {
-                // Fast path: use diff-based attribution transfer.
-                // For each changed file, diff old content → new content and carry
-                // attributions forward positionally. Falls back to content-matching
-                // for files with no previous content tracked.
-                for (file_path, new_content) in &new_content_for_changed_files {
-                    // Subtract old metrics before modifying attributions
-                    let previous_line_attrs = current_attributions
-                        .get(file_path)
-                        .map(|(_, la)| la.clone());
+            for (file_path, new_content) in &new_content_for_changed_files {
+                // Subtract old metrics before modifying attributions
+                let previous_line_attrs = current_attributions
+                    .get(file_path)
+                    .map(|(_, la)| la.clone());
+                if let Some(ref prev_la) = previous_line_attrs {
+                    subtract_prompt_line_metrics_for_line_attributions(
+                        &mut prompt_line_metrics,
+                        prev_la,
+                    );
+                }
+                if new_content.is_empty() {
+                    // File deleted - keep attributions and file contents so a later
+                    // reappearance in the rebase sequence can inherit via diff-based
+                    // positional transfer from the pre-deletion state. Re-add the
+                    // subtracted metrics to preserve balance (the file won't appear
+                    // in the serialized note since existing_files excludes it).
                     if let Some(ref prev_la) = previous_line_attrs {
-                        subtract_prompt_line_metrics_for_line_attributions(
+                        add_prompt_line_metrics_for_line_attributions(
                             &mut prompt_line_metrics,
                             prev_la,
                         );
                     }
-                    if new_content.is_empty() {
-                        // File deleted - remove from serialization cache but keep
-                        // attributions and contents so a later reappearance can
-                        // inherit them via diff-based positional transfer.
-                        // Re-add subtracted metrics to preserve balance.
-                        if let Some(ref prev_la) = previous_line_attrs {
-                            add_prompt_line_metrics_for_line_attributions(
-                                &mut prompt_line_metrics,
-                                prev_la,
-                            );
-                        }
-                        cached_file_attestation_text.remove(file_path);
-                        continue;
-                    }
-                    let line_attrs = compute_line_attrs_for_changed_file(
-                        new_content,
-                        current_file_contents.get(file_path),
-                        current_attributions
-                            .get(file_path)
-                            .map(|(_, la)| la.as_slice()),
-                        original_head_line_to_author.get(file_path),
-                    );
-                    add_prompt_line_metrics_for_line_attributions(
-                        &mut prompt_line_metrics,
-                        &line_attrs,
-                    );
-                    // Serialize attestation directly from line_attrs (skip intermediate struct)
-                    if let Some(text) =
-                        serialize_attestation_from_line_attrs(file_path, &line_attrs)
-                    {
-                        cached_file_attestation_text.insert(file_path.clone(), text);
-                    } else {
-                        cached_file_attestation_text.remove(file_path);
-                    }
-                    current_attributions.insert(file_path.clone(), (Vec::new(), line_attrs));
-                    current_file_contents.insert(file_path.clone(), new_content.clone());
+                    continue;
                 }
-            } else {
-                // Slow path: use diff-based line attribution transfer (replaces char-level transform).
-                // This avoids building VirtualAttributions wrapper and char-level diffing entirely.
-                for (file_path, new_content) in &new_content_for_changed_files {
-                    // Subtract old metrics before modifying attributions
-                    let previous_line_attrs = current_attributions
+                let line_attrs = compute_line_attrs_for_changed_file(
+                    new_content,
+                    current_file_contents.get(file_path),
+                    current_attributions
                         .get(file_path)
-                        .map(|(_, la)| la.clone());
-                    if let Some(ref prev_la) = previous_line_attrs {
-                        subtract_prompt_line_metrics_for_line_attributions(
-                            &mut prompt_line_metrics,
-                            prev_la,
-                        );
-                    }
-                    if new_content.is_empty() {
-                        // File deleted - keep attributions and file contents so a later
-                        // reappearance in the rebase sequence can inherit via diff-based
-                        // positional transfer from the pre-deletion state. Re-add the
-                        // subtracted metrics to preserve balance (the file won't appear
-                        // in the serialized note since existing_files excludes it).
-                        if let Some(ref prev_la) = previous_line_attrs {
-                            add_prompt_line_metrics_for_line_attributions(
-                                &mut prompt_line_metrics,
-                                prev_la,
-                            );
-                        }
-                        continue;
-                    }
-                    let line_attrs = compute_line_attrs_for_changed_file(
-                        new_content,
-                        current_file_contents.get(file_path),
-                        current_attributions
-                            .get(file_path)
-                            .map(|(_, la)| la.as_slice()),
-                        original_head_line_to_author.get(file_path),
-                    );
-                    add_prompt_line_metrics_for_line_attributions(
-                        &mut prompt_line_metrics,
-                        &line_attrs,
-                    );
-                    current_attributions.insert(file_path.clone(), (Vec::new(), line_attrs));
-                    current_file_contents.insert(file_path.clone(), new_content.clone());
-                }
+                        .map(|(_, la)| la.as_slice()),
+                    original_head_line_to_author.get(file_path),
+                );
+                add_prompt_line_metrics_for_line_attributions(
+                    &mut prompt_line_metrics,
+                    &line_attrs,
+                );
+                current_attributions.insert(file_path.clone(), (Vec::new(), line_attrs));
+                current_file_contents.insert(file_path.clone(), new_content.clone());
             }
             loop_transform_ms += t0.elapsed().as_millis();
 
-            // Update prompt metrics for both paths (metrics are now tracked on fast path too).
-            {
-                let t0 = std::time::Instant::now();
-                apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
-                loop_metrics_ms += t0.elapsed().as_millis();
-            }
+            let t0 = std::time::Instant::now();
+            apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
+            loop_metrics_ms += t0.elapsed().as_millis();
 
-            if !use_line_lookup_fast_path {
-                // Update only files touched by this commit (slow path updates authorship_log).
-                let t0 = std::time::Instant::now();
-                for file_path in &changed_files_in_commit {
-                    upsert_file_attestation(
-                        &mut current_authorship_log,
-                        file_path,
-                        current_attributions
-                            .get(file_path)
-                            .map(|(_, line_attrs)| line_attrs.as_slice())
-                            .unwrap_or(&[]),
-                        existing_files.contains(file_path),
-                    );
-                }
-                loop_attestation_ms += t0.elapsed().as_millis();
+            // Update authorship_log with attestations for files touched by this commit.
+            let t0 = std::time::Instant::now();
+            for file_path in &changed_files_in_commit {
+                upsert_file_attestation(
+                    &mut current_authorship_log,
+                    file_path,
+                    current_attributions
+                        .get(file_path)
+                        .map(|(_, line_attrs)| line_attrs.as_slice())
+                        .unwrap_or(&[]),
+                    existing_files.contains(file_path),
+                );
             }
+            loop_attestation_ms += t0.elapsed().as_millis();
         }
 
+        // Serialize note for this commit.
         let t0 = std::time::Instant::now();
-        let authorship_json = if use_line_lookup_fast_path {
-            // Fast serialization: assemble note from cached per-file text + per-commit metadata
-            let has_attestations = cached_file_attestation_text.values().any(|v| !v.is_empty());
-            let has_prompts = !current_prompts.is_empty();
-            if has_attestations || has_prompts {
-                let mut output = String::with_capacity(4096);
-                // Write cached attestation sections (only existing files)
-                for (file_path, text) in &cached_file_attestation_text {
-                    if existing_files.contains(file_path) && !text.is_empty() {
-                        output.push_str(text);
-                    }
-                }
-                output.push_str("---\n");
-                // Serialize metadata with current prompt metrics (updated per commit)
-                let mut commit_meta = current_authorship_log.metadata.clone();
-                commit_meta.base_commit_sha = new_commit.clone();
-                commit_meta.prompts = flatten_prompts_for_metadata(&current_prompts);
-                if let Ok(meta_json) = serde_json::to_string_pretty(&commit_meta) {
-                    output.push_str(&meta_json);
-                }
-                Some(output)
-            } else {
-                None
-            }
-        } else {
-            // Original slow-path serialization
-            current_authorship_log
-                .attestations
-                .retain(|attestation| existing_files.contains(&attestation.file_path));
-            current_authorship_log.metadata.base_commit_sha = new_commit.clone();
-            current_authorship_log.metadata.prompts =
-                flatten_prompts_for_metadata(&current_prompts);
+        current_authorship_log
+            .attestations
+            .retain(|attestation| existing_files.contains(&attestation.file_path));
+        current_authorship_log.metadata.base_commit_sha = new_commit.clone();
+        current_authorship_log.metadata.prompts = flatten_prompts_for_metadata(&current_prompts);
 
-            let computed_note_has_payload = !current_authorship_log.attestations.is_empty()
-                || !current_authorship_log.metadata.prompts.is_empty();
-            if computed_note_has_payload {
-                Some(current_authorship_log.serialize_to_string().map_err(|_| {
-                    GitAiError::Generic("Failed to serialize authorship log".to_string())
-                })?)
-            } else {
-                if !original_note_content_loaded {
-                    // Build from cached note contents instead of another git call
-                    for (original_commit, new_commit) in &commit_pairs_to_process {
-                        if let Some(content) =
-                            note_cache.original_note_contents.get(original_commit)
-                        {
-                            original_note_content_by_new_commit
-                                .insert(new_commit.clone(), content.clone());
-                        }
+        let computed_note_has_payload = !current_authorship_log.attestations.is_empty()
+            || !current_authorship_log.metadata.prompts.is_empty();
+        let authorship_json = if computed_note_has_payload {
+            Some(current_authorship_log.serialize_to_string().map_err(|_| {
+                GitAiError::Generic("Failed to serialize authorship log".to_string())
+            })?)
+        } else {
+            if !original_note_content_loaded {
+                // Build from cached note contents instead of another git call
+                for (original_commit, new_commit) in &commit_pairs_to_process {
+                    if let Some(content) = note_cache.original_note_contents.get(original_commit) {
+                        original_note_content_by_new_commit
+                            .insert(new_commit.clone(), content.clone());
                     }
-                    original_note_content_loaded = true;
                 }
-                original_note_content_by_new_commit
-                    .get(new_commit)
-                    .map(|raw_note| remap_note_content_for_target_commit(raw_note, new_commit))
+                original_note_content_loaded = true;
             }
+            original_note_content_by_new_commit
+                .get(new_commit)
+                .map(|raw_note| remap_note_content_for_target_commit(raw_note, new_commit))
         };
         loop_serialize_ms += t0.elapsed().as_millis();
         if let Some(authorship_json) = authorship_json {
-            let file_count = cached_file_attestation_text
-                .values()
-                .filter(|v| !v.is_empty())
-                .count();
+            let file_count = current_authorship_log.attestations.len();
             pending_note_entries.push((new_commit.clone(), authorship_json));
             pending_note_debug.push((new_commit.clone(), file_count));
         }
@@ -3192,48 +3084,6 @@ fn build_file_attestation_from_line_attributions(
     }
 }
 
-/// Serialize a single FileAttestation to its text representation.
-/// Used for caching per-file attestation text in the fast serialization path.
-fn serialize_file_attestation(
-    file_attestation: &crate::authorship::authorship_log_serialization::FileAttestation,
-) -> String {
-    use std::fmt::Write;
-    let mut output = String::with_capacity(256);
-    let file_path = if file_attestation.file_path.contains(' ')
-        || file_attestation.file_path.contains('\t')
-        || file_attestation.file_path.contains('\n')
-    {
-        format!("\"{}\"", &file_attestation.file_path)
-    } else {
-        file_attestation.file_path.clone()
-    };
-    output.push_str(&file_path);
-    output.push('\n');
-    for entry in &file_attestation.entries {
-        output.push_str("  ");
-        output.push_str(&entry.hash);
-        output.push(' ');
-        // Format line ranges inline (avoid allocation overhead of format_line_ranges)
-        let mut first = true;
-        for range in &entry.line_ranges {
-            if !first {
-                output.push(',');
-            }
-            first = false;
-            match range {
-                crate::authorship::authorship_log::LineRange::Single(line) => {
-                    let _ = write!(output, "{}", line);
-                }
-                crate::authorship::authorship_log::LineRange::Range(start, end) => {
-                    let _ = write!(output, "{}-{}", start, end);
-                }
-            }
-        }
-        output.push('\n');
-    }
-    output
-}
-
 /// Compute new line attributions for a file after content changes.
 /// Uses diff-based positional transfer when previous content/attrs are available,
 /// otherwise falls back to content-matching from the original_head line→author map.
@@ -3329,87 +3179,6 @@ fn diff_based_line_attribution_transfer(
     }
 
     new_line_attrs
-}
-
-/// Serialize attestation text directly from line_attrs without building intermediate FileAttestation.
-/// This avoids HashMap allocation, sorting, and range merging overhead for the common case.
-fn serialize_attestation_from_line_attrs(
-    file_path: &str,
-    line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
-) -> Option<String> {
-    use std::fmt::Write;
-
-    if line_attrs.is_empty() {
-        return None;
-    }
-
-    // Group consecutive lines by author and merge ranges directly during serialization.
-    // line_attrs are already sorted by start_line from the fast-path construction.
-    let human_id = crate::authorship::working_log::CheckpointKind::Human.to_str();
-
-    // Collect runs of (author_id, start, end) merging adjacent lines
-    let mut runs: Vec<(&str, u32, u32)> = Vec::new();
-    for attr in line_attrs {
-        if attr.author_id == human_id {
-            continue;
-        }
-        match runs.last_mut() {
-            Some((last_author, _, last_end))
-                if *last_author == attr.author_id.as_str() && attr.start_line <= *last_end + 1 =>
-            {
-                *last_end = (*last_end).max(attr.end_line);
-            }
-            _ => {
-                runs.push((attr.author_id.as_str(), attr.start_line, attr.end_line));
-            }
-        }
-    }
-
-    if runs.is_empty() {
-        return None;
-    }
-
-    let mut output = String::with_capacity(128);
-    // File path header
-    if file_path.contains(' ') || file_path.contains('\t') || file_path.contains('\n') {
-        let _ = write!(output, "\"{}\"", file_path);
-    } else {
-        output.push_str(file_path);
-    }
-    output.push('\n');
-
-    // Group runs by author_id, preserving order of first appearance
-    let mut author_order: Vec<&str> = Vec::new();
-    let mut author_ranges: HashMap<&str, Vec<(u32, u32)>> = HashMap::new();
-    for &(author, start, end) in &runs {
-        let entry = author_ranges.entry(author).or_default();
-        if entry.is_empty() {
-            author_order.push(author);
-        }
-        entry.push((start, end));
-    }
-
-    for author in &author_order {
-        output.push_str("  ");
-        output.push_str(author);
-        output.push(' ');
-        let ranges = &author_ranges[author];
-        let mut first = true;
-        for &(start, end) in ranges {
-            if !first {
-                output.push(',');
-            }
-            first = false;
-            if start == end {
-                let _ = write!(output, "{}", start);
-            } else {
-                let _ = write!(output, "{}-{}", start, end);
-            }
-        }
-        output.push('\n');
-    }
-
-    Some(output)
 }
 
 fn upsert_file_attestation(
@@ -5320,7 +5089,7 @@ mod tests {
                         new_content,
                     );
                 // Step 3: serialize file attestation (old path did this per file per commit)
-                let _serialized = super::serialize_attestation_from_line_attrs(
+                let _serialized = super::build_file_attestation_from_line_attributions(
                     &format!("file_{}.rs", file_idx),
                     &line_attrs,
                 );
@@ -5349,7 +5118,7 @@ mod tests {
                     old_attrs,
                 );
                 // Step 2: serialize (same as new fast path)
-                let _serialized = super::serialize_attestation_from_line_attrs(
+                let _serialized = super::build_file_attestation_from_line_attributions(
                     &format!("file_{}.rs", file_idx),
                     &new_attrs,
                 );
