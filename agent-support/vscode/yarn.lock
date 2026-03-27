@@ -422,10 +422,10 @@
     "@nodelib/fs.scandir" "2.1.5"
     fastq "^1.6.0"
 
-"@posthog/core@1.24.1":
-  version "1.24.1"
-  resolved "https://registry.yarnpkg.com/@posthog/core/-/core-1.24.1.tgz#7faa7f4c094d1d480b872f79430a88080cbcaf43"
-  integrity sha512-e8AciAnc6MRFws89ux8lJKFAaI03yEon0ASDoUO7yS91FVqbUGXYekObUUR3LHplcg+pmyiJBI0jolY0SFbGRA==
+"@posthog/core@1.24.2":
+  version "1.24.2"
+  resolved "https://registry.yarnpkg.com/@posthog/core/-/core-1.24.2.tgz#8f501e3c2a1233de407108a54ee1e58bbfa07ebf"
+  integrity sha512-Dpmodetbj4sASDKjmWfxJ2zC/rStd+hhW0E7Bru4IN5s2bTgpcPNwBoUwcCjdxPZ/02vbWwbJ88K3gmNJO5oxg==
   dependencies:
     cross-spawn "^7.0.6"
 
@@ -2718,12 +2718,12 @@ pluralize@^8.0.0:
   resolved "https://registry.yarnpkg.com/pluralize/-/pluralize-8.0.0.tgz#1a6fa16a38d12a1901e0320fa017051c539ce3b1"
   integrity sha512-Nc3IT5yHzflTfbjgqWcCPpo7DaKy4FnpB0l/zCAW0Tc7jxAiuqSxHasntB3D7887LSrA93kDJ9IXovxJYxyLCA==
 
-posthog-node@^5.28.6:
-  version "5.28.6"
-  resolved "https://registry.yarnpkg.com/posthog-node/-/posthog-node-5.28.6.tgz#55e7434743e10feca38284c64f9dc2bb07076938"
-  integrity sha512-f3k45gplzVxbhIMj3x6jZP6iH1wacBurKrZxD1VwW+7f8L2DtjJbkiQw0oKwubgtCZcKNroPa8y6t/nDITgOMw==
+posthog-node@^5.28.7:
+  version "5.28.7"
+  resolved "https://registry.yarnpkg.com/posthog-node/-/posthog-node-5.28.7.tgz#726e94c9069bf2098eeba2de429bd7e97849bcfd"
+  integrity sha512-ACx2sDB/kUNYx0WOibU1UXzXLilNM/OvPuz8cYCN9swY6gwqvTebAT3yEv/a08LBY3VFu7ew28wP+zkdSKfrhw==
   dependencies:
-    "@posthog/core" "1.24.1"
+    "@posthog/core" "1.24.2"
 
 prebuild-install@^7.0.1:
   version "7.1.3"
