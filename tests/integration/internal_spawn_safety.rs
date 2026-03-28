@@ -53,9 +53,7 @@ fn internal_background_subcommands_must_use_spawn_helper() {
 #[test]
 fn critical_background_spawners_call_spawn_helper() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = [
-        root.join("src/commands/upgrade.rs"),
-    ];
+    let files = [root.join("src/commands/upgrade.rs")];
 
     for file in files {
         let content = fs::read_to_string(&file).unwrap();
