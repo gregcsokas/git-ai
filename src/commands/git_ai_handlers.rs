@@ -183,6 +183,9 @@ pub fn handle_git_ai(args: &[String]) {
         "flush-cas" => {
             commands::flush_cas::handle_flush_cas(&args[1..]);
         }
+        "flush-metrics-db" => {
+            commands::flush_metrics_db::handle_flush_metrics_db(&args[1..]);
+        }
         "login" => {
             commands::login::handle_login(&args[1..]);
         }
