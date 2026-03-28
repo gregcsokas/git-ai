@@ -1680,8 +1680,14 @@ fn test_ai_generated_file_then_human_full_rewrite() {
 
     // Compute blob SHAs for checkpoint entries
     let ai_content = "import * as readline from 'readline';\n\nconst jokes = [\n  \"Why don't scientists trust atoms?\",\n  \"An impasta!\"\n];";
-    let ai_sha = format!("{:x}", Sha256::new_with_prefix(ai_content.as_bytes()).finalize());
-    let human_sha = format!("{:x}", Sha256::new_with_prefix(human_content.as_bytes()).finalize());
+    let ai_sha = format!(
+        "{:x}",
+        Sha256::new_with_prefix(ai_content.as_bytes()).finalize()
+    );
+    let human_sha = format!(
+        "{:x}",
+        Sha256::new_with_prefix(human_content.as_bytes()).finalize()
+    );
     let human_len = human_content.len();
 
     // Directly write checkpoints.jsonl to replicate the exact real-world scenario:
@@ -1693,7 +1699,11 @@ fn test_ai_generated_file_then_human_full_rewrite() {
     let agent_author_id = "3bd30911a58cb074";
     // Determine the git dir and base commit for checkpoint storage.
     // In worktree mode .git is a gitlink file, so use rev-parse to resolve.
-    let git_dir = repo.git(&["rev-parse", "--git-dir"]).unwrap().trim().to_string();
+    let git_dir = repo
+        .git(&["rev-parse", "--git-dir"])
+        .unwrap()
+        .trim()
+        .to_string();
     let git_dir = std::path::Path::new(&git_dir);
     let base_commit = repo
         .git(&["rev-parse", "HEAD"])
