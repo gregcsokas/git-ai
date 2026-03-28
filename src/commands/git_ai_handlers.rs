@@ -180,14 +180,8 @@ pub fn handle_git_ai(args: &[String]) {
         "upgrade" => {
             commands::upgrade::run_with_args(&args[1..]);
         }
-        "flush-logs" => {
-            commands::flush_logs::handle_flush_logs(&args[1..]);
-        }
         "flush-cas" => {
             commands::flush_cas::handle_flush_cas(&args[1..]);
-        }
-        "flush-metrics-db" => {
-            commands::flush_metrics_db::handle_flush_metrics_db(&args[1..]);
         }
         "login" => {
             commands::login::handle_login(&args[1..]);
@@ -1059,10 +1053,6 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    if checkpoint_kind != CheckpointKind::Human {
-        observability::spawn_background_flush();
-    }
-
     if local_checkpoint_failed {
         std::process::exit(0);
     }
@@ -1869,8 +1859,6 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
 
     let values = crate::metrics::AgentUsageValues::new();
     crate::metrics::record(values, attrs);
-
-    observability::spawn_background_flush();
 }
 
 fn get_all_files_for_mock_ai(working_dir: &str) -> Vec<String> {
