@@ -90,8 +90,7 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
                 total_batches += 1;
                 eprintln!(
                     "  ✓ batch {} - uploaded {} events",
-                    total_batches,
-                    event_count
+                    total_batches, event_count
                 );
                 // Success - delete ALL records from this batch
                 // Validation errors are logged to Sentry and won't succeed on retry
@@ -103,8 +102,7 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
                 // All retries failed - keep records in DB for next time
                 eprintln!(
                     "  ✗ batch upload failed ({} events kept for retry): {}",
-                    event_count,
-                    e
+                    event_count, e
                 );
                 break;
             }
@@ -120,7 +118,6 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
 
     eprintln!(
         "flush-metrics-db: uploaded {} events in {} batch(es)",
-        total_uploaded,
-        total_batches
+        total_uploaded, total_batches
     );
 }
