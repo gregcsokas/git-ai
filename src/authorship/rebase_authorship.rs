@@ -1272,7 +1272,7 @@ pub fn rewrite_authorship_after_rebase_v2(
     // No need to build VirtualAttributions wrapper — diff-based transfer replaces
     // transform_changed_files_to_final_state entirely, eliminating the need for VA in the loop.
     let mut current_prompts = initial_prompts.clone();
-    let mut prompt_line_metrics =
+    let prompt_line_metrics =
         build_prompt_line_metrics_from_attributions(&current_attributions);
     apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
 
@@ -1331,14 +1331,14 @@ pub fn rewrite_authorship_after_rebase_v2(
     // Step 3: Process each new commit in order (oldest to newest)
     let loop_start = std::time::Instant::now();
     let mut loop_transform_ms = 0u128;
-    let mut loop_serialize_ms = 0u128;
-    let mut loop_metrics_ms = 0u128;
+    let mut loop_serialize_us = 0u128;
+    let loop_metrics_us = 0u128;
     let mut loop_diff_ms = 0u128;
     let mut loop_hunk_ms = 0u128;
     let mut loop_attestation_ms = 0u128;
     let mut loop_content_clone_ms = 0u128;
-    let mut loop_metrics_subtract_ms = 0u128;
-    let mut loop_metrics_add_ms = 0u128;
+    let loop_metrics_subtract_ms = 0u128;
+    let loop_metrics_add_ms = 0u128;
     let mut total_files_diffed = 0usize;
     let mut total_lines_diffed = 0usize;
     let mut total_files_hunk_transferred = 0usize;
@@ -1402,15 +1402,8 @@ pub fn rewrite_authorship_after_rebase_v2(
                     continue;
                 }
 
-                // Subtract old metrics before modifying attributions (borrow, no clone)
-                let tsub = std::time::Instant::now();
-                if let Some((_, prev_la)) = current_attributions.get(file_path) {
-                    subtract_prompt_line_metrics_for_line_attributions(
-                        &mut prompt_line_metrics,
-                        prev_la,
-                    );
-                }
-                loop_metrics_subtract_ms += tsub.elapsed().as_micros();
+                // Note: metrics subtract/add cycle removed — the metadata template
+                // is frozen before the loop, so per-commit metric updates are unused.
 
                 let line_attrs = if use_hunk_based {
                     // FAST PATH: Hunk-based attribution transfer
@@ -1444,12 +1437,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                     result
                 };
 
-                let tadd = std::time::Instant::now();
-                add_prompt_line_metrics_for_line_attributions(
-                    &mut prompt_line_metrics,
-                    &line_attrs,
-                );
-                loop_metrics_add_ms += tadd.elapsed().as_micros();
+                // (metrics add also removed — see note above)
                 let tatt = std::time::Instant::now();
                 if let Some(text) = serialize_attestation_from_line_attrs(file_path, &line_attrs) {
                     cached_file_attestation_text.insert(file_path.clone(), text);
@@ -1466,9 +1454,10 @@ pub fn rewrite_authorship_after_rebase_v2(
             }
             loop_transform_ms += t0.elapsed().as_millis();
 
-            let t0 = std::time::Instant::now();
-            apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
-            loop_metrics_ms += t0.elapsed().as_millis();
+            // Note: prompt_line_metrics are tracked incrementally but the metadata
+            // template was frozen before the loop. Per-commit metric application is
+            // skipped since it doesn't affect the output — the template already
+            // includes the initial metrics and only the commit SHA is swapped per commit.
         }
 
         // Serialize note for this commit using fast cached assembly.
@@ -1504,7 +1493,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                 .get(new_commit)
                 .map(|raw_note| remap_note_content_for_target_commit(raw_note, new_commit))
         };
-        loop_serialize_ms += t0.elapsed().as_millis();
+        loop_serialize_us += t0.elapsed().as_micros();
         if let Some(authorship_json) = authorship_json {
             let file_count = cached_file_attestation_text
                 .values()
@@ -1553,8 +1542,8 @@ pub fn rewrite_authorship_after_rebase_v2(
         "    transform:metrics_add".to_string(),
         loop_metrics_add_ms / 1000,
     ));
-    timing_phases.push(("  loop:serialize".to_string(), loop_serialize_ms));
-    timing_phases.push(("  loop:metrics".to_string(), loop_metrics_ms));
+    timing_phases.push(("  loop:serialize".to_string(), loop_serialize_us / 1000));
+    timing_phases.push(("  loop:metrics".to_string(), loop_metrics_us / 1000));
 
     let phase_start = std::time::Instant::now();
     if !pending_note_entries.is_empty() {
@@ -3804,6 +3793,7 @@ fn add_prompt_line_metrics_for_line_attributions(
     }
 }
 
+#[allow(dead_code)]
 fn subtract_prompt_line_metrics_for_line_attributions(
     metrics: &mut HashMap<String, PromptLineMetrics>,
     line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
