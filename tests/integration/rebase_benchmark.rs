@@ -633,12 +633,30 @@ fn benchmark_rebase_heavy() {
     println!("\n╔══════════════════════════════════════════════════════════╗");
     println!("║             HEAVY REBASE BENCHMARK                      ║");
     println!("╠══════════════════════════════════════════════════════════╣");
-    println!("║  AI files:            {:<10}                        ║", num_ai_files);
-    println!("║  Lines per file:      {:<10}                        ║", lines_per_file);
-    println!("║  Feature commits:     {:<10}                        ║", num_feature_commits);
-    println!("║  Main commits:        {:<10}                        ║", num_main_commits);
-    println!("║  Files per commit:    {:<10}                        ║", files_per_commit);
-    println!("║  Total initial lines: {:<10}                        ║", num_ai_files * lines_per_file);
+    println!(
+        "║  AI files:            {:<10}                        ║",
+        num_ai_files
+    );
+    println!(
+        "║  Lines per file:      {:<10}                        ║",
+        lines_per_file
+    );
+    println!(
+        "║  Feature commits:     {:<10}                        ║",
+        num_feature_commits
+    );
+    println!(
+        "║  Main commits:        {:<10}                        ║",
+        num_main_commits
+    );
+    println!(
+        "║  Files per commit:    {:<10}                        ║",
+        files_per_commit
+    );
+    println!(
+        "║  Total initial lines: {:<10}                        ║",
+        num_ai_files * lines_per_file
+    );
     println!("╚══════════════════════════════════════════════════════════╝\n");
 
     let repo = TestRepo::new();
@@ -652,23 +670,35 @@ fn benchmark_rebase_heavy() {
             let mut file = repo.filename(&filename);
             let mut lines: Vec<crate::repos::test_file::ExpectedLine> = Vec::new();
             // Header region (will be modified by main branch)
-            lines.push(format!("// Module {} Component {} - Auto-generated", module, file_idx).into());
+            lines.push(
+                format!(
+                    "// Module {} Component {} - Auto-generated",
+                    module, file_idx
+                )
+                .into(),
+            );
             lines.push("// MAIN_INSERTION_POINT".into());
             lines.push(format!("pub mod component_{} {{", file_idx).into());
             // AI-generated body
             for line_idx in 0..lines_per_file {
                 let line = format!(
                     "    pub fn func_{}_{}() -> i32 {{ {} }} // AI generated",
-                    file_idx, line_idx, line_idx * file_idx + 1
+                    file_idx,
+                    line_idx,
+                    line_idx * file_idx + 1
                 );
                 lines.push(line.ai());
             }
             lines.push("} // end module".into());
             file.set_contents(lines);
         }
-        repo.stage_all_and_commit("Initial: all AI-tracked files").unwrap();
+        repo.stage_all_and_commit("Initial: all AI-tracked files")
+            .unwrap();
     }
-    println!("Initial commit: {:.1}s", setup_start.elapsed().as_secs_f64());
+    println!(
+        "Initial commit: {:.1}s",
+        setup_start.elapsed().as_secs_f64()
+    );
 
     let default_branch = repo.current_branch();
 
@@ -697,10 +727,12 @@ fn benchmark_rebase_heavy() {
             );
             fs::write(&path, &new_content).unwrap();
             // Checkpoint EVERY file as AI-authored
-            repo.git_ai(&["checkpoint", "mock_ai_agent", &filename]).unwrap();
+            repo.git_ai(&["checkpoint", "mock_ai_agent", &filename])
+                .unwrap();
         }
         repo.git(&["add", "-A"]).unwrap();
-        repo.stage_all_and_commit(&format!("AI feature commit {}", commit_idx)).unwrap();
+        repo.stage_all_and_commit(&format!("AI feature commit {}", commit_idx))
+            .unwrap();
 
         if (commit_idx + 1) % 25 == 0 {
             println!(
@@ -752,7 +784,8 @@ fn benchmark_rebase_heavy() {
             file.set_contents(crate::lines![format!("Main doc {} {}", main_idx, i)]);
         }
         repo.git(&["add", "-A"]).unwrap();
-        repo.stage_all_and_commit(&format!("Main change {}", main_idx)).unwrap();
+        repo.stage_all_and_commit(&format!("Main change {}", main_idx))
+            .unwrap();
     }
     println!(
         "Main branch setup: {:.1}s ({} commits)",
@@ -770,7 +803,10 @@ fn benchmark_rebase_heavy() {
     let timing_file = repo.path().join("..").join("heavy_rebase_timing.txt");
     let timing_path = timing_file.to_str().unwrap().to_string();
 
-    println!("\n━━━ Starting HEAVY rebase ({} commits onto {}) ━━━", num_feature_commits, &default_branch);
+    println!(
+        "\n━━━ Starting HEAVY rebase ({} commits onto {}) ━━━",
+        num_feature_commits, &default_branch
+    );
     let wall_start = Instant::now();
 
     // Use benchmark_git for structured timing (captures pre/git/post breakdown)
@@ -794,24 +830,66 @@ fn benchmark_rebase_heavy() {
             println!("║            HEAVY BENCHMARK RESULTS                      ║");
             println!("╠══════════════════════════════════════════════════════════╣");
             println!("║  Configuration:                                         ║");
-            println!("║    AI files:          {}                            ", num_ai_files);
-            println!("║    Lines/file:        {}                           ", lines_per_file);
-            println!("║    Feature commits:   {}                           ", num_feature_commits);
-            println!("║    Main commits:      {}                           ", num_main_commits);
-            println!("║    Files/commit:      {}                           ", files_per_commit);
+            println!(
+                "║    AI files:          {}                            ",
+                num_ai_files
+            );
+            println!(
+                "║    Lines/file:        {}                           ",
+                lines_per_file
+            );
+            println!(
+                "║    Feature commits:   {}                           ",
+                num_feature_commits
+            );
+            println!(
+                "║    Main commits:      {}                           ",
+                num_main_commits
+            );
+            println!(
+                "║    Files/commit:      {}                           ",
+                files_per_commit
+            );
             println!("╠══════════════════════════════════════════════════════════╣");
             println!("║  Timing:                                                ║");
-            println!("║    Wall time:         {:.3}s                       ", wall_duration.as_secs_f64());
-            println!("║    Total (wrapper):   {}ms                        ", total_ms);
-            println!("║    Git rebase:        {}ms                        ", git_ms);
-            println!("║    Pre-command:       {}ms                        ", pre_ms);
-            println!("║    Post-command:      {}ms                        ", post_ms);
-            println!("║    Overhead:          {}ms ({:.1}% of git)        ", overhead_ms, overhead_pct);
+            println!(
+                "║    Wall time:         {:.3}s                       ",
+                wall_duration.as_secs_f64()
+            );
+            println!(
+                "║    Total (wrapper):   {}ms                        ",
+                total_ms
+            );
+            println!(
+                "║    Git rebase:        {}ms                        ",
+                git_ms
+            );
+            println!(
+                "║    Pre-command:       {}ms                        ",
+                pre_ms
+            );
+            println!(
+                "║    Post-command:      {}ms                        ",
+                post_ms
+            );
+            println!(
+                "║    Overhead:          {}ms ({:.1}% of git)        ",
+                overhead_ms, overhead_pct
+            );
             println!("╠══════════════════════════════════════════════════════════╣");
             println!("║  Per-commit averages:                                   ║");
-            println!("║    Total:             {:.1}ms                     ", total_ms as f64 / num_feature_commits as f64);
-            println!("║    Git:               {:.1}ms                     ", git_ms as f64 / num_feature_commits as f64);
-            println!("║    Overhead:          {:.1}ms                     ", overhead_ms as f64 / num_feature_commits as f64);
+            println!(
+                "║    Total:             {:.1}ms                     ",
+                total_ms as f64 / num_feature_commits as f64
+            );
+            println!(
+                "║    Git:               {:.1}ms                     ",
+                git_ms as f64 / num_feature_commits as f64
+            );
+            println!(
+                "║    Overhead:          {:.1}ms                     ",
+                overhead_ms as f64 / num_feature_commits as f64
+            );
             println!("╚══════════════════════════════════════════════════════════╝\n");
         }
         Err(e) => {
@@ -854,8 +932,10 @@ fn benchmark_rebase_heavy_with_timing() {
         .unwrap_or(15);
 
     println!("\n=== Heavy Rebase Benchmark (with timing) ===");
-    println!("AI files: {}, Lines/file: {}, Feature commits: {}, Main commits: {}",
-        num_ai_files, lines_per_file, num_feature_commits, num_main_commits);
+    println!(
+        "AI files: {}, Lines/file: {}, Feature commits: {}, Main commits: {}",
+        num_ai_files, lines_per_file, num_feature_commits, num_main_commits
+    );
     println!("=============================================\n");
 
     let repo = TestRepo::new();
@@ -869,9 +949,7 @@ fn benchmark_rebase_heavy_with_timing() {
         lines.push(format!("// File {} header", file_idx).into());
         lines.push("// MAIN_MARKER".into());
         for line_idx in 0..lines_per_file {
-            lines.push(
-                format!("fn f_{}_{}() {{ /* AI */ }}", file_idx, line_idx).ai()
-            );
+            lines.push(format!("fn f_{}_{}() {{ /* AI */ }}", file_idx, line_idx).ai());
         }
         lines.push("// EOF".into());
         file.set_contents(lines);
@@ -890,19 +968,31 @@ fn benchmark_rebase_heavy_with_timing() {
             let current = fs::read_to_string(&path).unwrap_or_default();
             let new_content = current.replacen(
                 "// EOF",
-                &format!("fn feat_{}_{}() {{ /* AI v{} */ }}\n// EOF", commit_idx, file_idx, commit_idx),
+                &format!(
+                    "fn feat_{}_{}() {{ /* AI v{} */ }}\n// EOF",
+                    commit_idx, file_idx, commit_idx
+                ),
                 1,
             );
             fs::write(&path, &new_content).unwrap();
             repo.git_ai(&["checkpoint", "mock_ai", &filename]).unwrap();
         }
         repo.git(&["add", "-A"]).unwrap();
-        repo.stage_all_and_commit(&format!("feat {}", commit_idx)).unwrap();
+        repo.stage_all_and_commit(&format!("feat {}", commit_idx))
+            .unwrap();
         if (commit_idx + 1) % 20 == 0 {
-            println!("  Feature {}/{} ({:.1}s)", commit_idx + 1, num_feature_commits, feature_start.elapsed().as_secs_f64());
+            println!(
+                "  Feature {}/{} ({:.1}s)",
+                commit_idx + 1,
+                num_feature_commits,
+                feature_start.elapsed().as_secs_f64()
+            );
         }
     }
-    println!("Feature setup: {:.1}s", feature_start.elapsed().as_secs_f64());
+    println!(
+        "Feature setup: {:.1}s",
+        feature_start.elapsed().as_secs_f64()
+    );
 
     // Main branch modifications
     repo.git(&["checkout", &default_branch]).unwrap();
@@ -920,7 +1010,8 @@ fn benchmark_rebase_heavy_with_timing() {
             fs::write(&path, &new_content).unwrap();
         }
         repo.git(&["add", "-A"]).unwrap();
-        repo.stage_all_and_commit(&format!("main {}", main_idx)).unwrap();
+        repo.stage_all_and_commit(&format!("main {}", main_idx))
+            .unwrap();
     }
 
     // Rebase with timing
@@ -952,7 +1043,8 @@ fn benchmark_rebase_heavy_with_timing() {
         println!("====================\n");
     }
 
-    println!("Total: {:.3}s, Per-commit: {:.1}ms",
+    println!(
+        "Total: {:.3}s, Per-commit: {:.1}ms",
         dur.as_secs_f64(),
         dur.as_millis() as f64 / num_feature_commits as f64
     );

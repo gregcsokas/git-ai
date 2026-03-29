@@ -1548,12 +1548,36 @@ pub fn rewrite_authorship_after_rebase_v2(
         loop_start.elapsed().as_millis(),
     ));
     timing_phases.push(("  loop:transform".to_string(), loop_transform_ms));
-    timing_phases.push((format!("    transform:diff ({} files, {} lines)", total_files_diffed, total_lines_diffed), loop_diff_ms / 1000));
-    timing_phases.push((format!("    transform:hunk_transfer ({} files)", total_files_hunk_transferred), loop_hunk_ms / 1000));
-    timing_phases.push((format!("    transform:attestation_serialize"), loop_attestation_ms / 1000));
-    timing_phases.push((format!("    transform:content_clone"), loop_content_clone_ms / 1000));
-    timing_phases.push((format!("    transform:metrics_subtract"), loop_metrics_subtract_ms / 1000));
-    timing_phases.push((format!("    transform:metrics_add"), loop_metrics_add_ms / 1000));
+    timing_phases.push((
+        format!(
+            "    transform:diff ({} files, {} lines)",
+            total_files_diffed, total_lines_diffed
+        ),
+        loop_diff_ms / 1000,
+    ));
+    timing_phases.push((
+        format!(
+            "    transform:hunk_transfer ({} files)",
+            total_files_hunk_transferred
+        ),
+        loop_hunk_ms / 1000,
+    ));
+    timing_phases.push((
+        format!("    transform:attestation_serialize"),
+        loop_attestation_ms / 1000,
+    ));
+    timing_phases.push((
+        format!("    transform:content_clone"),
+        loop_content_clone_ms / 1000,
+    ));
+    timing_phases.push((
+        format!("    transform:metrics_subtract"),
+        loop_metrics_subtract_ms / 1000,
+    ));
+    timing_phases.push((
+        format!("    transform:metrics_add"),
+        loop_metrics_add_ms / 1000,
+    ));
     timing_phases.push(("  loop:serialize".to_string(), loop_serialize_ms));
     timing_phases.push(("  loop:metrics".to_string(), loop_metrics_ms));
 
