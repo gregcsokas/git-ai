@@ -720,10 +720,10 @@ fn try_reconstruct_attributions_from_notes_cached(
         .iter()
         .chain(std::iter::once(&original_head.to_string()))
     {
-        if let Some(content) = note_cache.original_note_contents.get(commit.as_str()) {
-            if let Ok(log) = AuthorshipLog::deserialize_from_string(content) {
-                parsed_logs.insert(commit.clone(), log);
-            }
+        if let Some(content) = note_cache.original_note_contents.get(commit.as_str())
+            && let Ok(log) = AuthorshipLog::deserialize_from_string(content)
+        {
+            parsed_logs.insert(commit.clone(), log);
         }
     }
 
@@ -1092,10 +1092,8 @@ pub fn rewrite_authorship_after_rebase_v2(
     let new_blob_oids: Vec<String> = {
         let mut oids = HashSet::new();
         for (_, delta) in &new_commit_deltas {
-            for maybe_oid in delta.file_to_blob_oid.values() {
-                if let Some(oid) = maybe_oid {
-                    oids.insert(oid.clone());
-                }
+            for oid in delta.file_to_blob_oid.values().flatten() {
+                oids.insert(oid.clone());
             }
         }
         let mut v: Vec<String> = oids.into_iter().collect();
