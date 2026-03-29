@@ -801,7 +801,6 @@ fn benchmark_rebase_heavy() {
     repo.git(&["checkout", "feature"]).unwrap();
 
     let timing_file = repo.path().join("..").join("heavy_rebase_timing.txt");
-    let timing_path = timing_file.to_str().unwrap().to_string();
 
     println!(
         "\n━━━ Starting HEAVY rebase ({} commits onto {}) ━━━",

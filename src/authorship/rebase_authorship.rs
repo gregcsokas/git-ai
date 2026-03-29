@@ -1398,7 +1398,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                         prev_la,
                     );
                 }
-                loop_metrics_subtract_ms += tsub.elapsed().as_micros() as u128;
+                loop_metrics_subtract_ms += tsub.elapsed().as_micros();
 
                 // Check if blob content is available and non-empty (file not deleted)
                 let new_content = new_content_for_changed_files.get(file_path);
@@ -1436,7 +1436,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                         .unwrap_or(&[]);
                     let result = apply_hunks_to_line_attributions(old_attrs, hunks);
                     total_files_hunk_transferred += 1;
-                    loop_hunk_ms += thunk.elapsed().as_micros() as u128;
+                    loop_hunk_ms += thunk.elapsed().as_micros();
                     result
                 } else if let Some(new_content) = new_content {
                     // SLOW PATH: Content-diff based attribution transfer
@@ -1452,7 +1452,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                             .map(|(_, la)| la.as_slice()),
                         original_head_line_to_author.get(file_path),
                     );
-                    loop_diff_ms += tdiff.elapsed().as_micros() as u128;
+                    loop_diff_ms += tdiff.elapsed().as_micros();
                     files_with_synced_state.insert(file_path.clone());
                     result
                 } else {
@@ -1472,22 +1472,20 @@ pub fn rewrite_authorship_after_rebase_v2(
                     &mut prompt_line_metrics,
                     &line_attrs,
                 );
-                loop_metrics_add_ms += tadd.elapsed().as_micros() as u128;
+                loop_metrics_add_ms += tadd.elapsed().as_micros();
                 let tatt = std::time::Instant::now();
                 if let Some(text) = serialize_attestation_from_line_attrs(file_path, &line_attrs) {
                     cached_file_attestation_text.insert(file_path.clone(), text);
                 } else {
                     cached_file_attestation_text.remove(file_path);
                 }
-                loop_attestation_ms += tatt.elapsed().as_micros() as u128;
+                loop_attestation_ms += tatt.elapsed().as_micros();
                 let tclone = std::time::Instant::now();
                 current_attributions.insert(file_path.clone(), (Vec::new(), line_attrs));
-                if !use_hunk_based {
-                    if let Some(content) = new_content {
-                        current_file_contents.insert(file_path.clone(), content.clone());
-                    }
+                if !use_hunk_based && let Some(content) = new_content {
+                    current_file_contents.insert(file_path.clone(), content.clone());
                 }
-                loop_content_clone_ms += tclone.elapsed().as_micros() as u128;
+                loop_content_clone_ms += tclone.elapsed().as_micros();
             }
             loop_transform_ms += t0.elapsed().as_millis();
 
