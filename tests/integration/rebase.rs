@@ -1692,6 +1692,84 @@ fn test_rebase_file_delete_recreate_preserves_attribution() {
     ai_file.assert_lines_and_blame(crate::lines!["line1".ai(), "line2".ai(), "line3".ai()]);
 }
 
+/// Regression test: file deleted then recreated with DIFFERENT content preserves attribution.
+///
+/// This tests a subtle bug where:
+/// 1. first_appearance_blobs: seen_files must be cleared on deletion so the
+///    new blob OID is read on recreation.
+/// 2. files_with_synced_state: must be cleared on deletion so recreation
+///    uses content-diff (not stale hunk-based transfer).
+#[test]
+fn test_rebase_file_delete_recreate_different_content_preserves_attribution() {
+    let repo = TestRepo::new();
+    let default_branch = repo.current_branch();
+
+    // Initial setup
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial").unwrap();
+
+    // Create feature branch with AI file (original content)
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut ai_file = repo.filename("feature.txt");
+    ai_file.set_contents(crate::lines!["old_line1".ai(), "old_line2".ai()]);
+    repo.stage_all_and_commit("Add AI file").unwrap();
+
+    // Delete the file
+    repo.git(&["rm", "feature.txt"]).unwrap();
+    repo.stage_all_and_commit("Delete AI file").unwrap();
+
+    // Recreate the file with DIFFERENT content
+    ai_file.set_contents(crate::lines![
+        "new_line1".ai(),
+        "new_line2".ai(),
+        "new_line3".ai()
+    ]);
+    let recreate_commit = repo
+        .stage_all_and_commit("Recreate AI file different")
+        .unwrap();
+
+    // Verify pre-rebase: recreated file has attributions
+    let pre_note = repo
+        .read_authorship_note(&recreate_commit.commit_sha)
+        .expect("recreated commit should have note");
+    let pre_log = AuthorshipLog::deserialize_from_string(&pre_note).expect("parse pre note");
+    assert!(
+        !pre_log.attestations.is_empty(),
+        "precondition: recreated file should have attestations"
+    );
+
+    // Advance default branch
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut other_file = repo.filename("other.txt");
+    other_file.set_contents(crate::lines!["other"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+
+    // Rebase feature
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Check rebased tip (the recreate commit)
+    let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let rebased_note = repo
+        .read_authorship_note(&rebased_sha)
+        .expect("rebased recreate commit should have note");
+    let rebased_log =
+        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
+
+    assert!(
+        !rebased_log.attestations.is_empty(),
+        "regression: file recreated with different content should have attestations after rebase"
+    );
+
+    // Verify the new AI attribution (different content) survived
+    ai_file.assert_lines_and_blame(crate::lines![
+        "new_line1".ai(),
+        "new_line2".ai(),
+        "new_line3".ai()
+    ]);
+}
+
 /// Regression test: AI attribution from earlier commits (not HEAD) must survive rebase.
 ///
 /// Each commit's note only covers lines changed in THAT commit. HEAD doesn't
@@ -1936,6 +2014,7 @@ crate::reuse_tests_in_worktree!(
     test_rebase_commit_splitting,
     test_rebase_prompt_metrics_update_per_commit,
     test_rebase_file_delete_recreate_preserves_attribution,
+    test_rebase_file_delete_recreate_different_content_preserves_attribution,
 );
 
 crate::reuse_tests_in_worktree_with_attrs!(

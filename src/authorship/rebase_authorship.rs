@@ -1212,13 +1212,15 @@ pub fn rewrite_authorship_after_rebase_v2(
         let mut needed_oids: HashSet<String> = HashSet::new();
         for (_, delta) in &diff_tree_result.commit_deltas {
             for (file_path, maybe_oid) in &delta.file_to_blob_oid {
-                // Only mark as "seen" when the file has content (non-deletion).
-                // Deletions (None OID) shouldn't prevent later re-creations
-                // from having their blob read.
-                if let Some(oid) = maybe_oid
-                    && seen_files.insert(file_path.clone())
-                {
-                    needed_oids.insert(oid.clone());
+                if let Some(oid) = maybe_oid {
+                    // File has content — only read blob on first appearance.
+                    if seen_files.insert(file_path.clone()) {
+                        needed_oids.insert(oid.clone());
+                    }
+                } else {
+                    // File deleted — clear from seen set so a later recreation
+                    // will have its blob read.
+                    seen_files.remove(file_path);
                 }
             }
         }
@@ -1386,6 +1388,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                     // File deleted — metrics stay unchanged (no subtract/add cycle)
                     cached_file_attestation_text.remove(file_path);
                     existing_files.remove(file_path);
+                    files_with_synced_state.remove(file_path.as_str());
                     continue;
                 }
 
