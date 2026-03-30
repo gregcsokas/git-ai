@@ -1367,10 +1367,13 @@ pub fn rewrite_authorship_after_rebase_v2(
                 let is_file_deleted = new_content.map(|c| c.is_empty()).unwrap_or(false);
 
                 if is_file_deleted {
-                    // File deleted — metrics stay unchanged (no subtract/add cycle)
+                    // File deleted — clear all cached state so recreation uses a clean
+                    // content-diff instead of stale attributions/content from before deletion.
                     cached_file_attestation_text.remove(file_path);
                     existing_files.remove(file_path);
                     files_with_synced_state.remove(file_path.as_str());
+                    current_file_contents.remove(file_path);
+                    current_attributions.remove(file_path);
                     continue;
                 }
 

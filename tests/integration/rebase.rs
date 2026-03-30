@@ -2015,6 +2015,7 @@ crate::reuse_tests_in_worktree!(
     test_rebase_prompt_metrics_update_per_commit,
     test_rebase_file_delete_recreate_preserves_attribution,
     test_rebase_file_delete_recreate_different_content_preserves_attribution,
+    test_rebase_file_delete_recreate_after_hunk_modification,
 );
 
 crate::reuse_tests_in_worktree_with_attrs!(
@@ -2022,3 +2023,90 @@ crate::reuse_tests_in_worktree_with_attrs!(
     test_rebase_squash_preserves_all_authorship,
     test_rebase_reword_commit_with_children,
 );
+
+/// Regression test: file modified via hunk path, then deleted, then recreated.
+///
+/// This exercises a bug where `current_file_contents` becomes stale after hunk-based
+/// attribution transfer (which updates attributions but not the file content cache).
+/// When the file is later deleted and recreated, the slow content-diff path would use
+/// stale content with shifted line numbers, producing corrupt attributions.
+///
+/// Trigger sequence:
+/// 1. Commit 1: create file (slow path sets current_file_contents)
+/// 2. Commit 2: modify file (hunk path shifts attrs but leaves current_file_contents stale)
+/// 3. Commit 3: delete file
+/// 4. Commit 4: recreate file with new content
+///
+/// Main branch must also modify the same file to force the slow reconstruction path.
+#[test]
+fn test_rebase_file_delete_recreate_after_hunk_modification() {
+    let repo = TestRepo::new();
+    let default_branch = repo.current_branch();
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial").unwrap();
+
+    // Feature branch: 4 commits exercising hunk→delete→recreate
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: create file
+    let mut ai_file = repo.filename("feature.txt");
+    ai_file.set_contents(crate::lines!["line1".ai(), "line2".ai(), "line3".ai()]);
+    repo.stage_all_and_commit("Create AI file").unwrap();
+
+    // Commit 2: modify file (will use hunk-based path on rebase)
+    ai_file.set_contents(crate::lines![
+        "line1".ai(),
+        "line2".ai(),
+        "inserted".ai(),
+        "line3".ai()
+    ]);
+    repo.stage_all_and_commit("Modify AI file").unwrap();
+
+    // Commit 3: delete the file
+    repo.git(&["rm", "feature.txt"]).unwrap();
+    repo.stage_all_and_commit("Delete AI file").unwrap();
+
+    // Commit 4: recreate with different content
+    ai_file.set_contents(crate::lines![
+        "recreated_a".ai(),
+        "recreated_b".ai(),
+        "recreated_c".ai(),
+        "recreated_d".ai()
+    ]);
+    repo.stage_all_and_commit("Recreate AI file").unwrap();
+
+    // Advance default branch — must touch the same file to force slow path
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut conflict_file = repo.filename("feature.txt");
+    conflict_file.set_contents(crate::lines!["main_content"]);
+    repo.stage_all_and_commit("Main touches same file").unwrap();
+    // Delete it so rebase doesn't conflict
+    repo.git(&["rm", "feature.txt"]).unwrap();
+    repo.stage_all_and_commit("Main deletes file").unwrap();
+
+    // Rebase
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Check the final commit (recreate) has correct attributions
+    let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let rebased_note = repo
+        .read_authorship_note(&rebased_sha)
+        .expect("rebased recreate commit should have note");
+    let rebased_log =
+        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
+
+    assert!(
+        !rebased_log.attestations.is_empty(),
+        "regression: file recreated after hunk-modify+delete should have attestations"
+    );
+
+    ai_file.assert_lines_and_blame(crate::lines![
+        "recreated_a".ai(),
+        "recreated_b".ai(),
+        "recreated_c".ai(),
+        "recreated_d".ai()
+    ]);
+}
