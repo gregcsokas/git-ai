@@ -3212,20 +3212,20 @@ fn redirect_windows_stdio_stream(
     }
 
     let dup_result = unsafe { libc::dup2(fd, std_fd) };
-    let close_result = unsafe { libc::close(fd) };
     if dup_result == -1 {
+        let err = std::io::Error::last_os_error();
+        let _ = unsafe { libc::close(fd) };
         return Err(GitAiError::Generic(format!(
             "dup2 failed for daemon log stream {}: {}",
-            std_fd,
-            std::io::Error::last_os_error()
+            std_fd, err
         )));
     }
-    if close_result == -1 {
-        return Err(GitAiError::Generic(format!(
-            "close failed for daemon log stream {}: {}",
+    if unsafe { libc::close(fd) } == -1 {
+        debug_log(&format!(
+            "close failed for daemon log stream {} after successful redirect: {}",
             std_fd,
             std::io::Error::last_os_error()
-        )));
+        ));
     }
 
     let set_handle_result = unsafe { SetStdHandle(std_handle, file.as_raw_handle()) };
