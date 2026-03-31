@@ -793,7 +793,9 @@ fn assert_post_commit_uploads_prompt_cas(mode: GitTestMode) {
     let _api_base_url = ScopedEnvVar::set("GIT_AI_API_BASE_URL", mock_api.base_url());
     let _api_key = ScopedEnvVar::set("GIT_AI_API_KEY", "test-api-key");
 
-    let mut repo = TestRepo::new_with_mode(mode);
+    // These tests depend on per-test API env vars being visible to the daemon.
+    // A shared daemon may already be running from an earlier test with different env.
+    let mut repo = TestRepo::new_with_mode_and_daemon_scope(mode, DaemonTestScope::Dedicated);
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
         patch.prompt_storage = Some("default".to_string());
