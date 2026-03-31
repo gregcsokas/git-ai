@@ -419,7 +419,15 @@ function Try-Download {
         [Parameter(Mandatory = $true)][string]$Url
     )
     try {
-        Invoke-WebRequest -Uri $Url -OutFile $tmpFile -UseBasicParsing -ErrorAction Stop
+        # Disable progress bar to avoid extreme slowdown caused by PowerShell's
+        # progress-stream rendering (can make downloads 10-50x slower).
+        $oldProgressPreference = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $tmpFile -UseBasicParsing -ErrorAction Stop
+        } finally {
+            $ProgressPreference = $oldProgressPreference
+        }
         return $true
     } catch {
         return $false
