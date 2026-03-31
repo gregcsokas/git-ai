@@ -974,13 +974,12 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
         && let Ok(db_guard) = db_mutex.lock()
     {
         for hash in hash_to_indices.keys() {
-            if let Ok(Some(cached_json)) = db_guard.get_cas_cache(hash) {
-                if let Ok(cas_obj) = serde_json::from_str::<CasMessagesObject>(&cached_json) {
-                    if let Ok(messages_json) = serde_json::to_string(&cas_obj.messages) {
-                        resolved_messages.insert(hash.clone(), messages_json);
-                        continue;
-                    }
-                }
+            if let Ok(Some(cached_json)) = db_guard.get_cas_cache(hash)
+                && let Ok(cas_obj) = serde_json::from_str::<CasMessagesObject>(&cached_json)
+                && let Ok(messages_json) = serde_json::to_string(&cas_obj.messages)
+            {
+                resolved_messages.insert(hash.clone(), messages_json);
+                continue;
             }
             hashes_needing_fetch.push(hash.clone());
         }
@@ -1017,25 +1016,24 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                 match client.read_ca_prompt_store(&hash_refs) {
                     Ok(response) => {
                         for result in &response.results {
-                            if result.status == "ok" {
-                                if let Some(content) = &result.content {
-                                    let json_str =
-                                        serde_json::to_string(content).unwrap_or_default();
-                                    if let Ok(cas_obj) =
-                                        serde_json::from_value::<CasMessagesObject>(content.clone())
+                            if result.status == "ok"
+                                && let Some(content) = &result.content
+                            {
+                                let json_str = serde_json::to_string(content).unwrap_or_default();
+                                if let Ok(cas_obj) =
+                                    serde_json::from_value::<CasMessagesObject>(content.clone())
+                                {
+                                    if let Ok(messages_json) =
+                                        serde_json::to_string(&cas_obj.messages)
                                     {
-                                        if let Ok(messages_json) =
-                                            serde_json::to_string(&cas_obj.messages)
-                                        {
-                                            resolved_messages
-                                                .insert(result.hash.clone(), messages_json);
-                                        }
-                                        // Cache for future runs
-                                        if let Ok(db_mutex) = InternalDatabase::global()
-                                            && let Ok(mut db_guard) = db_mutex.lock()
-                                        {
-                                            let _ = db_guard.set_cas_cache(&result.hash, &json_str);
-                                        }
+                                        resolved_messages
+                                            .insert(result.hash.clone(), messages_json);
+                                    }
+                                    // Cache for future runs
+                                    if let Ok(db_mutex) = InternalDatabase::global()
+                                        && let Ok(mut db_guard) = db_mutex.lock()
+                                    {
+                                        let _ = db_guard.set_cas_cache(&result.hash, &json_str);
                                     }
                                 }
                             }
