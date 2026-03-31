@@ -1,4 +1,3 @@
-#[cfg(not(windows))]
 use crate::daemon::daemon_log_file_path;
 use crate::daemon::{
     ControlRequest, DaemonConfig, local_socket_connects_with_timeout, read_daemon_pid,
@@ -9,7 +8,6 @@ use crate::utils::LockFile;
 use crate::utils::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, debug_log,
 };
-#[cfg(not(windows))]
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -394,49 +392,36 @@ fn handle_tail(args: &[String]) -> Result<(), String> {
         return Err("background service is not running".to_string());
     }
 
-    #[cfg(windows)]
-    {
-        let _ = args;
-        return Err(
-            "background service log tail is not available on Windows yet; the daemon does not write file logs there"
-                .to_string(),
-        );
+    let log_path =
+        daemon_log_file_path(&config).map_err(|e| format!("cannot locate log: {}", e))?;
+    if !log_path.exists() {
+        return Err(format!("log file not found: {}", log_path.display()));
     }
 
-    #[cfg(not(windows))]
-    {
-        let log_path =
-            daemon_log_file_path(&config).map_err(|e| format!("cannot locate log: {}", e))?;
-        if !log_path.exists() {
-            return Err(format!("log file not found: {}", log_path.display()));
+    let full = has_flag(args, "--full") || has_flag(args, "-f");
+    let lines: usize = parse_number_arg(args, "-n")
+        .or_else(|| parse_number_arg(args, "--lines"))
+        .unwrap_or(20);
+
+    let file = std::fs::File::open(&log_path)
+        .map_err(|e| format!("cannot open {}: {}", log_path.display(), e))?;
+
+    if full {
+        // Print entire file then continue tailing.
+        let reader = BufReader::new(&file);
+        for line in reader.lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            println!("{}", line);
         }
-
-        let full = has_flag(args, "--full") || has_flag(args, "-f");
-        let lines: usize = parse_number_arg(args, "-n")
-            .or_else(|| parse_number_arg(args, "--lines"))
-            .unwrap_or(20);
-
-        let file = std::fs::File::open(&log_path)
-            .map_err(|e| format!("cannot open {}: {}", log_path.display(), e))?;
-
-        if full {
-            // Print entire file then continue tailing.
-            let reader = BufReader::new(&file);
-            for line in reader.lines() {
-                let line = line.map_err(|e| e.to_string())?;
-                println!("{}", line);
-            }
-        } else {
-            // Print last N lines.
-            print_last_n_lines(&file, lines).map_err(|e| e.to_string())?;
-        }
-
-        // Tail: poll for new content.
-        tail_file(file).map_err(|e| e.to_string())
+    } else {
+        // Print last N lines.
+        print_last_n_lines(&file, lines).map_err(|e| e.to_string())?;
     }
+
+    // Tail: poll for new content.
+    tail_file(file).map_err(|e| e.to_string())
 }
 
-#[cfg(not(windows))]
 fn parse_number_arg(args: &[String], flag: &str) -> Option<usize> {
     let mut i = 0;
     while i < args.len() {
@@ -448,7 +433,6 @@ fn parse_number_arg(args: &[String], flag: &str) -> Option<usize> {
     None
 }
 
-#[cfg(not(windows))]
 fn print_last_n_lines(file: &std::fs::File, n: usize) -> Result<(), std::io::Error> {
     use std::io::Read;
     let metadata = file.metadata()?;
@@ -476,7 +460,6 @@ fn print_last_n_lines(file: &std::fs::File, n: usize) -> Result<(), std::io::Err
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn tail_file(file: std::fs::File) -> Result<(), std::io::Error> {
     let mut reader = BufReader::new(file);
     // Seek to end in case print_last_n_lines didn't (full mode).

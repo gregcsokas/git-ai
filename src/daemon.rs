@@ -3076,13 +3076,18 @@ fn remove_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 fn daemon_is_test_mode() -> bool {
     std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
         || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
+fn daemon_log_dir(config: &DaemonConfig) -> PathBuf {
+    config.internal_dir.join("daemon").join("logs")
+}
+
+#[cfg(windows)]
 fn daemon_log_dir(config: &DaemonConfig) -> PathBuf {
     config.internal_dir.join("daemon").join("logs")
 }
@@ -3105,8 +3110,14 @@ fn maybe_setup_daemon_log_file(config: &DaemonConfig) -> Option<DaemonLogGuard> 
 }
 
 #[cfg(windows)]
-fn maybe_setup_daemon_log_file(_config: &DaemonConfig) -> Option<DaemonLogGuard> {
-    None
+fn maybe_setup_daemon_log_file(config: &DaemonConfig) -> Option<DaemonLogGuard> {
+    match setup_daemon_log_file(config) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            debug_log(&format!("daemon log file setup failed: {}", e));
+            None
+        }
+    }
 }
 
 struct DaemonLogGuard {
@@ -3140,6 +3151,24 @@ fn setup_daemon_log_file(config: &DaemonConfig) -> Result<DaemonLogGuard, GitAiE
             return Err(GitAiError::Generic("dup2 stderr failed".to_string()));
         }
     }
+
+    Ok(DaemonLogGuard { _file: file })
+}
+
+#[cfg(windows)]
+fn setup_daemon_log_file(config: &DaemonConfig) -> Result<DaemonLogGuard, GitAiError> {
+    let log_dir = daemon_log_dir(config);
+    fs::create_dir_all(&log_dir)?;
+
+    let log_path = log_dir.join(format!("{}.log", std::process::id()));
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+
+    let clone = file.try_clone()?;
+    crate::utils::set_debug_log_file(clone);
+    debug_log(&format!("daemon log initialized at {}", log_path.display()));
 
     Ok(DaemonLogGuard { _file: file })
 }

@@ -5,6 +5,7 @@
 mod repos;
 
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
+use serde_json::Value;
 use serial_test::serial;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
@@ -42,6 +43,73 @@ fn foreground_daemon_logs(repo: &TestRepo) -> (String, String) {
     let stdout = fs::read_to_string(foreground_daemon_stdout_path(repo)).unwrap_or_default();
     let stderr = fs::read_to_string(foreground_daemon_stderr_path(repo)).unwrap_or_default();
     (stdout, stderr)
+}
+
+fn daemon_log_dir(repo: &TestRepo) -> PathBuf {
+    repo.test_home_path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon")
+        .join("logs")
+}
+
+fn wait_for_daemon_log_file(repo: &TestRepo, timeout: Duration) -> PathBuf {
+    let deadline = Instant::now() + timeout;
+    let pid_meta_path = repo
+        .test_home_path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon")
+        .join("daemon.pid.json");
+
+    loop {
+        if pid_meta_path.exists() {
+            let meta_raw =
+                fs::read_to_string(&pid_meta_path).expect("failed to read daemon pid metadata");
+            let meta: Value =
+                serde_json::from_str(&meta_raw).expect("failed to parse daemon pid metadata");
+            let pid = meta
+                .get("pid")
+                .and_then(Value::as_u64)
+                .expect("daemon pid metadata missing pid");
+            let log_path = daemon_log_dir(repo).join(format!("{}.log", pid));
+            if log_path.exists() {
+                return log_path;
+            }
+        }
+
+        if Instant::now() >= deadline {
+            panic!(
+                "daemon log file was not created within {:?} under {}",
+                timeout,
+                daemon_log_dir(repo).display()
+            );
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_file_to_contain(path: &PathBuf, needle: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let contents = fs::read_to_string(path).unwrap_or_default();
+        if contents.contains(needle) {
+            return;
+        }
+
+        if Instant::now() >= deadline {
+            panic!(
+                "file {} did not contain {:?} within {:?}\ncontents:\n{}",
+                path.display(),
+                needle,
+                timeout,
+                contents
+            );
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn configure_install_env(command: &mut Command, repo: &TestRepo) {
@@ -283,4 +351,27 @@ fn windows_install_script_reinstall_stops_running_daemon() {
     );
 
     kill_installed_processes(&repo);
+}
+
+#[test]
+#[serial]
+fn windows_daemon_creates_log_file() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    let initial_install = run_install_script(&repo, Duration::from_secs(90));
+    assert!(
+        initial_install.status.success(),
+        "initial install should succeed\nstdout:\n{}\nstderr:\n{}",
+        initial_install.stdout,
+        initial_install.stderr
+    );
+
+    let mut daemon = spawn_installed_daemon(&repo);
+    wait_for_child_to_stay_alive(&repo, &mut daemon, Duration::from_secs(2));
+
+    let log_path = wait_for_daemon_log_file(&repo, Duration::from_secs(15));
+    wait_for_file_to_contain(&log_path, "daemon log initialized", Duration::from_secs(15));
+
+    kill_installed_processes(&repo);
+    let _ = daemon.wait();
 }
