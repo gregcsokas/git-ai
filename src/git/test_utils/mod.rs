@@ -580,7 +580,7 @@ impl TmpRepo {
             &self.repo_gitai,
             author,
             checkpoint_kind,
-            true,  // quiet
+            true, // quiet
             agent_run_result,
             false,
         )

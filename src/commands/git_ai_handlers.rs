@@ -1211,14 +1211,8 @@ fn run_checkpoint_via_daemon_or_local(
             }
         }
     }
-    let stats = commands::checkpoint::run(
-        repo,
-        author,
-        kind,
-        quiet,
-        agent_run_result,
-        is_pre_commit,
-    )?;
+    let stats =
+        commands::checkpoint::run(repo, author, kind, quiet, agent_run_result, is_pre_commit)?;
     Ok(CheckpointDispatchOutcome {
         stats,
         queued: false,
