@@ -1336,12 +1336,19 @@ impl Repository {
         &self.canonical_workdir
     }
 
-    /// Check if a path is within the repository's working directory
-    /// Uses canonical path comparison for reliability on Windows
+    /// Check if a path is within the repository's working directory.
+    ///
+    /// Returns `false` for paths inside nested independent git repos (subdirectories
+    /// with their own `.git/` directory), since those files belong to the nested repo,
+    /// not this one. Submodules (`.git` file, not directory) are transparent and still
+    /// considered part of this repo.
     pub fn path_is_in_workdir(&self, path: &Path) -> bool {
         // Try canonical comparison first (most reliable, especially on Windows)
         if let Ok(canonical_path) = path.canonicalize() {
-            return canonical_path.starts_with(&self.canonical_workdir);
+            if !canonical_path.starts_with(&self.canonical_workdir) {
+                return false;
+            }
+            return !has_intervening_git_dir(&canonical_path, &self.canonical_workdir);
         }
 
         // Fallback for paths that don't exist yet: normalize by resolving .. and .
@@ -1357,7 +1364,10 @@ impl Repository {
                 }
                 acc
             });
-        normalized.starts_with(&self.workdir)
+        if !normalized.starts_with(&self.workdir) {
+            return false;
+        }
+        !has_intervening_git_dir(&normalized, &self.workdir)
     }
 
     // List all remotes for a given repository
@@ -2871,6 +2881,37 @@ pub fn discover_repository_in_path_no_git_exec(path: &Path) -> Result<Repository
         &paths.git_dir,
         &paths.git_common_dir,
     )
+}
+
+/// Check if any directory between `workdir` and `file_path` contains a `.git/`
+/// directory, indicating a nested independent git repo.
+///
+/// Only `.git` directories count -- `.git` files indicate submodules, which are
+/// transparent to the parent repo.
+fn has_intervening_git_dir(file_path: &Path, workdir: &Path) -> bool {
+    let Ok(relative) = file_path.strip_prefix(workdir) else {
+        return false;
+    };
+
+    // Walk parent directories of the relative path (excluding the file itself
+    // and the empty path). For "subrepo/src/file.ts" we check:
+    //   workdir/subrepo/src/.git
+    //   workdir/subrepo/.git
+    let mut current = relative;
+    loop {
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        let potential_git = workdir.join(parent).join(".git");
+        if potential_git.is_dir() {
+            return true;
+        }
+        current = parent;
+    }
+    false
 }
 
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {

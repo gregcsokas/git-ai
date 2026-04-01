@@ -167,6 +167,72 @@ fn test_path_is_in_workdir() {
         !repo.path_is_in_workdir(outside),
         "File outside workdir should return false"
     );
+
+    // Path inside a nested subrepo (has its own .git/ directory) should return false
+    let nested_repo_dir = test_repo.path().join("nested-repo");
+    fs::create_dir_all(nested_repo_dir.join("src")).unwrap();
+    // Initialize a real git repo in the nested directory
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(&nested_repo_dir)
+        .output()
+        .expect("failed to git init nested repo");
+    let nested_file = nested_repo_dir.join("src").join("nested.txt");
+    fs::write(&nested_file, "nested content").unwrap();
+    assert!(
+        !repo.path_is_in_workdir(&nested_file),
+        "File inside a nested subrepo (with its own .git/ dir) should return false"
+    );
+
+    // Path directly in the nested repo root should also return false
+    let nested_root_file = nested_repo_dir.join("root.txt");
+    fs::write(&nested_root_file, "root content").unwrap();
+    assert!(
+        !repo.path_is_in_workdir(&nested_root_file),
+        "File at root of nested subrepo should return false"
+    );
+
+    // Path in a subdirectory (no nested .git/) should still return true
+    let subdir = test_repo.path().join("regular-subdir");
+    fs::create_dir_all(&subdir).unwrap();
+    let subdir_file = subdir.join("file.txt");
+    fs::write(&subdir_file, "subdir content").unwrap();
+    assert!(
+        repo.path_is_in_workdir(&subdir_file),
+        "File in a regular subdirectory (no .git/) should return true"
+    );
+
+    // Path inside a submodule (.git file, not directory) should return true
+    // Submodules are transparent to the parent repo
+    let submodule_dir = test_repo.path().join("my-submodule");
+    fs::create_dir_all(submodule_dir.join("src")).unwrap();
+    // Simulate a submodule by creating a .git *file* (not directory)
+    fs::write(
+        submodule_dir.join(".git"),
+        "gitdir: ../.git/modules/my-submodule\n",
+    )
+    .unwrap();
+    let submodule_file = submodule_dir.join("src").join("lib.rs");
+    fs::write(&submodule_file, "submodule content").unwrap();
+    assert!(
+        repo.path_is_in_workdir(&submodule_file),
+        "File inside a submodule (.git file, not directory) should return true"
+    );
+
+    // Non-existent file path inside a nested subrepo should return false
+    // (exercises the normalized fallback path since canonicalize() will fail)
+    let nonexistent = nested_repo_dir.join("does-not-exist").join("phantom.txt");
+    assert!(
+        !repo.path_is_in_workdir(&nonexistent),
+        "Non-existent file inside a nested subrepo should return false (fallback path)"
+    );
+
+    // Non-existent file path in the repo (no nested .git) should return true
+    let nonexistent_in_repo = test_repo.path().join("not-yet-created.txt");
+    assert!(
+        repo.path_is_in_workdir(&nonexistent_in_repo),
+        "Non-existent file in the repo (no nested .git/) should return true (fallback path)"
+    );
 }
 
 // ============================================================================
