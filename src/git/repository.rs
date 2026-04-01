@@ -1336,15 +1336,37 @@ impl Repository {
         &self.canonical_workdir
     }
 
-    /// Check if a path is within the repository's working directory
-    /// Uses canonical path comparison for reliability on Windows
+    /// Check if a path is within the repository's working directory.
+    ///
+    /// Returns `false` for paths inside nested independent git repos (subdirectories
+    /// with their own `.git/` directory), since those files belong to the nested repo,
+    /// not this one. Submodules (`.git` file, not directory) are transparent and still
+    /// considered part of this repo.
     pub fn path_is_in_workdir(&self, path: &Path) -> bool {
         // Try canonical comparison first (most reliable, especially on Windows)
         if let Ok(canonical_path) = path.canonicalize() {
-            return canonical_path.starts_with(&self.canonical_workdir);
+            if !canonical_path.starts_with(&self.canonical_workdir) {
+                return false;
+            }
+            return !has_intervening_git_dir(&canonical_path, &self.canonical_workdir);
         }
 
-        // Fallback for paths that don't exist yet: normalize by resolving .. and .
+        // Fallback for paths that don't exist yet: try to canonicalize the parent directory
+        // and append the filename. This handles cases where the path contains symlinks
+        // (e.g., /var -> /private/var on macOS).
+        if let Some(parent) = path.parent()
+            && let Some(filename) = path.file_name()
+            && let Ok(canonical_parent) = parent.canonicalize()
+        {
+            let canonical_path = canonical_parent.join(filename);
+            if !canonical_path.starts_with(&self.canonical_workdir) {
+                return false;
+            }
+            return !has_intervening_git_dir(&canonical_path, &self.canonical_workdir);
+        }
+
+        // Final fallback: normalize by resolving .. and . and check against both
+        // canonical and non-canonical workdir (in case of symlinks)
         let normalized = path
             .components()
             .fold(std::path::PathBuf::new(), |mut acc, component| {
@@ -1357,7 +1379,23 @@ impl Repository {
                 }
                 acc
             });
-        normalized.starts_with(&self.workdir)
+
+        // Try both canonical and non-canonical workdir to handle symlinks
+        let in_canonical = normalized.starts_with(&self.canonical_workdir);
+        let in_workdir = normalized.starts_with(&self.workdir);
+
+        if !in_canonical && !in_workdir {
+            return false;
+        }
+
+        // Use canonical_workdir if path matches it, otherwise use workdir
+        let base = if in_canonical {
+            &self.canonical_workdir
+        } else {
+            &self.workdir
+        };
+
+        !has_intervening_git_dir(&normalized, base)
     }
 
     // List all remotes for a given repository
@@ -2871,6 +2909,37 @@ pub fn discover_repository_in_path_no_git_exec(path: &Path) -> Result<Repository
         &paths.git_dir,
         &paths.git_common_dir,
     )
+}
+
+/// Check if any directory between `workdir` and `file_path` contains a `.git/`
+/// directory, indicating a nested independent git repo.
+///
+/// Only `.git` directories count -- `.git` files indicate submodules, which are
+/// transparent to the parent repo.
+fn has_intervening_git_dir(file_path: &Path, workdir: &Path) -> bool {
+    let Ok(relative) = file_path.strip_prefix(workdir) else {
+        return false;
+    };
+
+    // Walk parent directories of the relative path (excluding the file itself
+    // and the empty path). For "subrepo/src/file.ts" we check:
+    //   workdir/subrepo/src/.git
+    //   workdir/subrepo/.git
+    let mut current = relative;
+    loop {
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        let potential_git = workdir.join(parent).join(".git");
+        if potential_git.is_dir() {
+            return true;
+        }
+        current = parent;
+    }
+    false
 }
 
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
