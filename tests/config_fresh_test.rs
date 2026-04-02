@@ -1,8 +1,8 @@
-/// Tests for config refresh behavior (Config::fresh() vs Config::get())
-/// These tests verify that Config::fresh() reads from disk while Config::get() uses cached values.
-use git_ai::config::{Config, save_file_config, load_file_config_public};
 use git_ai::api::client::ApiContext;
 use git_ai::auth::client::OAuthClient;
+/// Tests for config refresh behavior (Config::fresh() vs Config::get())
+/// These tests verify that Config::fresh() reads from disk while Config::get() uses cached values.
+use git_ai::config::{Config, load_file_config_public, save_file_config};
 use serial_test::serial;
 use std::env;
 use tempfile::TempDir;
