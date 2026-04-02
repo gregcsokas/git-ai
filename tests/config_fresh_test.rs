@@ -24,8 +24,10 @@ fn test_config_fresh_picks_up_file_changes() {
     std::fs::create_dir_all(&config_dir).expect("Failed to create config dir");
 
     // Write initial config with api_base_url = "https://old.example.com"
-    let mut file_config = git_ai::config::FileConfig::default();
-    file_config.api_base_url = Some("https://old.example.com".to_string());
+    let mut file_config = git_ai::config::FileConfig {
+        api_base_url: Some("https://old.example.com".to_string()),
+        ..Default::default()
+    };
     save_file_config(&file_config).expect("Failed to save config");
 
     // Verify file was written
@@ -73,8 +75,10 @@ fn test_config_get_uses_cache() {
     }
 
     // Write initial config
-    let mut file_config = git_ai::config::FileConfig::default();
-    file_config.api_base_url = Some("https://initial.example.com".to_string());
+    let file_config = git_ai::config::FileConfig {
+        api_base_url: Some("https://initial.example.com".to_string()),
+        ..Default::default()
+    };
     save_file_config(&file_config).expect("Failed to save config");
 
     // First call to Config::get() initializes the cache
@@ -213,8 +217,10 @@ fn test_api_context_uses_fresh_config() {
     std::fs::create_dir_all(&config_dir).expect("Failed to create config dir");
 
     // Set initial API URL
-    let mut file_config = git_ai::config::FileConfig::default();
-    file_config.api_base_url = Some("https://api1.example.com".to_string());
+    let mut file_config = git_ai::config::FileConfig {
+        api_base_url: Some("https://api1.example.com".to_string()),
+        ..Default::default()
+    };
     save_file_config(&file_config).expect("Failed to save config");
 
     // Create ApiContext - should use the first URL
@@ -254,8 +260,10 @@ fn test_oauth_client_uses_fresh_config() {
     std::fs::create_dir_all(&config_dir).expect("Failed to create config dir");
 
     // Set initial API URL
-    let mut file_config = git_ai::config::FileConfig::default();
-    file_config.api_base_url = Some("https://auth1.example.com".to_string());
+    let mut file_config = git_ai::config::FileConfig {
+        api_base_url: Some("https://auth1.example.com".to_string()),
+        ..Default::default()
+    };
     save_file_config(&file_config).expect("Failed to save config");
 
     // Create OAuthClient - should use the first URL
