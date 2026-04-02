@@ -17,7 +17,7 @@ fn test_cursor_jsonl_basic_parsing() {
     assert_eq!(model, None, "Model should be None for Cursor JSONL");
 
     // Real Cursor session: HBO shows generation
-    // 1 user message, 3 assistant texts ([REDACTED]-only skipped), 10 tool_use
+    // 1 user message, 10 assistant texts, 10 tool_use
     let messages = transcript.messages();
     assert!(
         !messages.is_empty(),
@@ -38,7 +38,7 @@ fn test_cursor_jsonl_basic_parsing() {
         .count();
 
     assert_eq!(user_count, 1, "Should have 1 user message");
-    assert_eq!(assistant_count, 3, "Should have 3 assistant messages ([REDACTED]-only texts skipped)");
+    assert_eq!(assistant_count, 10, "Should have 10 assistant messages");
     assert_eq!(tool_count, 10, "Should have 10 tool_use messages (Read x3, WebSearch x4, WebFetch, Grep, Write)");
 }
 
@@ -154,7 +154,7 @@ fn test_cursor_jsonl_read_tool_full_args() {
 }
 
 #[test]
-fn test_cursor_jsonl_redacted_text_stripped() {
+fn test_cursor_jsonl_preserves_text_content() {
     use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
 
     let fixture = fixture_path("cursor-session-simple.jsonl");
@@ -162,14 +162,6 @@ fn test_cursor_jsonl_redacted_text_stripped() {
         CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
             .expect("Should parse cursor JSONL");
 
-    let transcript_json =
-        serde_json::to_string(&transcript.messages()).expect("Should serialize messages");
-    assert!(
-        !transcript_json.contains("[REDACTED]"),
-        "[REDACTED] markers should be stripped from transcript"
-    );
-
-    // Most assistant texts are [REDACTED]-only and get skipped; real text is preserved without the marker
     let assistant_messages: Vec<_> = transcript
         .messages()
         .iter()
@@ -182,14 +174,13 @@ fn test_cursor_jsonl_redacted_text_stripped() {
         assistant_messages
             .iter()
             .any(|t| t.contains("HBO")),
-        "Should keep real content from messages that also had [REDACTED]"
+        "Should keep real content from assistant messages"
     );
 }
 
 #[test]
 fn test_cursor_jsonl_empty_file() {
     use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
-    use std::io::Write;
     use tempfile::NamedTempFile;
 
     let temp_file = NamedTempFile::new().expect("Should create temp file");
@@ -489,11 +480,11 @@ fn test_cursor_e2e_with_attribution() {
         "Prompt record should contain messages from the JSONL transcript"
     );
 
-    // The JSONL fixture has 14 messages (1 user + 3 assistant + 10 tool_use; [REDACTED]-only texts skipped)
+    // The JSONL fixture has 21 messages (1 user + 10 assistant + 10 tool_use)
     assert_eq!(
         prompt_record.messages.len(),
-        14,
-        "Should have exactly 14 messages from the JSONL fixture"
+        21,
+        "Should have exactly 21 messages from the JSONL fixture"
     );
 
     // Verify the model was extracted from hook input

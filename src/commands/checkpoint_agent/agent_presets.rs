@@ -1623,20 +1623,18 @@ impl CursorPreset {
                             match item["type"].as_str() {
                                 Some("text") => {
                                     if let Some(text) = item["text"].as_str() {
-                                        let cleaned = Self::strip_redacted(text);
-                                        if !cleaned.is_empty() {
+                                        if !text.trim().is_empty() {
                                             transcript.add_message(Message::assistant(
-                                                cleaned, None,
+                                                text.to_string(), None,
                                             ));
                                         }
                                     }
                                 }
                                 Some("thinking") => {
                                     if let Some(thinking) = item["thinking"].as_str() {
-                                        let cleaned = Self::strip_redacted(thinking);
-                                        if !cleaned.is_empty() {
+                                        if !thinking.trim().is_empty() {
                                             transcript.add_message(Message::assistant(
-                                                cleaned, None,
+                                                thinking.to_string(), None,
                                             ));
                                         }
                                     }
@@ -1679,17 +1677,6 @@ impl CursorPreset {
 
         // Model is not in Cursor JSONL — it comes from hook input
         Ok((transcript, None))
-    }
-
-    /// Strip `[REDACTED]` markers from Cursor assistant text.
-    /// Cursor appends `\n\n[REDACTED]` to many messages, and some messages are
-    /// entirely `[REDACTED]`. This strips trailing occurrences and returns empty
-    /// string if nothing meaningful remains.
-    fn strip_redacted(text: &str) -> String {
-        // Remove all occurrences of [REDACTED] then trim
-        let cleaned = text.replace("[REDACTED]", "");
-        let trimmed = cleaned.trim();
-        trimmed.to_string()
     }
 
     /// Strip `<user_query>...</user_query>` wrapper tags from Cursor user messages.
