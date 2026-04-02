@@ -2216,7 +2216,8 @@ impl Repository {
         args.push("diff".to_string());
         args.push("-U0".to_string()); // Zero context lines
         args.push("--no-color".to_string());
-        args.push("--no-renames".to_string());
+        // Use permissive rename detection to properly handle renames
+        args.push("--find-renames=1%".to_string());
         args.push(from_ref.to_string());
         args.push(to_ref.to_string());
 
@@ -2263,7 +2264,8 @@ impl Repository {
         args.push("diff".to_string());
         args.push("--name-only".to_string());
         args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
-        args.push("--no-renames".to_string());
+        // Use permissive rename detection to properly handle renames
+        args.push("--find-renames=1%".to_string());
         args.push(from_ref.to_string());
         args.push(to_ref.to_string());
 
@@ -2294,7 +2296,8 @@ impl Repository {
         args.push("diff".to_string());
         args.push("-U0".to_string()); // Zero context lines
         args.push("--no-color".to_string());
-        args.push("--no-renames".to_string());
+        // Use permissive rename detection to properly handle renames
+        args.push("--find-renames=1%".to_string());
         args.push(from_ref.to_string());
 
         // Add pathspecs if provided (only as CLI args when under threshold)
