@@ -478,6 +478,74 @@ fn resolve_base_override_dirty_file_execution(
     }
 }
 
+fn explicit_dirty_file_content_if_text(
+    working_log: &PersistedWorkingLog,
+    file_path: &str,
+) -> Option<String> {
+    working_log
+        .dirty_files
+        .as_ref()
+        .and_then(|files| files.get(file_path))
+        .filter(|content| !content.chars().any(|c| c == '\0'))
+        .cloned()
+}
+
+fn resolve_explicit_path_execution(
+    repo: &Repository,
+    working_log: &PersistedWorkingLog,
+    base_commit: &str,
+    ts: u128,
+    explicit_paths: &[String],
+    ignore_matcher: &IgnoreMatcher,
+) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
+    let repo_workdir = repo.workdir()?;
+    let mut files = Vec::new();
+    let mut resolved_dirty_files = HashMap::new();
+    let mut seen = HashSet::new();
+
+    for path in explicit_paths {
+        let normalized_path = normalize_to_posix(path);
+        if !seen.insert(normalized_path.clone()) {
+            continue;
+        }
+        if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+            continue;
+        }
+
+        let path_buf = if std::path::Path::new(&normalized_path).is_absolute() {
+            PathBuf::from(&normalized_path)
+        } else {
+            repo_workdir.join(&normalized_path)
+        };
+        if !repo.path_is_in_workdir(&path_buf) {
+            continue;
+        }
+
+        if let Some(content) = explicit_dirty_file_content_if_text(working_log, &normalized_path) {
+            resolved_dirty_files.insert(normalized_path.clone(), content);
+            files.push(normalized_path);
+            continue;
+        }
+
+        if is_text_file(working_log, &normalized_path)
+            || is_text_file_in_head(repo, &normalized_path)
+        {
+            files.push(normalized_path);
+        }
+    }
+
+    if files.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(ResolvedCheckpointExecution {
+            base_commit: base_commit.to_string(),
+            ts,
+            files,
+            dirty_files: resolved_dirty_files,
+        }))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_live_checkpoint_execution(
     repo: &Repository,
@@ -532,6 +600,7 @@ fn resolve_live_checkpoint_execution(
         .unwrap_or_default()
         .as_millis();
 
+    let has_explicit_target_paths = explicit_capture_target_paths(kind, agent_run_result).is_some();
     let pathspec_start = Instant::now();
     let filtered_pathspec = filtered_pathspecs_for_agent_run_result(repo, kind, agent_run_result);
     debug_log(&format!(
@@ -587,6 +656,21 @@ fn resolve_live_checkpoint_execution(
             }
             _ => {}
         }
+    }
+
+    if has_explicit_target_paths {
+        return if let Some(explicit_paths) = filtered_pathspec.as_ref() {
+            resolve_explicit_path_execution(
+                repo,
+                &working_log,
+                &base_commit,
+                ts,
+                explicit_paths,
+                &ignore_matcher,
+            )
+        } else {
+            Ok(None)
+        };
     }
 
     let files_start = Instant::now();
