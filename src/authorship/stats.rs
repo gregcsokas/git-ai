@@ -653,6 +653,12 @@ pub fn get_git_diff_stats(
     let commit_obj = repo.revparse_single(commit_sha)?.peel_to_commit()?;
     let parent_count = commit_obj.parent_count()?;
 
+    // For merge commits, return (0, 0) to match the behavior of `git show --numstat`
+    // which shows a combined diff (typically 0 lines for clean merges)
+    if parent_count > 1 {
+        return Ok((0, 0));
+    }
+
     let from_ref = if parent_count == 0 {
         "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
     } else {
