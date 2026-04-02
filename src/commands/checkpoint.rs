@@ -490,6 +490,7 @@ fn explicit_dirty_file_content_if_text(
         .cloned()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_explicit_path_execution(
     repo: &Repository,
     working_log: &PersistedWorkingLog,
