@@ -13,6 +13,7 @@ use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes}
 use crate::utils::debug_log;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
+use unicode_normalization::UnicodeNormalization;
 
 use gix_index::entry::Stage;
 use regex::Regex;
@@ -2220,14 +2221,15 @@ impl Repository {
         args.push(from_ref.to_string());
         args.push(to_ref.to_string());
 
-        // Add pathspecs if provided (only as CLI args when under threshold)
+        // Add pathspecs if provided (only as CLI args when under threshold).
+        // Force post-filtering when any pathspec contains non-ASCII characters,
+        // because NFC-normalised pathspecs may not match NFD entries in git's
+        // index on macOS when core.precomposeunicode is false.
         let needs_post_filter = if let Some(paths) = pathspecs {
-            // for case where pathspec filter provided BUT not pathspecs.
-            // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok(HashMap::new());
             }
-            if paths.len() > MAX_PATHSPEC_ARGS {
+            if paths.len() > MAX_PATHSPEC_ARGS || has_non_ascii_pathspec(paths) {
                 true
             } else {
                 args.push("--".to_string());
@@ -2297,14 +2299,12 @@ impl Repository {
         args.push("--no-renames".to_string());
         args.push(from_ref.to_string());
 
-        // Add pathspecs if provided (only as CLI args when under threshold)
+        // See diff_added_lines for why non-ASCII pathspecs need post-filtering.
         let needs_post_filter = if let Some(paths) = pathspecs {
-            // for case where pathspec filter provided BUT not pathspecs.
-            // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok(HashMap::new());
             }
-            if paths.len() > MAX_PATHSPEC_ARGS {
+            if paths.len() > MAX_PATHSPEC_ARGS || has_non_ascii_pathspec(paths) {
                 true
             } else {
                 args.push("--".to_string());
@@ -2347,14 +2347,12 @@ impl Repository {
         args.push("--no-renames".to_string());
         args.push(from_ref.to_string());
 
-        // Add pathspecs if provided (only as CLI args when under threshold)
+        // See diff_added_lines for why non-ASCII pathspecs need post-filtering.
         let needs_post_filter = if let Some(paths) = pathspecs {
-            // for case where pathspec filter provided BUT not pathspecs.
-            // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok((HashMap::new(), HashMap::new()));
             }
-            if paths.len() > MAX_PATHSPEC_ARGS {
+            if paths.len() > MAX_PATHSPEC_ARGS || has_non_ascii_pathspec(paths) {
                 true
             } else {
                 args.push("--".to_string());
@@ -3378,15 +3376,23 @@ fn parse_diff_added_lines_with_insertions(
     Ok((all_lines, insertion_lines))
 }
 
+/// Returns true if any path in the set contains non-ASCII characters.
+/// Used to decide whether git pathspecs need post-filtering instead of CLI args,
+/// since NFC-normalised pathspecs may not match NFD entries in git's index.
+fn has_non_ascii_pathspec(paths: &HashSet<String>) -> bool {
+    paths.iter().any(|s| !s.is_ascii())
+}
+
 fn normalize_diff_path_token(path: &str) -> String {
     let unescaped = crate::utils::unescape_git_path(path.trim_end());
     let prefixes = ["a/", "b/", "c/", "w/", "i/", "o/"];
-    for prefix in prefixes {
-        if let Some(stripped) = unescaped.strip_prefix(prefix) {
-            return stripped.to_string();
-        }
-    }
-    unescaped
+    let stripped = prefixes
+        .iter()
+        .find_map(|prefix| unescaped.strip_prefix(prefix))
+        .unwrap_or(&unescaped);
+    // Apply NFC normalization so decomposed (NFD) paths from git diff match
+    // NFC paths used internally (see normalize_to_posix).
+    stripped.nfc().collect()
 }
 
 fn parse_new_file_path_from_plus_header_line(line: &str) -> Option<Option<String>> {

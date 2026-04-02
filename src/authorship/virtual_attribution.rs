@@ -9,6 +9,7 @@ use crate::git::repository::Repository;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use unicode_normalization::UnicodeNormalization;
 
 pub struct VirtualAttributions {
     repo: Repository,
@@ -2240,7 +2241,18 @@ fn file_exists_in_commit(
 ) -> Result<bool, GitAiError> {
     let commit = repo.find_commit(commit_sha.to_string())?;
     let tree = commit.tree()?;
-    Ok(tree.get_path(std::path::Path::new(file_path)).is_ok())
+    if tree.get_path(std::path::Path::new(file_path)).is_ok() {
+        return Ok(true);
+    }
+    // On macOS, internal paths are NFC-normalised but git trees may store the
+    // original NFD form.  Fall back to an NFD lookup when the NFC lookup fails.
+    if !file_path.is_ascii() {
+        let nfd_path: String = file_path.nfd().collect();
+        if nfd_path != file_path {
+            return Ok(tree.get_path(std::path::Path::new(&nfd_path)).is_ok());
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

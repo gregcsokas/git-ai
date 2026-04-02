@@ -3,6 +3,7 @@ use crate::git::diff_tree_to_tree::Diff;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use unicode_normalization::UnicodeNormalization;
 
 /// Check if debug logging is enabled via environment variable
 ///
@@ -96,7 +97,10 @@ pub fn _print_diff(diff: &Diff, old_label: &str, new_label: &str) {
 
 #[inline]
 pub fn normalize_to_posix(path: &str) -> String {
-    path.replace('\\', "/")
+    // Apply Unicode NFC normalization so that decomposed (NFD) filenames
+    // from macOS (e.g. e + combining acute) match precomposed (NFC) paths
+    // returned by git when core.precomposeunicode=true.
+    path.replace('\\', "/").nfc().collect()
 }
 
 fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
