@@ -186,11 +186,17 @@ impl Repository {
         let mut entries = parse_porcelain_v2(&output.stdout)?;
 
         if needs_post_filter {
+            // NFC-normalize pathspecs for comparison because parse_porcelain_v2
+            // emits NFC paths, but caller-supplied pathspecs may be NFD.
+            let nfc_pathspecs: HashSet<String> = combined_pathspecs
+                .iter()
+                .map(|s| nfc_path(s.clone()))
+                .collect();
             entries.retain(|e| {
-                combined_pathspecs.contains(&e.path)
+                nfc_pathspecs.contains(&e.path)
                     || e.orig_path
                         .as_ref()
-                        .is_some_and(|op| combined_pathspecs.contains(op))
+                        .is_some_and(|op| nfc_pathspecs.contains(op))
             });
         }
 

@@ -2248,7 +2248,8 @@ impl Repository {
         let mut result = parse_diff_added_lines(&diff_output)?;
 
         if needs_post_filter && let Some(paths) = pathspecs {
-            result.retain(|path, _| paths.contains(path));
+            let nfc_paths: HashSet<String> = paths.iter().map(|s| s.nfc().collect()).collect();
+            result.retain(|path, _| nfc_paths.contains(path));
         }
 
         Ok(result)
@@ -2323,7 +2324,8 @@ impl Repository {
         let mut result = parse_diff_added_lines(&diff_output)?;
 
         if needs_post_filter && let Some(paths) = pathspecs {
-            result.retain(|path, _| paths.contains(path));
+            let nfc_paths: HashSet<String> = paths.iter().map(|s| s.nfc().collect()).collect();
+            result.retain(|path, _| nfc_paths.contains(path));
         }
 
         Ok(result)
@@ -2372,8 +2374,9 @@ impl Repository {
             parse_diff_added_lines_with_insertions(&diff_output)?;
 
         if needs_post_filter && let Some(paths) = pathspecs {
-            all_added.retain(|path, _| paths.contains(path));
-            pure_insertions.retain(|path, _| paths.contains(path));
+            let nfc_paths: HashSet<String> = paths.iter().map(|s| s.nfc().collect()).collect();
+            all_added.retain(|path, _| nfc_paths.contains(path));
+            pure_insertions.retain(|path, _| nfc_paths.contains(path));
         }
 
         Ok((all_added, pure_insertions))
