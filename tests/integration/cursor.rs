@@ -564,6 +564,10 @@ fn test_cursor_e2e_with_resync() {
             .append(true)
             .open(&temp_jsonl_path)
             .expect("Should open temp JSONL for appending");
+        // The fixture file may not end with a newline, so write one first to ensure
+        // the appended line starts on its own line (otherwise it merges with the last
+        // line and produces invalid JSON).
+        write!(file, "\n").expect("Should write newline separator");
         writeln!(
             file,
             r#"{{"role":"assistant","message":{{"content":[{{"type":"text","text":"RESYNC_TEST_MESSAGE: This was added after the checkpoint"}}]}}}}"#
