@@ -553,6 +553,174 @@ fn test_pull_rebase_skip_commit_does_not_map_entire_upstream_history() {
     );
 }
 
+// =============================================================================
+// Pull --rebase with conflict resolution (notes lost due to SHA rewrite)
+// Reproduces: docs/test-rebase-notes-los.md
+// =============================================================================
+
+/// Setup for the two-session conflict scenario:
+/// Session A and Session B both start from the same commit. Session A pushes
+/// AI-authored changes to a shared file. Session B independently makes
+/// AI-authored changes to the same file (without pulling). When Session B
+/// rebases, the shared file conflicts. After resolution, AI authorship notes
+/// should be preserved on the new (rebased) commit SHAs.
+struct ConflictPullTestSetup {
+    local: TestRepo,
+    #[allow(dead_code)]
+    upstream: TestRepo,
+    /// SHA of Session B's local AI commit (will get a new SHA after rebase)
+    session_b_ai_commit_sha: String,
+}
+
+/// Creates a test setup that reproduces the notes-lost-on-rebase scenario:
+/// 1. Creates upstream (bare) and local (clone) repos
+/// 2. Makes an initial commit with a shared file, pushes to upstream
+/// 3. Simulates Session A: edits the shared file with AI content, pushes
+/// 4. Simulates Session B: resets local to before Session A's push,
+///    edits the same shared file with different AI content (diverged)
+///
+/// After this setup:
+/// - upstream has: initial + Session A's AI commit (edits README.md)
+/// - local has: initial + Session B's AI commit (edits README.md)
+/// - `git pull --rebase` will conflict on README.md
+fn setup_conflict_pull_test() -> ConflictPullTestSetup {
+    let (local, upstream) = TestRepo::new_with_remote();
+
+    // Initial commit: shared file that both sessions will edit
+    let mut readme = local.filename("README.md");
+    readme.set_contents(vec![
+        "# Project".human(),
+        "Initial content line 1".human(),
+        "Initial content line 2".human(),
+    ]);
+    let initial = local
+        .stage_all_and_commit("initial commit")
+        .expect("initial commit should succeed");
+
+    local
+        .git(&["push", "-u", "origin", "HEAD"])
+        .expect("push initial commit should succeed");
+
+    let branch = local.current_branch();
+
+    // --- Session A: edit README.md with AI content, push to upstream ---
+    let mut session_a_readme = local.filename("README.md");
+    session_a_readme.set_contents(vec![
+        "# Project".human(),
+        "Session A: AI-enhanced line 1".ai(),
+        "Session A: AI-enhanced line 2".ai(),
+    ]);
+    local
+        .stage_all_and_commit("Session A: AI enhancements")
+        .expect("Session A commit should succeed");
+
+    local
+        .git(&["push", "origin", &format!("HEAD:{}", branch)])
+        .expect("Session A push should succeed");
+
+    // --- Session B: reset to initial (as if Session B never saw A's push) ---
+    local
+        .git(&["reset", "--hard", &initial.commit_sha])
+        .expect("reset to initial should succeed");
+
+    // Session B: edit the same file with different AI content
+    let mut session_b_readme = local.filename("README.md");
+    session_b_readme.set_contents(vec![
+        "# Project".human(),
+        "Session B: AI-generated line 1".ai(),
+        "Session B: AI-generated line 2".ai(),
+    ]);
+    local
+        .stage_all_and_commit("Session B: AI feature")
+        .expect("Session B commit should succeed");
+
+    let session_b_sha = local
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    ConflictPullTestSetup {
+        local,
+        upstream,
+        session_b_ai_commit_sha: session_b_sha,
+    }
+}
+
+#[test]
+fn test_pull_rebase_with_conflict_preserves_ai_notes() {
+    let setup = setup_conflict_pull_test();
+    let local = setup.local;
+
+    // Verify Session B's AI commit has authorship notes before rebase
+    let pre_rebase_note = local.read_authorship_note(&setup.session_b_ai_commit_sha);
+    assert!(
+        pre_rebase_note.is_some(),
+        "Session B's AI commit should have authorship notes before rebase"
+    );
+
+    // Configure pull to use rebase (matching the doc scenario)
+    local
+        .git(&["config", "pull.rebase", "true"])
+        .expect("set pull.rebase should succeed");
+
+    // Fetch so we know about upstream's diverged state
+    local
+        .git(&["fetch", "origin"])
+        .expect("fetch should succeed");
+
+    // Pull will rebase — this should conflict on README.md
+    let pull_result = local.git(&["pull"]);
+    assert!(
+        pull_result.is_err(),
+        "pull --rebase should fail due to conflict on README.md"
+    );
+
+    // Resolve the conflict: keep both sessions' contributions
+    use std::fs;
+    fs::write(
+        local.path().join("README.md"),
+        "# Project\nSession A: AI-enhanced line 1\nSession A: AI-enhanced line 2\nSession B: AI-generated line 1\nSession B: AI-generated line 2\n",
+    )
+    .expect("writing resolved file should succeed");
+
+    local
+        .git(&["add", "README.md"])
+        .expect("staging resolved file should succeed");
+
+    local
+        .git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should succeed");
+
+    // The rebased commit has a new SHA
+    let new_head = local
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    assert_ne!(
+        new_head, setup.session_b_ai_commit_sha,
+        "HEAD should have a new SHA after rebase"
+    );
+
+    // This is the core assertion from the doc:
+    // After rebase, the new commit SHA should still have authorship notes.
+    let post_rebase_note = local.read_authorship_note(&new_head);
+    assert!(
+        post_rebase_note.is_some(),
+        "Rebased commit should have authorship notes (notes should follow SHA rewrite)"
+    );
+
+    // Verify the note content references the AI-authored file
+    let note_content = post_rebase_note.unwrap();
+    assert!(
+        note_content.contains("README.md"),
+        "Authorship note should reference README.md, got: {}",
+        note_content
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_fast_forward_pull_preserves_ai_attribution,
     test_fast_forward_pull_without_local_changes,
@@ -563,4 +731,5 @@ crate::reuse_tests_in_worktree!(
     test_pull_rebase_autostash_via_git_config,
     test_pull_rebase_committed_and_autostash_preserves_all_authorship,
     test_pull_rebase_skip_commit_does_not_map_entire_upstream_history,
+    test_pull_rebase_with_conflict_preserves_ai_notes,
 );
