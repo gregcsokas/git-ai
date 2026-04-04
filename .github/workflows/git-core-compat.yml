@@ -87,4 +87,6 @@ jobs:
 
       - name: Run core Git compatibility tests
         timeout-minutes: 10
+        env:
+          PYTHONUNBUFFERED: "1"
         run: python3 tests/git-compat/run-core-tests.py
