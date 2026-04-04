@@ -646,7 +646,6 @@ fn build_config() -> Config {
                 .and_then(|c| c.api_key.clone())
                 .filter(|s| !s.is_empty())
         });
-
     // Get quiet setting (defaults to false)
     let quiet = file_cfg.as_ref().and_then(|c| c.quiet).unwrap_or(false);
 

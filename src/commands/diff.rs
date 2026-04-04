@@ -15,7 +15,6 @@ use unicode_normalization::UnicodeNormalization;
 // ============================================================================
 // Data Structures
 // ============================================================================
-
 #[derive(Debug, Clone)]
 pub enum DiffSpec {
     SingleCommit(String),      // SHA
