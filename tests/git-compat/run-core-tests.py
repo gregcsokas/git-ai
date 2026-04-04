@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 import shlex
@@ -56,9 +57,8 @@ def make_isolated_env(isolated_home: str) -> dict:
     # Write minimal git-ai config: async_mode=false to disable daemon auto-spawn
     git_ai_dir = os.path.join(isolated_home, ".git-ai")
     os.makedirs(git_ai_dir, exist_ok=True)
-    import json as _json
     with open(os.path.join(git_ai_dir, "config.json"), "w") as f:
-        _json.dump({"feature_flags": {"async_mode": False}}, f)
+        json.dump({"feature_flags": {"async_mode": False}}, f)
 
     # Sanitize PATH: remove any entries where git resolves to a git-ai wrapper.
     # This prevents the compat test suite from accidentally invoking git-ai for

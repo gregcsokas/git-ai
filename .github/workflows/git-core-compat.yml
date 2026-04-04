@@ -54,8 +54,21 @@ jobs:
           restore-keys: |
             ubuntu-cargo-
 
+      - name: Get week for git source cache key
+        id: date
+        run: echo "week=$(date +'%Y-%U')" >> $GITHUB_OUTPUT
+
+      - name: Cache git source
+        uses: actions/cache@v5
+        with:
+          path: /tmp/git-core-tests
+          key: git-source-${{ runner.os }}-${{ steps.date.outputs.week }}
+          restore-keys: |
+            git-source-${{ runner.os }}-
+
       - name: Build git-ai
         run: cargo build --release --bin git-ai
 
       - name: Run core Git compatibility tests
+        timeout-minutes: 20
         run: python3 tests/git-compat/run-core-tests.py
