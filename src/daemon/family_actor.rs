@@ -139,6 +139,11 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                         let entry = state.watermarks.per_worktree.entry(worktree).or_insert(0);
                         if ts > *entry {
                             *entry = ts;
+                            // Prune per-file watermarks superseded by this worktree watermark.
+                            // A per-file entry older than worktree_wm would cause Tier 1 false
+                            // positives: the file would appear stale even though it was captured
+                            // by the full human checkpoint at worktree_wm.
+                            state.watermarks.per_file.retain(|_, file_ts| *file_ts > ts);
                         }
                     }
                 }
@@ -286,6 +291,44 @@ mod tests {
 
         let wm = handle.watermarks().await.unwrap();
         assert_eq!(wm.per_worktree.get("/repo"), Some(&5000));
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_worktree_watermark_prunes_stale_per_file_entries() {
+        let handle = spawn_family_actor(FamilyKey::new("test-family"));
+
+        // Set per-file watermarks at various timestamps
+        let mut per_file = HashMap::new();
+        per_file.insert("src/old.rs".to_string(), 1000_u128); // will be pruned: 1000 <= 3000
+        per_file.insert("src/also_old.rs".to_string(), 3000_u128); // at boundary: 3000 <= 3000, pruned
+        per_file.insert("src/new.rs".to_string(), 5000_u128); // kept: 5000 > 3000
+        handle
+            .update_watermarks(WatermarkState {
+                per_file,
+                per_worktree: HashMap::new(),
+            })
+            .await
+            .unwrap();
+
+        // Advance worktree watermark to 3000
+        let mut per_worktree = HashMap::new();
+        per_worktree.insert("/repo".to_string(), 3000_u128);
+        handle
+            .update_watermarks(WatermarkState {
+                per_file: HashMap::new(),
+                per_worktree,
+            })
+            .await
+            .unwrap();
+
+        let wm = handle.watermarks().await.unwrap();
+        // Entries at or before worktree_wm are pruned (they are superseded by the full checkpoint)
+        assert!(wm.per_file.get("src/old.rs").is_none(), "old entry should be pruned");
+        assert!(wm.per_file.get("src/also_old.rs").is_none(), "boundary entry should be pruned");
+        // Entry newer than worktree_wm is preserved
+        assert_eq!(wm.per_file.get("src/new.rs"), Some(&5000));
 
         handle.shutdown().await.unwrap();
     }

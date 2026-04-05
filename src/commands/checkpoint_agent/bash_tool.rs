@@ -319,8 +319,93 @@ pub fn load_tracked_files(repo_root: &Path) -> Result<HashSet<PathBuf>, GitAiErr
 }
 
 /// Build frozen `.gitignore` rules from the repo root at a point in time.
+///
+/// In addition to `.gitignore` files found in the tree, this also adds:
+/// - git-ai's default ignore patterns (lock files, node_modules, etc.)
+/// - Patterns from `.git-ai-ignore` at the repo root
+/// - Linguist-generated patterns from `.gitattributes` at the repo root
+///
+/// These extra patterns apply only to Tier 2 (untracked files). Tracked files
+/// are always included regardless.
 pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
     let mut builder = GitignoreBuilder::new(repo_root);
+
+    // --- Default git-ai ignore patterns (lock files, generated files, etc.) ---
+    const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
+        "*.lock",
+        "Cargo.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "go.sum",
+        "Gemfile.lock",
+        "poetry.lock",
+        "composer.lock",
+        "Pipfile.lock",
+        "shrinkwrap.yaml",
+        "*.generated.*",
+        "*.min.js",
+        "*.min.css",
+        "*.map",
+        "**/vendor/**",
+        "**/node_modules/**",
+        "**/__snapshots__/**",
+        "**/*.snap",
+        "**/*.snap.new",
+        "**/drizzle/meta/**",
+    ];
+    for pattern in DEFAULT_IGNORE_PATTERNS {
+        if let Err(e) = builder.add_line(None, pattern) {
+            debug_log(&format!("Warning: failed to add default ignore pattern '{}': {}", pattern, e));
+        }
+    }
+
+    // --- .git-ai-ignore patterns from repo root ---
+    let git_ai_ignore_path = repo_root.join(".git-ai-ignore");
+    if git_ai_ignore_path.exists() {
+        if let Ok(contents) = fs::read_to_string(&git_ai_ignore_path) {
+            for raw_line in contents.lines() {
+                let line = raw_line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Err(e) = builder.add_line(None, line) {
+                    debug_log(&format!("Warning: failed to add .git-ai-ignore pattern '{}': {}", line, e));
+                }
+            }
+        }
+    }
+
+    // --- Linguist-generated patterns from .gitattributes at repo root ---
+    let gitattributes_path = repo_root.join(".gitattributes");
+    if gitattributes_path.exists() {
+        if let Ok(contents) = fs::read_to_string(&gitattributes_path) {
+            for raw_line in contents.lines() {
+                let line = raw_line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let tokens: Vec<&str> = line.split_whitespace().collect();
+                if tokens.len() < 2 || tokens[0].starts_with("[attr]") {
+                    continue;
+                }
+                let path_pattern = tokens[0];
+                let is_generated = tokens[1..].iter().any(|attr| {
+                    *attr == "linguist-generated"
+                        || attr.eq_ignore_ascii_case("linguist-generated=true")
+                        || *attr == "linguist-generated=1"
+                });
+                if is_generated {
+                    if let Err(e) = builder.add_line(None, path_pattern) {
+                        debug_log(&format!(
+                            "Warning: failed to add linguist-generated pattern '{}': {}",
+                            path_pattern, e
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     // Recursively collect .gitignore files from the repo tree.
     // Depth-limited and time-limited to avoid excessive traversal.
