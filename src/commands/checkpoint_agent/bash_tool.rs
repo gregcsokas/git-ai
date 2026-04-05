@@ -3,6 +3,10 @@
 //! Detects file changes made by bash/shell tool calls by comparing filesystem
 //! metadata snapshots taken before and after tool execution.
 
+use crate::authorship::ignore::{
+    default_ignore_patterns, load_git_ai_ignore_patterns_from_path,
+    load_linguist_generated_patterns_from_path,
+};
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint::prepare_captured_checkpoint;
 use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
@@ -330,80 +334,20 @@ pub fn load_tracked_files(repo_root: &Path) -> Result<HashSet<PathBuf>, GitAiErr
 pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
     let mut builder = GitignoreBuilder::new(repo_root);
 
-    // --- Default git-ai ignore patterns (lock files, generated files, etc.) ---
-    const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
-        "*.lock",
-        "Cargo.lock",
-        "package-lock.json",
-        "yarn.lock",
-        "pnpm-lock.yaml",
-        "go.sum",
-        "Gemfile.lock",
-        "poetry.lock",
-        "composer.lock",
-        "Pipfile.lock",
-        "shrinkwrap.yaml",
-        "*.generated.*",
-        "*.min.js",
-        "*.min.css",
-        "*.map",
-        "**/vendor/**",
-        "**/node_modules/**",
-        "**/__snapshots__/**",
-        "**/*.snap",
-        "**/*.snap.new",
-        "**/drizzle/meta/**",
-    ];
-    for pattern in DEFAULT_IGNORE_PATTERNS {
+    // --- Shared ignore patterns (same source of truth as non-bash checkpoints) ---
+    // Combines: git-ai defaults, .git-ai-ignore, linguist-generated from .gitattributes.
+    // This keeps bash-tool snapshot filtering in sync with human/mock-AI checkpoint filtering.
+    let shared_patterns: Vec<String> = default_ignore_patterns()
+        .into_iter()
+        .chain(load_git_ai_ignore_patterns_from_path(repo_root))
+        .chain(load_linguist_generated_patterns_from_path(repo_root))
+        .collect();
+    for pattern in &shared_patterns {
         if let Err(e) = builder.add_line(None, pattern) {
-            debug_log(&format!("Warning: failed to add default ignore pattern '{}': {}", pattern, e));
-        }
-    }
-
-    // --- .git-ai-ignore patterns from repo root ---
-    let git_ai_ignore_path = repo_root.join(".git-ai-ignore");
-    if git_ai_ignore_path.exists() {
-        if let Ok(contents) = fs::read_to_string(&git_ai_ignore_path) {
-            for raw_line in contents.lines() {
-                let line = raw_line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Err(e) = builder.add_line(None, line) {
-                    debug_log(&format!("Warning: failed to add .git-ai-ignore pattern '{}': {}", line, e));
-                }
-            }
-        }
-    }
-
-    // --- Linguist-generated patterns from .gitattributes at repo root ---
-    let gitattributes_path = repo_root.join(".gitattributes");
-    if gitattributes_path.exists() {
-        if let Ok(contents) = fs::read_to_string(&gitattributes_path) {
-            for raw_line in contents.lines() {
-                let line = raw_line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                let tokens: Vec<&str> = line.split_whitespace().collect();
-                if tokens.len() < 2 || tokens[0].starts_with("[attr]") {
-                    continue;
-                }
-                let path_pattern = tokens[0];
-                let is_generated = tokens[1..].iter().any(|attr| {
-                    *attr == "linguist-generated"
-                        || attr.eq_ignore_ascii_case("linguist-generated=true")
-                        || *attr == "linguist-generated=1"
-                });
-                if is_generated {
-                    if let Err(e) = builder.add_line(None, path_pattern) {
-                        debug_log(&format!(
-                            "Warning: failed to add linguist-generated pattern '{}': {}",
-                            path_pattern, e
-                        ));
-                    }
-                }
-            }
+            debug_log(&format!(
+                "Warning: failed to add ignore pattern '{}': {}",
+                pattern, e
+            ));
         }
     }
 
@@ -475,7 +419,9 @@ pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
 /// Check whether a newly created (untracked) file should be included.
 /// Returns true if the file is NOT ignored by .gitignore rules.
 pub fn should_include_new_file(gitignore: &Gitignore, path: &Path, is_dir: bool) -> bool {
-    let matched = gitignore.matched(path, is_dir);
+    // Use matched_path_or_any_parents so directory patterns like `secrets/` also
+    // exclude files nested inside that directory (e.g. `secrets/token.txt`).
+    let matched = gitignore.matched_path_or_any_parents(path, is_dir);
     !matched.is_ignore()
 }
 
@@ -2089,6 +2035,102 @@ mod tests {
             1,
             "duplicate after cold-start dedup: stale_files = {:?}",
             stale_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_gitignore tests
+    // -----------------------------------------------------------------------
+
+    fn init_git_repo(dir: &Path) {
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+    }
+
+    /// Default ignore patterns (e.g. node_modules, lock files) are applied even
+    /// when no .gitignore exists in the repo.
+    #[test]
+    fn test_build_gitignore_applies_default_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+
+        let gitignore = build_gitignore(dir.path()).unwrap();
+
+        // node_modules and lock files must be excluded by default
+        assert!(
+            !should_include_new_file(&gitignore, Path::new("node_modules/react/index.js"), false),
+            "node_modules should be ignored by default"
+        );
+        assert!(
+            !should_include_new_file(&gitignore, Path::new("package-lock.json"), false),
+            "package-lock.json should be ignored by default"
+        );
+        assert!(
+            !should_include_new_file(&gitignore, Path::new("yarn.lock"), false),
+            "yarn.lock should be ignored by default"
+        );
+
+        // Normal source files must not be excluded
+        assert!(
+            should_include_new_file(&gitignore, Path::new("src/main.rs"), false),
+            "src/main.rs should not be ignored"
+        );
+    }
+
+    /// Patterns in .git-ai-ignore are respected, suppressing untracked files
+    /// that aren't covered by .gitignore.
+    #[test]
+    fn test_build_gitignore_reads_git_ai_ignore() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+
+        fs::write(dir.path().join(".git-ai-ignore"), "secrets/\n*.pem\n").unwrap();
+
+        let gitignore = build_gitignore(dir.path()).unwrap();
+
+        assert!(
+            !should_include_new_file(&gitignore, Path::new("secrets/token.txt"), false),
+            "secrets/ should be ignored via .git-ai-ignore"
+        );
+        assert!(
+            !should_include_new_file(&gitignore, Path::new("server.pem"), false),
+            "*.pem should be ignored via .git-ai-ignore"
+        );
+        assert!(
+            should_include_new_file(&gitignore, Path::new("README.md"), false),
+            "README.md should not be ignored"
+        );
+    }
+
+    /// Files marked linguist-generated in .gitattributes are excluded from
+    /// the Tier 2 snapshot.
+    #[test]
+    fn test_build_gitignore_reads_linguist_generated_from_gitattributes() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+
+        fs::write(
+            dir.path().join(".gitattributes"),
+            "generated/*.pb.go linguist-generated=true\ndocs/api.md linguist-generated\n",
+        )
+        .unwrap();
+
+        let gitignore = build_gitignore(dir.path()).unwrap();
+
+        assert!(
+            !should_include_new_file(&gitignore, Path::new("generated/foo.pb.go"), false),
+            "linguist-generated glob should be ignored"
+        );
+        assert!(
+            !should_include_new_file(&gitignore, Path::new("docs/api.md"), false),
+            "linguist-generated exact file should be ignored"
+        );
+        assert!(
+            should_include_new_file(&gitignore, Path::new("generated/manual.go"), false),
+            "non-generated file in generated/ should not be ignored"
         );
     }
 }
