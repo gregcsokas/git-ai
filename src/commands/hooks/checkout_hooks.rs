@@ -85,7 +85,12 @@ pub fn post_checkout_hook(
     exit_status: std::process::ExitStatus,
     command_hooks_context: &mut CommandHooksContext,
 ) {
-    if !exit_status.success() {
+    let is_merge = is_merge_checkout(parsed_args);
+
+    // Fix #957: `checkout --merge` exits with code 1 when it produces conflict markers,
+    // but we must still restore the stashed VA so attribution is not lost.  All other
+    // failed checkouts are skipped as before.
+    if !exit_status.success() && !is_merge {
         debug_log("Checkout failed, skipping working log handling");
         return;
     }
@@ -113,8 +118,10 @@ pub fn post_checkout_hook(
         return;
     }
 
-    // Case 2: HEAD unchanged (e.g., checkout current branch)
-    if old_head == new_head {
+    // Case 2: HEAD unchanged (e.g., checkout current branch).
+    // Skip this check for --merge checkouts: when checkout --merge conflicts, HEAD stays
+    // at old_head but we still need to restore stashed VA attribution.
+    if old_head == new_head && !is_merge {
         debug_log("HEAD unchanged after checkout, no working log handling needed");
         return;
     }
@@ -131,14 +138,33 @@ pub fn post_checkout_hook(
         return;
     }
 
-    // Case 4: --merge checkout - restore VirtualAttributions (lines may have shifted)
-    if let Some(stashed_va) = command_hooks_context.stashed_va.take() {
-        debug_log("Restoring VA after checkout --merge");
-        let _ = repository
-            .storage
-            .delete_working_log_for_base_commit(&old_head);
-        restore_stashed_va(repository, &old_head, &new_head, stashed_va);
-        return;
+    // Case 4: --merge checkout - restore VirtualAttributions (lines may have shifted).
+    // In wrapper mode the VA is captured by pre_checkout_hook into stashed_va.
+    // In daemon mode (where hooks run as separate processes), stashed_va is None, so
+    // we rebuild the pre-checkout VA directly from the working log for old_head, which
+    // is still intact at this point.
+    if is_merge {
+        let human_author = get_commit_default_author(repository, &parsed_args.command_args);
+        let stashed_va = command_hooks_context.stashed_va.take().or_else(|| {
+            VirtualAttributions::from_just_working_log(
+                repository.clone(),
+                old_head.clone(),
+                Some(human_author),
+            )
+            .ok()
+            .filter(|va| !va.attributions.is_empty())
+        });
+
+        if let Some(stashed_va) = stashed_va {
+            debug_log("Restoring VA after checkout --merge");
+            let _ = repository
+                .storage
+                .delete_working_log_for_base_commit(&old_head);
+            restore_stashed_va(repository, &old_head, &new_head, stashed_va);
+            return;
+        }
+        debug_log("checkout --merge: no VA to restore, falling through to working log migration");
+        // Fall through to Case 5 so the working log is renamed to the new HEAD.
     }
 
     // Case 5: Normal branch checkout - migrate working log

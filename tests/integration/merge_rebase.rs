@@ -270,50 +270,73 @@ fn test_blame_after_merge_conflict_resolution() {
     ]);
 }
 
-/// Regression test for #953: merge conflict resolved by AI (mock_ai), committed outside session
+/// Regression test for #953: a merge conflict resolved by AI (mock_ai) via checkpoint,
+/// committed without an active AI coding session, must produce correct attribution.
+///
+/// Scenario: Two branches diverge on the same line.  The merge conflicts.  An AI tool
+/// (mock_ai) resolves the conflict by rewriting the file and calling `git-ai checkpoint`.
+/// The human then stages and commits.  The commit should attribute the AI-written line
+/// to mock_ai and the unchanged human line to the human author.
 #[test]
 fn test_merge_conflict_ai_resolution_outside_session() {
     let repo = TestRepo::new();
 
-    // Create base commit
+    // Base: two-line Python class.
     let mut file = repo.filename("app.py");
     file.set_contents(crate::lines!["class App:", "    pass"]);
     repo.stage_all_and_commit("initial").unwrap();
     let main_branch = repo.current_branch();
 
-    // Create feature branch with AI changes
+    // Feature branch: AI rewrites line 2.
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     let mut feature_file = repo.filename("app.py");
     feature_file.replace_at(1, "    def feature(): pass".ai());
     repo.stage_all_and_commit("feature AI change").unwrap();
 
-    // Back to main with conflicting human change
+    // Main: human rewrites the same line differently → guaranteed conflict on merge.
     repo.git(&["checkout", &main_branch]).unwrap();
     let mut main_file = repo.filename("app.py");
     main_file.replace_at(1, "    def main(): pass");
     repo.stage_all_and_commit("main human change").unwrap();
 
-    // Merge feature into main - should conflict
+    // Merge feature into main — conflicts on line 2.
     let merge_result = repo.git(&["merge", "feature"]);
-    if merge_result.is_err() {
-        // We're in conflict state. Use AI (mock_ai) to resolve the conflict.
-        // This simulates Claude resolving the conflict via Edit tool.
-        use std::fs;
-        let resolved_content = "class App:\n    def feature(): pass\n    def main(): pass\n";
-        fs::write(repo.path().join("app.py"), resolved_content).unwrap();
+    assert!(
+        merge_result.is_err(),
+        "merge should conflict because both branches modified the same line"
+    );
 
-        // Checkpoint the AI resolution
-        repo.git_ai(&["checkpoint", "mock_ai", "app.py"]).unwrap();
+    // AI (mock_ai) resolves the conflict: keeps both methods.
+    // "class App:" is unchanged from HEAD (human attribution).
+    // "    def feature(): pass" is the new AI-introduced line.
+    // "    def main(): pass" was already in HEAD (human attribution).
+    use std::fs;
+    let resolved_content = "class App:\n    def feature(): pass\n    def main(): pass\n";
+    fs::write(repo.path().join("app.py"), resolved_content).unwrap();
 
-        // Commit (simulating human committing after AI resolved the conflict)
-        repo.git(&["add", "app.py"]).unwrap();
-        repo.stage_all_and_commit("merge resolved").unwrap();
+    // Stage the resolved file first.  The checkpoint skips files that git still considers
+    // "unmerged" (i.e. not yet staged after conflict resolution), so we must `git add`
+    // before calling checkpoint to ensure the file is processed and attributed.
+    repo.git(&["add", "app.py"]).unwrap();
 
-        // After fix: AI lines should be attributed via checkpoint
-        // For now just verify no panic; the checkpoint should carry attribution forward
-        let stats = repo.stats().unwrap();
-        let _ = stats;
-    }
+    // Checkpoint attributes the staged content to mock_ai.
+    repo.git_ai(&["checkpoint", "mock_ai", "app.py"]).unwrap();
+
+    // Human commits the merge resolution.
+    repo.stage_all_and_commit("merge resolved by AI").unwrap();
+
+    // "class App:" was never in the conflict — it was identical on both branches → human.
+    // The AI resolved the conflict by writing the entire resolution, so both lines that
+    // were part of the contested region ("    def feature(): pass" and "    def main(): pass")
+    // are attributed to the AI that produced the resolution.
+    file.assert_lines_and_blame(crate::lines![
+        "class App:".human(),
+        "    def feature(): pass".ai(),
+        "    def main(): pass".ai(),
+    ]);
 }
 
-crate::reuse_tests_in_worktree!(test_blame_after_merge_conflict_resolution,);
+crate::reuse_tests_in_worktree!(
+    test_blame_after_merge_conflict_resolution,
+    test_merge_conflict_ai_resolution_outside_session,
+);

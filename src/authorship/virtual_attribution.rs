@@ -2003,18 +2003,20 @@ pub fn restore_stashed_va(
         }
     };
 
-    // Convert merged VA to INITIAL attributions for the new HEAD
-    // Since these are uncommitted changes, we use the same SHA for parent and commit
-    // to get all attributions into the INITIAL file (not the authorship log)
-    let (_authorship_log, initial_attributions) = match merged_va
-        .to_authorship_log_and_initial_working_log(repository, new_head, new_head, None, None)
-    {
-        Ok(result) => result,
-        Err(e) => {
-            debug_log(&format!("Failed to convert VA to INITIAL: {}", e));
-            return;
-        }
-    };
+    // Extract INITIAL attributions directly from the merged VA.
+    //
+    // We intentionally avoid `to_authorship_log_and_initial_working_log` here because
+    // that function runs `git diff HEAD -- <file>` to categorise lines as "committed vs
+    // uncommitted".  After `checkout --merge`, the working-tree files may contain git
+    // conflict markers, so the diff line numbers are meaningless relative to the merged
+    // VA's line attributions (which were computed on the stripped, conflict-free content).
+    // Similarly, newly created files that are not yet tracked by git are invisible to
+    // `git diff HEAD` without explicit pathspecs, causing their attributions to be lost.
+    //
+    // `to_initial_working_log_only` simply promotes all AI line attributions in the
+    // merged VA into INITIAL form — exactly what we want since every attribution here
+    // is uncommitted work being preserved across the checkout operation.
+    let initial_attributions = merged_va.to_initial_working_log_only();
 
     // Write INITIAL attributions to working log for new HEAD
     if !initial_attributions.files.is_empty() || !initial_attributions.prompts.is_empty() {
@@ -2028,6 +2030,8 @@ pub fn restore_stashed_va(
                 return;
             }
         };
+        // Snapshot the file contents from the merged VA so the pre-commit hook can
+        // use them for attribution remapping if the files change before staging.
         let initial_file_contents =
             merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
         if let Err(e) = working_log.write_initial_attributions_with_contents(
@@ -2067,35 +2071,57 @@ fn content_has_conflict_markers(content: &str) -> bool {
     false
 }
 
-/// Strip conflict markers from content, keeping the "ours" side
-/// (the section between `<<<<<<<` and `=======`).
+/// Strip conflict markers from content, keeping the "ours" (local) side.
+///
+/// For `git checkout --merge` and `git switch --merge`, conflicts are written
+/// with the **target branch** content first and the **local working tree** content
+/// second:
+///
+/// ```text
+/// <<<<<<< feature       ← theirs (target branch)
+/// THEIRS
+/// =======
+/// AI_CONTENT            ← ours (local working tree / stashed VA)
+/// >>>>>>> local
+/// ```
+///
+/// We therefore keep the section **between `=======` and `>>>>>>>`** — that is
+/// the local ("ours") content the stashed VA was built from.
 ///
 /// Handles both the standard two-way conflict style and the diff3/zdiff3 style
-/// that includes a `|||||||` base section between "ours" and "theirs".
+/// which inserts a `|||||||` base section between the target and `=======`:
+///
+/// ```text
+/// <<<<<<< feature
+/// THEIRS
+/// ||||||| original      ← base (diff3)
+/// SHARED
+/// =======
+/// AI_CONTENT            ← ours (kept)
+/// >>>>>>> local
+/// ```
 ///
 /// Also preserves the trailing newline of the original content so byte-level
 /// attribution diffing sees the same length as the actual on-disk file.
-///
-/// This is used when a `checkout --merge` produces conflicts: the stashed VA
-/// was built from "our" pre-checkout state, so we want to keep "our" content
-/// for the purpose of attribution merging.
 fn strip_conflict_markers_keep_ours(content: &str) -> String {
     let mut result = Vec::new();
-    let mut in_ours = true; // outside a conflict block → keep the line
     let mut in_conflict = false;
+    let mut in_ours = false; // true only while inside the ======= … >>>>>>> section
 
     for line in content.lines() {
         if line.starts_with("<<<<<<<") {
             in_conflict = true;
-            in_ours = true; // entering "ours" section
-        } else if in_conflict && (line.starts_with("=======") || line.starts_with("|||||||")) {
-            // `=======` separates ours from theirs (standard style).
-            // `|||||||` starts the base section in diff3/zdiff3 style — also stop keeping.
+            in_ours = false; // theirs section starts — skip it
+        } else if in_conflict && line.starts_with("|||||||") {
+            // diff3: base section — skip
             in_ours = false;
+        } else if in_conflict && line.starts_with("=======") {
+            // ours (local) section starts — keep from here
+            in_ours = true;
         } else if in_conflict && line.starts_with(">>>>>>>") {
             in_conflict = false;
-            in_ours = true; // back to normal content
-        } else if in_ours {
+            in_ours = false; // back to normal content
+        } else if !in_conflict || in_ours {
             result.push(line);
         }
     }

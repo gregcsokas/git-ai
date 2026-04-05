@@ -444,14 +444,32 @@ fn test_squash_rebase_preserves_interleaved_attribution() {
 
     let stats = repo.stats().unwrap();
 
-    // ALL 10 lines should be AI-attributed (5 from session A, 5 from session B)
-    // Before fix: some A lines that got surrounded by B would be unattributed
+    // ALL 10 lines should be AI-attributed (5 from session A, 5 from session B).
+    // Before the fix, lines from session A that ended up surrounded by session B
+    // lines after the interleave were incorrectly attributed as human.
     assert_eq!(
-        stats.ai_additions, 10,
+        stats.ai_additions,
+        10,
         "All 10 lines should be AI-attributed after squash, got ai={} human={}",
-        stats.ai_additions, stats.human_additions
+        stats.ai_additions,
+        stats.human_additions
     );
     assert_eq!(stats.human_additions, 0, "No human lines expected");
+
+    // Verify each line individually via blame — the stats check above could in theory
+    // pass if the numbers happen to match but the wrong lines are attributed.
+    file.assert_lines_and_blame(crate::lines![
+        "class Store:".ai(),
+        "    \"\"\"A data store.\"\"\"".ai(),
+        "    def __init__(self):".ai(),
+        "        self.data = {}".ai(),
+        "        self.cache = {}".ai(),
+        "    def get(self, k):".ai(),
+        "        \"\"\"Get value.\"\"\"".ai(),
+        "        return self.data.get(k)".ai(),
+        "    def set(self, k, v):".ai(),
+        "        self.data[k] = v".ai(),
+    ]);
 }
 
 crate::reuse_tests_in_worktree!(

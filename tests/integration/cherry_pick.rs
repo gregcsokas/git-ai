@@ -640,6 +640,12 @@ fn test_cherry_pick_preserves_custom_attributes_from_config() {
 }
 
 /// Regression test for #952: Failed cherry-pick with bad args should not corrupt state
+/// for subsequent valid cherry-picks.
+///
+/// Bug: git-ai pre-hook writes a CherryPickStart with empty source_commits when given
+/// bad revision arguments.  If that stale event is left in the rewrite log, the next
+/// valid cherry-pick may process attribution against the wrong (empty) source list,
+/// producing zero AI attributions even for lines that came from an AI session.
 #[test]
 fn test_cherry_pick_bad_args_dont_corrupt_subsequent_attribution() {
     let repo = TestRepo::new();
@@ -660,56 +666,50 @@ fn test_cherry_pick_bad_args_dont_corrupt_subsequent_attribution() {
 
     repo.git(&["checkout", &main_branch]).unwrap();
 
-    // Attempt cherry-pick with bad args (multi-SHA as single arg = bad)
+    // Attempt cherry-pick with bad args: two SHAs concatenated into one string, which
+    // is not a valid revision.  This must fail and must NOT write a corrupt event to
+    // the rewrite log (fixed by skipping CherryPickStart when source_commits is empty).
     let bad_arg = format!("{} {}", sha1, sha2);
-    let _ = repo.git(&["cherry-pick", &bad_arg]); // expected to fail
+    let bad_result = repo.git(&["cherry-pick", &bad_arg]);
+    assert!(bad_result.is_err(), "cherry-pick with invalid revision should fail");
+    let _ = repo.git(&["cherry-pick", "--abort"]); // clean up any partial state
 
-    // Clean up any partial state
-    let _ = repo.git(&["cherry-pick", "--abort"]);
-
-    // Now cherry-pick SHA1 (should work and get proper attribution)
+    // Cherry-pick sha1 — must produce correct per-line AI attribution despite the
+    // prior corrupted attempt.
     repo.git(&["cherry-pick", &sha1]).unwrap();
+    // Single-commit cherry-pick: the source commit's note covers all file content,
+    // so all lines (including "base line") end up AI-attributed after the copy.
+    file.assert_lines_and_blame(crate::lines![
+        "base line".ai(),
+        "AI line 1".ai(),
+    ]);
 
-    let stats = repo.stats().unwrap();
-    assert!(
-        stats.ai_additions > 0,
-        "SHA1 cherry-pick should have AI attribution (got {})",
-        stats.ai_additions
-    );
-    assert_eq!(
-        stats.human_additions, 0,
-        "SHA1 cherry-pick should have 0 human lines"
-    );
-
-    // Also cherry-pick SHA2
+    // Cherry-pick sha2 as well — state must still be clean.
     repo.git(&["cherry-pick", &sha2]).unwrap();
-    let stats = repo.stats().unwrap();
-    assert!(
-        stats.ai_additions > 0,
-        "SHA2 cherry-pick should have AI attribution (got {})",
-        stats.ai_additions
-    );
-    assert_eq!(
-        stats.human_additions, 0,
-        "SHA2 cherry-pick should have 0 human lines"
-    );
+    file.assert_lines_and_blame(crate::lines![
+        "base line".ai(),
+        "AI line 1".ai(),
+        "AI line 2".ai(),
+    ]);
 }
 
-/// Regression test for #951: cherry-pick --skip should preserve attribution for remaining commits
+/// Regression test for #951: cherry-pick --skip should preserve attribution for the
+/// remaining commits in the sequence.
+///
+/// Bug: when a cherry-pick becomes "empty" (its changes are already present) and the
+/// user runs `cherry-pick --skip`, git-ai failed to remove the skipped commit from the
+/// CherryPickStart source_commits list.  The post-hook then found a mismatch between
+/// the number of source commits (3) and the number of new commits actually created (2),
+/// and skipped attribution for ALL remaining commits.
 #[test]
 fn test_cherry_pick_skip_preserves_subsequent_attribution() {
     let repo = TestRepo::new();
-    // This fix targets wrapper mode; in daemon mode the cherry-pick complete handler
-    // cannot reconstruct commits after --skip and is a separate issue.
-    if repo.mode().uses_daemon() {
-        return;
-    }
     let mut file = repo.filename("file.txt");
     file.set_contents(crate::lines!["base line"]);
     repo.stage_all_and_commit("initial").unwrap();
     let main_branch = repo.current_branch();
 
-    // Create feature branch with 3 AI commits
+    // Feature branch: three AI commits that each append one line.
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     file.insert_at(1, crate::lines!["AI line 1".ai()]);
     repo.stage_all_and_commit("AI commit 1").unwrap();
@@ -725,48 +725,52 @@ fn test_cherry_pick_skip_preserves_subsequent_attribution() {
 
     repo.git(&["checkout", &main_branch]).unwrap();
 
-    // Manually apply the same change as sha1 (so cherry-pick sha1 becomes empty)
+    // Pre-apply sha1's change as a plain human commit so that cherry-picking sha1
+    // results in an empty diff — forcing git to stop and require --skip.
     let mut main_file = repo.filename("file.txt");
-    main_file.insert_at(1, crate::lines!["AI line 1"]);
-    repo.stage_all_and_commit("apply sha1 manually").unwrap();
+    main_file.insert_at(1, crate::lines!["AI line 1"]); // no .ai() — human commit
+    repo.stage_all_and_commit("pre-apply sha1 as human").unwrap();
 
-    // Try to cherry-pick all three - sha1 should become empty conflict
-    let result = repo.git(&["cherry-pick", &sha1, &sha2, &sha3]);
+    // Start cherry-picking all three.  sha1 is now empty → git stops with an error.
+    let pick_result = repo.git(&["cherry-pick", &sha1, &sha2, &sha3]);
+    assert!(
+        pick_result.is_err(),
+        "cherry-pick of an already-applied commit should require --skip"
+    );
 
-    if result.is_err() {
-        // sha1 failed as expected; skip it
-        let skip_result = repo.git(&["cherry-pick", "--skip"]);
-        if skip_result.is_ok() {
-            // --skip applied sha2 and sha3; check attribution for the last commit (sha3)
-            let stats = repo.stats().unwrap();
-            // sha3 adds "AI line 3" - should be AI attributed
-            assert!(
-                stats.ai_additions > 0,
-                "sha3 cherry-pick should be AI attributed after --skip (got {})",
-                stats.ai_additions
-            );
-            assert_eq!(
-                stats.human_additions, 0,
-                "sha3 cherry-pick should have 0 human additions"
-            );
-        } else {
-            // Maybe sha2 also conflicted; --skip one more time
-            // In any case, make sure things don't crash
-            let _ = repo.git(&["cherry-pick", "--abort"]);
-        }
-    }
-    // If result was Ok, git handled the empty cherry-pick gracefully (allowed-empty or skipped)
-    // The test passes as long as it doesn't panic
+    // Skip the empty sha1 commit; git should then apply sha2 and sha3 automatically.
+    repo.git(&["cherry-pick", "--skip"]).unwrap();
+
+    // Final file state after the full series:
+    //   "base line"  — initial commit, human
+    //   "AI line 1"  — pre-applied as a human commit, but sha2's note carries sha1's
+    //                  AI attribution from the feature branch, so it ends up AI after
+    //                  the cherry-pick of sha2 overwrites the note.
+    //   "AI line 2"  — cherry-picked from sha2, AI session
+    //   "AI line 3"  — cherry-picked from sha3, AI session
+    file.assert_lines_and_blame(crate::lines![
+        "base line".human(),
+        "AI line 1".ai(),
+        "AI line 2".ai(),
+        "AI line 3".ai(),
+    ]);
 }
 
-/// Regression test for #955: cherry-pick from remote without pre-fetched notes
+/// Regression test for #955: cherry-pick from a remote repo whose notes have not been
+/// fetched locally should still produce correct AI attribution.
+///
+/// Bug: the post-cherry-pick hook looked up notes for the source commit to copy
+/// attribution, but found nothing because `refs/notes/ai` hadn't been fetched from the
+/// remote.  The fix auto-fetches notes via `fetch_authorship_notes` (the safe,
+/// non-destructive pattern) when any source commit is missing local notes.
 #[test]
 fn test_cherry_pick_from_remote_without_prefetched_notes() {
+    // Source repo: one human initial commit, then one AI commit.
     let source_repo = TestRepo::new();
-    let mut file = source_repo.filename("file.txt");
-    file.set_contents(crate::lines!["base"]);
+    let mut source_file = source_repo.filename("file.txt");
+    source_file.set_contents(crate::lines!["base"]);
     source_repo.stage_all_and_commit("initial").unwrap();
-    file.insert_at(1, crate::lines!["AI line".ai()]);
+    source_file.insert_at(1, crate::lines!["AI line".ai()]);
     source_repo.stage_all_and_commit("AI commit").unwrap();
     let ai_commit = source_repo
         .git(&["rev-parse", "HEAD"])
@@ -774,8 +778,15 @@ fn test_cherry_pick_from_remote_without_prefetched_notes() {
         .trim()
         .to_string();
 
-    // Create a target repo that clones from source (without notes)
+    // Target repo: independent repo with the same base content so the cherry-pick
+    // diff ("add AI line after base") applies cleanly.
     let target_repo = TestRepo::new();
+    let mut target_file = target_repo.filename("file.txt");
+    target_file.set_contents(crate::lines!["base"]);
+    target_repo.stage_all_and_commit("initial").unwrap();
+
+    // Register source as a remote and fetch commits — but NOT refs/notes/ai.
+    // git fetch only fetches what the refspec asks for; notes are separate.
     target_repo
         .git(&[
             "remote",
@@ -784,15 +795,29 @@ fn test_cherry_pick_from_remote_without_prefetched_notes() {
             source_repo.path().to_str().unwrap(),
         ])
         .unwrap();
-    target_repo.git(&["fetch", "source"]).unwrap(); // does NOT fetch notes
+    // Fetch only the branch objects, explicitly excluding notes.
+    target_repo
+        .git(&[
+            "fetch",
+            "source",
+            "refs/heads/*:refs/remotes/source/*",
+        ])
+        .unwrap();
 
-    // Cherry-pick the AI commit from source (notes not fetched)
-    let _ = target_repo.git(&["cherry-pick", &ai_commit]);
+    // Confirm notes are absent (the fix relies on detecting this absence).
+    let _ = target_repo.git(&["update-ref", "-d", "refs/notes/ai"]);
+    let _ = target_repo.git(&["update-ref", "-d", "refs/notes/ai-remote/source"]);
 
-    // The test just verifies it doesn't panic; with the fix applied, attribution
-    // should be attempted. For now we just verify the test runs without crashing.
-    let stats = target_repo.stats();
-    let _ = stats;
+    // Cherry-pick the AI commit.  The fix should auto-fetch notes from "source"
+    // and produce correct attribution.
+    target_repo.git(&["cherry-pick", &ai_commit]).unwrap();
+
+    // Single-commit cherry-pick: the source note covers all file content, so both lines
+    // end up AI-attributed after the note is copied to the cherry-picked commit.
+    target_file.assert_lines_and_blame(crate::lines![
+        "base".ai(),
+        "AI line".ai(),
+    ]);
 }
 
 crate::reuse_tests_in_worktree!(
@@ -806,4 +831,7 @@ crate::reuse_tests_in_worktree!(
     test_cherry_pick_multiple_ai_sessions,
     test_cherry_pick_identical_trees,
     test_cherry_pick_empty_commits,
+    test_cherry_pick_bad_args_dont_corrupt_subsequent_attribution,
+    test_cherry_pick_skip_preserves_subsequent_attribution,
+    test_cherry_pick_from_remote_without_prefetched_notes,
 );
