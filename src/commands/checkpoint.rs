@@ -2,7 +2,7 @@ use crate::authorship::attribution_tracker::{
     Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
 use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::authorship_log_serialization::generate_short_hash;
+use crate::authorship::authorship_log_serialization::{AuthorshipLog, generate_short_hash};
 use crate::authorship::ignore::{
     IgnoreMatcher, build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
@@ -1565,6 +1565,10 @@ fn get_checkpoint_entry_for_file(
     // Non-pre-commit fast path:
     // Preserve existing `git-ai checkpoint` behavior for human-only files by writing an
     // attribution-empty entry while still capturing line stats.
+    //
+    // Exception: when the change is a pure whitespace reflow and the HEAD
+    // commit's authorship note shows AI-attributed lines for this file, we
+    // must run the attribution pipeline so the AI lines survive the reformat.
     if kind == CheckpointKind::Human && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
         let previous_content = if let Some(state) = previous_state.as_ref() {
             working_log
@@ -1576,6 +1580,75 @@ fn get_checkpoint_entry_for_file(
 
         if current_content == previous_content {
             return Ok(None);
+        }
+
+        // Detect whitespace-only changes (reflows/reformatting) and check
+        // whether the HEAD commit has AI attribution for this file.  If so,
+        // we need to run the full attribution pipeline to preserve those
+        // attributions through the reflow.
+        let is_reflow = {
+            let old_stripped: String = previous_content
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let new_stripped: String = current_content
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            old_stripped == new_stripped
+        };
+
+        if is_reflow {
+            // Read the HEAD commit's authorship note to check for AI lines.
+            let head_ai_line_attrs: Option<Vec<LineAttribution>> = head_commit_sha
+                .as_ref()
+                .as_ref()
+                .and_then(|sha| crate::git::refs::show_authorship_note(&repo, sha))
+                .and_then(|note| AuthorshipLog::deserialize_from_string(&note).ok())
+                .and_then(|log| {
+                    let file_attestation =
+                        log.attestations.iter().find(|f| f.file_path == file_path)?;
+                    if file_attestation.entries.is_empty() {
+                        return None;
+                    }
+                    let mut line_attrs = Vec::new();
+                    for entry in &file_attestation.entries {
+                        for range in &entry.line_ranges {
+                            for line in range.expand() {
+                                line_attrs.push(LineAttribution {
+                                    start_line: line,
+                                    end_line: line,
+                                    author_id: entry.hash.clone(),
+                                    overrode: None,
+                                });
+                            }
+                        }
+                    }
+                    Some(line_attrs)
+                });
+
+            if let Some(ai_line_attrs) = head_ai_line_attrs {
+                // Convert the HEAD note's line attributions to byte attributions
+                // against the *previous* content, then run the full attribution
+                // pipeline so the reflow is tracked correctly.
+                let prev_attributions =
+                    crate::authorship::attribution_tracker::line_attributions_to_attributions(
+                        &ai_line_attrs,
+                        &previous_content,
+                        INITIAL_ATTRIBUTION_TS,
+                    );
+                return make_entry_for_file(FileEntryInput {
+                    file_path: &file_path,
+                    blob_sha: &file_content_hash,
+                    author_id: &author_id,
+                    is_ai_checkpoint: false,
+                    previous_content: &previous_content,
+                    previous_attributions: &prev_attributions,
+                    content: &current_content,
+                    ts,
+                })
+                .map(Some);
+            }
         }
 
         let stats = compute_file_line_stats(&previous_content, &current_content);

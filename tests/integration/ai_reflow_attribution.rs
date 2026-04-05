@@ -68,12 +68,10 @@ fn ensure_isolated_process_home() {
 ///
 /// This ensures that formatting scripts or human reflows don't steal AI attribution.
 ///
-/// NOTE: Currently ignored because preserving AI attribution across commits (when the
-/// working log has been cleared) requires reading the HEAD commit's authorship note in
-/// `get_checkpoint_entry_for_file`.  That change causes regressions in 20+ existing
-/// tests and needs a more careful approach.
+/// The checkpoint.rs non-pre-commit fast-path now detects whitespace-only
+/// changes and reads the HEAD commit's authorship note to preserve AI
+/// attribution through the reflow.
 #[test]
-#[ignore]
 fn test_human_reflow_on_ai_code_retains_ai_attribution() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("test_repo.rs");
@@ -148,10 +146,9 @@ fn ensure_isolated_process_home() {
 ///
 /// All reflowed lines should retain AI attribution.
 ///
-/// NOTE: Currently ignored – same cross-commit attribution limitation as
+/// Same cross-commit attribution fix as
 /// `test_human_reflow_on_ai_code_retains_ai_attribution`.
 #[test]
-#[ignore]
 fn test_human_reflow_of_ai_set_contents_retains_ai() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("reflow.txt");
@@ -192,12 +189,9 @@ fn test_human_reflow_of_ai_set_contents_retains_ai() {
 /// Inverse: AI reflows human single-line content into multiple lines.
 /// All reflowed lines should be attributed to AI.
 ///
-/// NOTE: Currently ignored because force-splitting 1→N hunks in AI checkpoints
-/// is too aggressive – it also catches cases where AI appends content after a
-/// human line (the trailing newline pulls the human line into the changed hunk).
-/// A more targeted approach is needed to distinguish true reflows from appends.
+/// NOTE: This now uses a whitespace-only-change check to detect true reflows
+/// vs appends, so it only force-splits when the non-whitespace content matches.
 #[test]
-#[ignore]
 fn test_ai_reflow_of_human_content_one_to_many_lines_attributed_to_ai() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("reflow2.txt");
@@ -229,7 +223,7 @@ fn test_ai_reflow_of_human_content_one_to_many_lines_attributed_to_ai() {
 
 crate::reuse_tests_in_worktree!(
     test_ai_reflow_two_lines_to_one_attributed_to_ai,
-    // Excluded: test_human_reflow_on_ai_code_retains_ai_attribution (ignored – needs checkpoint.rs cross-commit fix)
-    // Excluded: test_human_reflow_of_ai_set_contents_retains_ai (ignored – needs checkpoint.rs cross-commit fix)
-    // Excluded: test_ai_reflow_of_human_content_one_to_many_lines_attributed_to_ai (ignored – needs 1→N force-split fix)
+    test_ai_reflow_of_human_content_one_to_many_lines_attributed_to_ai,
+    test_human_reflow_on_ai_code_retains_ai_attribution,
+    test_human_reflow_of_ai_set_contents_retains_ai,
 );
