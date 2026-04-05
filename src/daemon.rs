@@ -2617,22 +2617,6 @@ fn is_valid_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Detect whether a stash pop/apply failure was due to a merge conflict.
-/// Checks `git status --porcelain=v2` for unmerged ('u') entries in the repo.
-fn has_stash_conflict_for_repo(repo: &Repository) -> bool {
-    let mut args = repo.global_args_for_exec();
-    args.push("status".to_string());
-    args.push("--porcelain=v2".to_string());
-
-    match exec_git(&args) {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.lines().any(|line| line.starts_with("u "))
-        }
-        Err(_) => false,
-    }
-}
-
 fn is_zero_oid(oid: &str) -> bool {
     is_valid_oid(oid) && oid.chars().all(|c| c == '0')
 }
@@ -6276,9 +6260,14 @@ impl ActorDaemonCoordinator {
                     self.set_pending_cherry_pick_sources_for_worktree(worktree, source_refs)?;
                 }
             }
-            // For stash pop/apply/branch with conflicts (exit code 1), don't skip processing.
-            // The stash was partially applied and attribution should still be restored.
-            let is_stash_conflict = cmd.primary_command.as_deref() == Some("stash")
+            // For stash pop/apply/branch with non-zero exit (typically conflict), don't
+            // skip processing. The stash may have been partially applied and attribution
+            // should still be restored. We cannot rely on `has_stash_conflict_for_repo`
+            // because in daemon mode the conflict check runs lazily at sync time -- by
+            // which point the user may already have resolved the conflict with `git add`.
+            // Instead, always attempt restoration for stash restore operations; if the
+            // stash was never applied the restore is a harmless no-op.
+            let is_stash_restore = cmd.primary_command.as_deref() == Some("stash")
                 && events.iter().any(|event| {
                     matches!(
                         event,
@@ -6289,18 +6278,12 @@ impl ActorDaemonCoordinator {
                             ..
                         }
                     )
-                })
-                && cmd.worktree.as_ref().is_some_and(|worktree| {
-                    let repo_path = worktree.to_string_lossy().to_string();
-                    find_repository_in_path(&repo_path)
-                        .ok()
-                        .is_some_and(|repo| has_stash_conflict_for_repo(&repo))
                 });
-            if !is_stash_conflict {
+            if !is_stash_restore {
                 return Ok(());
             }
             debug_log(&format!(
-                "Stash conflict detected for sid={}, continuing to restore attribution",
+                "Stash restore with non-zero exit for sid={}, continuing to restore attribution",
                 cmd.root_sid
             ));
         }
