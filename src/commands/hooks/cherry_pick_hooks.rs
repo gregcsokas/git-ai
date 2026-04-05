@@ -53,11 +53,11 @@ pub fn pre_cherry_pick_hook(
                 // Fix #952: If source_commits is empty (e.g. bad args), skip writing
                 // the Start event to prevent state corruption for subsequent operations.
                 if source_commits.is_empty()
-                    && Config::get()
-                        .feature_flags()
-                        .fix_attribution_edge_cases
+                    && Config::get().feature_flags().fix_attribution_edge_cases
                 {
-                    debug_log("No valid source commits parsed, skipping CherryPickStart event (prevents state corruption from bad args)");
+                    debug_log(
+                        "No valid source commits parsed, skipping CherryPickStart event (prevents state corruption from bad args)",
+                    );
                     return;
                 }
 
@@ -84,9 +84,7 @@ pub fn pre_cherry_pick_hook(
         );
         // Fix #951: If --skip is being used, update source_commits to remove
         // the skipped commit so subsequent cherry-picks get correct attribution.
-        if Config::get()
-            .feature_flags()
-            .fix_attribution_edge_cases
+        if Config::get().feature_flags().fix_attribution_edge_cases
             && parsed_args.command_args.iter().any(|a| a == "--skip")
         {
             handle_cherry_pick_skip(repository);
@@ -385,19 +383,15 @@ fn handle_cherry_pick_skip(repository: &mut Repository) {
     // Write a new CherryPickStart event with updated source_commits.
     // Since find_cherry_pick_start_event_source_commits returns the most recent
     // Start event (newest-first), the new event will be read first.
-    let new_start_event = RewriteLogEvent::cherry_pick_start(
-        crate::git::rewrite_log::CherryPickStartEvent::new(
+    let new_start_event =
+        RewriteLogEvent::cherry_pick_start(crate::git::rewrite_log::CherryPickStartEvent::new(
             start.original_head.clone(),
             updated_source_commits,
-        ),
-    );
+        ));
 
     match repository.storage.append_rewrite_event(new_start_event) {
         Ok(_) => debug_log("Updated CherryPickStart event for --skip"),
-        Err(e) => debug_log(&format!(
-            "Failed to update CherryPickStart event: {}",
-            e
-        )),
+        Err(e) => debug_log(&format!("Failed to update CherryPickStart event: {}", e)),
     }
 }
 
@@ -418,9 +412,7 @@ fn try_fetch_missing_notes_for_commits(repository: &Repository, source_commits: 
                     .map(|s| s.to_string()),
             );
             args.push(sha.to_string());
-            exec_git(&args)
-                .map(|o| !o.status.success())
-                .unwrap_or(true)
+            exec_git(&args).map(|o| !o.status.success()).unwrap_or(true)
         })
         .collect();
 
@@ -496,10 +488,7 @@ fn process_completed_cherry_pick(
     };
 
     // Fix #955: Try to fetch missing notes from remotes before processing.
-    if Config::get()
-        .feature_flags()
-        .fix_attribution_edge_cases
-    {
+    if Config::get().feature_flags().fix_attribution_edge_cases {
         try_fetch_missing_notes_for_commits(repository, &source_commits);
     }
 

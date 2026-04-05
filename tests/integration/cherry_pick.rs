@@ -671,14 +671,28 @@ fn test_cherry_pick_bad_args_dont_corrupt_subsequent_attribution() {
     repo.git(&["cherry-pick", &sha1]).unwrap();
 
     let stats = repo.stats().unwrap();
-    assert!(stats.ai_additions > 0, "SHA1 cherry-pick should have AI attribution (got {})", stats.ai_additions);
-    assert_eq!(stats.human_additions, 0, "SHA1 cherry-pick should have 0 human lines");
+    assert!(
+        stats.ai_additions > 0,
+        "SHA1 cherry-pick should have AI attribution (got {})",
+        stats.ai_additions
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "SHA1 cherry-pick should have 0 human lines"
+    );
 
     // Also cherry-pick SHA2
     repo.git(&["cherry-pick", &sha2]).unwrap();
     let stats = repo.stats().unwrap();
-    assert!(stats.ai_additions > 0, "SHA2 cherry-pick should have AI attribution (got {})", stats.ai_additions);
-    assert_eq!(stats.human_additions, 0, "SHA2 cherry-pick should have 0 human lines");
+    assert!(
+        stats.ai_additions > 0,
+        "SHA2 cherry-pick should have AI attribution (got {})",
+        stats.ai_additions
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "SHA2 cherry-pick should have 0 human lines"
+    );
 }
 
 /// Regression test for #951: cherry-pick --skip should preserve attribution for remaining commits
@@ -721,8 +735,15 @@ fn test_cherry_pick_skip_preserves_subsequent_attribution() {
             // --skip applied sha2 and sha3; check attribution for the last commit (sha3)
             let stats = repo.stats().unwrap();
             // sha3 adds "AI line 3" - should be AI attributed
-            assert!(stats.ai_additions > 0, "sha3 cherry-pick should be AI attributed after --skip (got {})", stats.ai_additions);
-            assert_eq!(stats.human_additions, 0, "sha3 cherry-pick should have 0 human additions");
+            assert!(
+                stats.ai_additions > 0,
+                "sha3 cherry-pick should be AI attributed after --skip (got {})",
+                stats.ai_additions
+            );
+            assert_eq!(
+                stats.human_additions, 0,
+                "sha3 cherry-pick should have 0 human additions"
+            );
         } else {
             // Maybe sha2 also conflicted; --skip one more time
             // In any case, make sure things don't crash
@@ -751,7 +772,12 @@ fn test_cherry_pick_from_remote_without_prefetched_notes() {
     // Create a target repo that clones from source (without notes)
     let target_repo = TestRepo::new();
     target_repo
-        .git(&["remote", "add", "source", source_repo.path().to_str().unwrap()])
+        .git(&[
+            "remote",
+            "add",
+            "source",
+            source_repo.path().to_str().unwrap(),
+        ])
         .unwrap();
     target_repo.git(&["fetch", "source"]).unwrap(); // does NOT fetch notes
 

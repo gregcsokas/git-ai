@@ -1956,20 +1956,19 @@ pub fn restore_stashed_va(
                 // attributions. When --merge checkout produces conflicts, the working
                 // file may contain conflict markers. We keep "ours" (stashed VA) lines
                 // so the attribution merge operates on clean content.
-                let clean_content =
-                    if crate::config::Config::get()
-                        .feature_flags()
-                        .fix_attribution_edge_cases
-                        && content_has_conflict_markers(&content)
-                    {
-                        debug_log(&format!(
-                            "Conflict markers detected in {}, stripping for VA merge",
-                            file_path
-                        ));
-                        strip_conflict_markers_keep_ours(&content)
-                    } else {
-                        content
-                    };
+                let clean_content = if crate::config::Config::get()
+                    .feature_flags()
+                    .fix_attribution_edge_cases
+                    && content_has_conflict_markers(&content)
+                {
+                    debug_log(&format!(
+                        "Conflict markers detected in {}, stripping for VA merge",
+                        file_path
+                    ));
+                    strip_conflict_markers_keep_ours(&content)
+                } else {
+                    content
+                };
                 working_files.insert(file_path.clone(), clean_content);
             }
         }
@@ -2053,9 +2052,9 @@ pub fn restore_stashed_va(
 
 /// Check whether a file's content contains git conflict markers.
 fn content_has_conflict_markers(content: &str) -> bool {
-    content.lines().any(|l| {
-        l.starts_with("<<<<<<<") || l.starts_with("=======") || l.starts_with(">>>>>>>")
-    })
+    content
+        .lines()
+        .any(|l| l.starts_with("<<<<<<<") || l.starts_with("=======") || l.starts_with(">>>>>>>"))
 }
 
 /// Strip conflict markers from content, keeping the "ours" side
