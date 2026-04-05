@@ -78,6 +78,9 @@ pub fn handle_git_ai(args: &[String]) {
         "checkpoint" => {
             handle_checkpoint(&args[1..]);
         }
+        "log" => {
+            commands::log::handle_log(&args[1..]);
+        }
         "blame" => {
             handle_ai_blame(&args[1..]);
             if is_interactive_terminal() {
@@ -210,6 +213,10 @@ fn print_help() {
     eprintln!("    --show-working-log          Display current working log");
     eprintln!("    --reset                     Reset working log");
     eprintln!("    mock_ai [pathspecs...]      Test preset accepting optional file pathspecs");
+    eprintln!("  log [args...]      Show commit log with AI authorship notes");
+    eprintln!(
+        "                        Proxies git log --notes=ai with all standard git log options"
+    );
     eprintln!("  blame <file>       Git blame with AI authorship overlay");
     eprintln!("  diff <commit|range>  Show diff with AI authorship annotations");
     eprintln!("    <commit>              Diff from commit's parent to commit");
