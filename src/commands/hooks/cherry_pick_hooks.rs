@@ -399,20 +399,30 @@ fn handle_cherry_pick_skip(repository: &mut Repository) {
 /// so local notes are never destructively overwritten.
 fn try_fetch_missing_notes_for_commits(repository: &Repository, source_commits: &[String]) {
     use crate::git::repository::exec_git;
+    use std::collections::HashSet;
 
-    // Check which source commits are missing notes locally
+    // Fetch the full set of locally-noted commits in one subprocess call.
+    // `git notes --ref=refs/notes/ai list` outputs "<note-sha> <commit-sha>" per line.
+    let mut args = repository.global_args_for_exec();
+    args.extend(
+        ["notes", "--ref=refs/notes/ai", "list"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    let noted_commits: HashSet<String> = exec_git(&args)
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().nth(1).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let missing: Vec<&String> = source_commits
         .iter()
-        .filter(|sha| {
-            let mut args = repository.global_args_for_exec();
-            args.extend(
-                ["notes", "--ref=refs/notes/ai", "show"]
-                    .iter()
-                    .map(|s| s.to_string()),
-            );
-            args.push(sha.to_string());
-            exec_git(&args).map(|o| !o.status.success()).unwrap_or(true)
-        })
+        .filter(|sha| !noted_commits.contains(sha.as_str()))
         .collect();
 
     if missing.is_empty() {
