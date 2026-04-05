@@ -1956,11 +1956,7 @@ pub fn restore_stashed_va(
                 // attributions. When --merge checkout produces conflicts, the working
                 // file may contain conflict markers. We keep "ours" (stashed VA) lines
                 // so the attribution merge operates on clean content.
-                let clean_content = if crate::config::Config::get()
-                    .feature_flags()
-                    .fix_attribution_edge_cases
-                    && content_has_conflict_markers(&content)
-                {
+                let clean_content = if content_has_conflict_markers(&content) {
                     debug_log(&format!(
                         "Conflict markers detected in {}, stripping for VA merge",
                         file_path

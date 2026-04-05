@@ -1,7 +1,6 @@
 use crate::authorship::rebase_authorship::walk_commits_to_base;
 use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::hooks::commit_hooks::get_commit_default_author;
-use crate::config::Config;
 use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
@@ -52,9 +51,7 @@ pub fn pre_cherry_pick_hook(
 
                 // Fix #952: If source_commits is empty (e.g. bad args), skip writing
                 // the Start event to prevent state corruption for subsequent operations.
-                if source_commits.is_empty()
-                    && Config::get().feature_flags().fix_attribution_edge_cases
-                {
+                if source_commits.is_empty() {
                     debug_log(
                         "No valid source commits parsed, skipping CherryPickStart event (prevents state corruption from bad args)",
                     );
@@ -84,9 +81,7 @@ pub fn pre_cherry_pick_hook(
         );
         // Fix #951: If --skip is being used, update source_commits to remove
         // the skipped commit so subsequent cherry-picks get correct attribution.
-        if Config::get().feature_flags().fix_attribution_edge_cases
-            && parsed_args.command_args.iter().any(|a| a == "--skip")
-        {
+        if parsed_args.command_args.iter().any(|a| a == "--skip") {
             handle_cherry_pick_skip(repository);
         }
     }
@@ -498,9 +493,7 @@ fn process_completed_cherry_pick(
     };
 
     // Fix #955: Try to fetch missing notes from remotes before processing.
-    if Config::get().feature_flags().fix_attribution_edge_cases {
-        try_fetch_missing_notes_for_commits(repository, &source_commits);
-    }
+    try_fetch_missing_notes_for_commits(repository, &source_commits);
 
     // Build commit mappings
     debug_log(&format!(
