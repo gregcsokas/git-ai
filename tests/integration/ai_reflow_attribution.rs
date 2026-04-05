@@ -68,16 +68,15 @@ fn ensure_isolated_process_home() {
 ///
 /// This ensures that formatting scripts or human reflows don't steal AI attribution.
 ///
-/// The checkpoint.rs non-pre-commit fast-path now detects whitespace-only
-/// changes and reads the HEAD commit's authorship note to preserve AI
-/// attribution through the reflow.
+/// Intra-commit: AI checkpoint then human checkpoint in the same session
+/// (no commit between them), so the working log retains AI attributions and
+/// the attribution tracker handles the reflow purely through its own logic.
 #[test]
 fn test_human_reflow_on_ai_code_retains_ai_attribution() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("test_repo.rs");
 
     // Step 1: Human writes initial boilerplate (context lines).
-    // Use checkpoint + stage_all_and_commit so git-ai tracks authorship from the start.
     let initial_content = "\
 fn ensure_isolated_process_home() {
     static PROCESS_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -88,7 +87,7 @@ fn ensure_isolated_process_home() {
     repo.stage_all_and_commit("Initial human boilerplate")
         .unwrap();
 
-    // Step 2: AI writes a two-line chained call
+    // Step 2: AI writes a two-line chained call (AI checkpoint, no commit yet)
     let ai_content = "\
 fn ensure_isolated_process_home() {
     static PROCESS_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -103,10 +102,9 @@ fn ensure_isolated_process_home() {
     fs::write(&file_path, ai_content).unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "test_repo.rs"])
         .unwrap();
-    repo.stage_all_and_commit("AI adds implementation").unwrap();
 
     // Step 3: Human (or formatter) reflows the AI's two-line call to single line.
-    // This is a human checkpoint (no mock_ai preset), so attribution should stay AI.
+    // This is a human checkpoint in the SAME session (no commit between AI and human).
     let human_reflowed_content = "\
 fn ensure_isolated_process_home() {
     static PROCESS_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -119,7 +117,7 @@ fn ensure_isolated_process_home() {
 ";
     fs::write(&file_path, human_reflowed_content).unwrap();
     repo.git_ai(&["checkpoint", "--", "test_repo.rs"]).unwrap();
-    repo.stage_all_and_commit("Human/formatter reflows AI code")
+    repo.stage_all_and_commit("Commit with AI content + human reflow")
         .unwrap();
 
     // Step 4: Assert the reflowed line retains AI attribution
@@ -142,12 +140,10 @@ fn ensure_isolated_process_home() {
 /// 1. Human checkpoint with placeholder content
 /// 2. AI checkpoint with real content
 ///
-/// Then a human reflows the AI content into multiple lines.
+/// Then a human reflows the AI content into multiple lines — intra-commit
+/// (no commit between AI and human checkpoints).
 ///
 /// All reflowed lines should retain AI attribution.
-///
-/// Same cross-commit attribution fix as
-/// `test_human_reflow_on_ai_code_retains_ai_attribution`.
 #[test]
 fn test_human_reflow_of_ai_set_contents_retains_ai() {
     let repo = TestRepo::new();
@@ -167,13 +163,13 @@ fn test_human_reflow_of_ai_set_contents_retains_ai() {
     repo.git_ai(&["checkpoint", "mock_ai", "reflow.txt"])
         .unwrap();
 
-    repo.stage_all_and_commit("Initial AI content").unwrap();
-
-    // Step 2: Human (or formatter) reflows the single AI line into multiple lines
+    // Step 2: Human (or formatter) reflows the single AI line into multiple lines.
+    // This is a human checkpoint in the SAME session (no commit between AI and human).
     let human_reflowed = "调用(\n  参数一,\n  参数二,\n  参数三\n)";
     fs::write(&file_path, human_reflowed).unwrap();
     repo.git_ai(&["checkpoint", "--", "reflow.txt"]).unwrap();
-    repo.stage_all_and_commit("Human reflow").unwrap();
+    repo.stage_all_and_commit("Commit with AI content + human reflow")
+        .unwrap();
 
     // Step 3: All lines should retain AI attribution
     let mut file = repo.filename("reflow.txt");
