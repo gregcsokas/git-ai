@@ -1672,13 +1672,14 @@ mod tests {
             make_entry(100, true),
         );
         let snapshot = make_snapshot(entries);
-        let wm = make_daemon_watermarks(
-            HashMap::new(),
-            Some(Duration::from_secs(90).as_nanos()),
-        );
+        let wm = make_daemon_watermarks(HashMap::new(), Some(Duration::from_secs(90).as_nanos()));
 
         let stale = find_stale_files(&snapshot, &wm);
-        assert_eq!(stale.len(), 1, "file modified after worktree watermark is stale");
+        assert_eq!(
+            stale.len(),
+            1,
+            "file modified after worktree watermark is stale"
+        );
     }
 
     #[test]
@@ -1690,13 +1691,13 @@ mod tests {
             make_entry(100, true),
         );
         let snapshot = make_snapshot(entries);
-        let wm = make_daemon_watermarks(
-            HashMap::new(),
-            Some(Duration::from_secs(99).as_nanos()),
-        );
+        let wm = make_daemon_watermarks(HashMap::new(), Some(Duration::from_secs(99).as_nanos()));
 
         let stale = find_stale_files(&snapshot, &wm);
-        assert!(stale.is_empty(), "file within grace of worktree watermark is not stale");
+        assert!(
+            stale.is_empty(),
+            "file within grace of worktree watermark is not stale"
+        );
     }
 
     #[test]
