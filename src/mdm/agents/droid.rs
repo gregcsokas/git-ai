@@ -108,15 +108,15 @@ impl DroidInstaller {
                     .and_then(|m| m.as_str())
                     .map(|m| m == DROID_CATCH_ALL_MATCHER)
                     .unwrap_or(false);
-                if !is_catch_all {
-                    if let Some(hooks) = block.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                        hooks.retain(|hook| {
-                            hook.get("command")
-                                .and_then(|c| c.as_str())
-                                .map(|cmd| !is_git_ai_checkpoint_command(cmd))
-                                .unwrap_or(true)
-                        });
-                    }
+                if !is_catch_all
+                    && let Some(hooks) = block.get_mut("hooks").and_then(|h| h.as_array_mut())
+                {
+                    hooks.retain(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(|cmd| !is_git_ai_checkpoint_command(cmd))
+                            .unwrap_or(true)
+                    });
                 }
             }
 

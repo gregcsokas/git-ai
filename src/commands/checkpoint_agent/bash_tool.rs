@@ -884,10 +884,10 @@ fn find_stale_files(snapshot: &StatSnapshot, wm: &DaemonWatermarks) -> Vec<PathB
             }
             None => {
                 // Tier 2: fall back to worktree-level watermark.
-                if let Some(worktree_wm) = wm.worktree {
-                    if mtime_ns > worktree_wm + MTIME_GRACE_WINDOW_NS {
-                        stale.push(rel_path.clone());
-                    }
+                if let Some(worktree_wm) = wm.worktree
+                    && mtime_ns > worktree_wm + MTIME_GRACE_WINDOW_NS
+                {
+                    stale.push(rel_path.clone());
                 }
                 // Tier 3 (no worktree watermark): cold-start, handled in caller.
             }
@@ -1200,14 +1200,14 @@ fn resolve_bash_tool_use_id(
     match hook_event {
         HookEvent::PreToolUse => {
             let id = uuid::Uuid::new_v4().to_string();
-            if let Some(path) = bash_sidecar_path(repo_root, session_id) {
-                if let Err(e) = fs::write(&path, &id) {
-                    debug_log(&format!(
-                        "bash sidecar write failed ({}): {}",
-                        path.display(),
-                        e
-                    ));
-                }
+            if let Some(path) = bash_sidecar_path(repo_root, session_id)
+                && let Err(e) = fs::write(&path, &id)
+            {
+                debug_log(&format!(
+                    "bash sidecar write failed ({}): {}",
+                    path.display(),
+                    e
+                ));
             }
             id
         }
