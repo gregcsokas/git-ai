@@ -5,9 +5,10 @@ use crate::git::find_repository;
 /// before the `log` subcommand. Everything else passes through to `git log`.
 ///
 /// We deliberately skip the ambiguous short forms `-p` (paginate vs patch),
-/// `-P` (no-pager vs perl-regexp), and bare `-c` (config vs combined-diff).
-/// Their long-form equivalents (`--paginate`, `--no-pager`, `-c key=val`)
-/// are handled correctly.
+/// `-P` (no-pager vs perl-regexp), `-C` (change-dir vs copy-detection),
+/// and bare `-c` (config vs combined-diff).
+/// Their long-form equivalents (`--paginate`, `--no-pager`, `--git-dir`,
+/// `--work-tree`, `-c key=val`) are handled correctly.
 fn extract_git_global_args(args: &[String]) -> (Vec<String>, Vec<String>) {
     let mut global_args: Vec<String> = Vec::new();
     let mut rest: Vec<String> = Vec::new();
@@ -81,17 +82,12 @@ fn extract_git_global_args(args: &[String]) -> (Vec<String>, Vec<String>) {
 
         // --- Short flags that are unambiguous ---
 
-        // -C <path>: repo targeting (git log's -C is copy-detection, no path arg)
-        if arg == "-C" {
-            global_args.push(arg.clone());
-            if i + 1 < args.len() {
-                global_args.push(args[i + 1].clone());
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
+        // -C is deliberately NOT extracted:
+        //   git global: -C <path> (change directory before doing anything)
+        //   git log:    -C (detect copies, no argument)
+        // Since all args arrive after the `log` keyword is stripped, a bare
+        // `-C` is far more likely to be copy-detection. Users needing the
+        // global form should use `--git-dir` or `--work-tree` instead.
 
         // -c <key>=<value>: git config override.
         // Git config keys are always `section.variable=value`, so a valid
@@ -117,11 +113,12 @@ fn extract_git_global_args(args: &[String]) -> (Vec<String>, Vec<String>) {
             continue;
         }
 
-        // -p and -P are deliberately NOT extracted:
+        // -p, -P, and -C are deliberately NOT extracted:
         //   -p = git log --patch (not --paginate)
         //   -P = git log --perl-regexp (not --no-pager)
+        //   -C = git log copy-detection (not --git-dir/change-dir)
 
-        // Everything else (including --help, --version, -h, -v, -p, -P,
+        // Everything else (including --help, --version, -h, -v, -p, -P, -C,
         // and all git-log options) passes through to git log.
         rest.push(arg.clone());
         i += 1;
