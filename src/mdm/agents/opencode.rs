@@ -81,12 +81,13 @@ impl HookInstaller for OpenCodeInstaller {
             });
         }
 
-        // Check if plugin is installed
+        // Check if plugin is installed (current or legacy path)
         let plugin_path = Self::plugin_path();
+        let has_legacy_plugin = Self::legacy_plugin_path().exists();
         if !plugin_path.exists() {
             return Ok(HookCheckResult {
                 tool_installed: true,
-                hooks_installed: false,
+                hooks_installed: has_legacy_plugin,
                 hooks_up_to_date: false,
             });
         }
