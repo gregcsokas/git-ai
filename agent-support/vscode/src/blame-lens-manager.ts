@@ -653,12 +653,12 @@ export class BlameLensManager {
         this.pendingBlameRequest.then(result => {
           this.pendingBlameRequest = null;
           if (result) {
-            this.currentBlameResult = result;
-
             // Bail out if blame was switched off while the request was in flight
             if (this.blameMode === 'off') {
               return;
             }
+
+            this.currentBlameResult = result;
 
             // Trigger async CAS fetches for prompts with messages_url but no messages
             this.triggerCASFetches(result, document.uri);
