@@ -435,7 +435,7 @@ impl AttributionTracker {
 
         // For AI checkpoints, skip token-aligned sub-hunk diffing when the hunk
         // represents a line-for-line replacement (N→N, N>1) or a reflow where
-        // lines are merged or split (N→1 or 1→N).  Using force_split=true emits
+        // lines are merged (N→1, N>1).  Using force_split=true emits
         // Delete+Insert ops instead of Equal, so transform_attributions assigns
         // the current (AI) author to all new bytes – including tokens that happen
         // to match old content (e.g. a `)` that was part of a human line but is
