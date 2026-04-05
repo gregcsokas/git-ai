@@ -391,69 +391,8 @@ fn handle_cherry_pick_skip(repository: &mut Repository) {
 }
 
 /// Fix #955: Try to fetch notes from remotes for source commits that don't have local notes.
-/// This handles the case where a cherry-pick source is from a remote repo whose notes
-/// haven't been fetched locally.
-///
-/// Uses the safe fetch pattern from `sync_authorship::fetch_authorship_notes`:
-/// fetch to a per-remote tracking ref, then merge with `git notes merge -s ours`
-/// so local notes are never destructively overwritten.
 fn try_fetch_missing_notes_for_commits(repository: &Repository, source_commits: &[String]) {
-    use crate::git::repository::exec_git;
-    use std::collections::HashSet;
-
-    // Fetch the full set of locally-noted commits in one subprocess call.
-    // `git notes --ref=refs/notes/ai list` outputs "<note-sha> <commit-sha>" per line.
-    let mut args = repository.global_args_for_exec();
-    args.extend(
-        ["notes", "--ref=refs/notes/ai", "list"]
-            .iter()
-            .map(|s| s.to_string()),
-    );
-    let noted_commits: HashSet<String> = exec_git(&args)
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter_map(|line| line.split_whitespace().nth(1).map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let missing: Vec<&String> = source_commits
-        .iter()
-        .filter(|sha| !noted_commits.contains(sha.as_str()))
-        .collect();
-
-    if missing.is_empty() {
-        return;
-    }
-
-    debug_log(&format!(
-        "Source commits missing notes: {:?}, trying to fetch from remotes",
-        missing
-    ));
-
-    // Use the established safe fetch pattern: fetch to a per-remote tracking ref
-    // then merge with `git notes merge -s ours`, preserving local notes.
-    if let Ok(remotes) = repository.remotes_with_urls() {
-        for (remote_name, _) in remotes {
-            debug_log(&format!(
-                "Attempting safe notes fetch from remote {}",
-                remote_name
-            ));
-            match crate::git::sync_authorship::fetch_authorship_notes(repository, &remote_name) {
-                Ok(_) => debug_log(&format!(
-                    "✓ Fetched and merged notes from remote {}",
-                    remote_name
-                )),
-                Err(e) => debug_log(&format!(
-                    "Notes fetch from remote {} failed (best-effort): {}",
-                    remote_name, e
-                )),
-            }
-        }
-    }
+    crate::git::sync_authorship::fetch_missing_notes_for_commits(repository, source_commits);
 }
 
 fn process_completed_cherry_pick(

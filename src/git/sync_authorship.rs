@@ -68,6 +68,68 @@ pub fn fetch_remote_from_args(
     })
 }
 
+/// Try to fetch authorship notes from all remotes for source commits that are missing
+/// local notes.  This is a best-effort operation used before cherry-pick attribution
+/// rewriting to ensure notes from remote repos are available locally.
+///
+/// Uses the safe fetch pattern (tracking ref + merge with `-s ours`) so local notes
+/// are never overwritten.  Silently ignores any fetch errors.
+pub fn fetch_missing_notes_for_commits(repository: &Repository, source_commits: &[String]) {
+    use std::collections::HashSet;
+
+    // Fetch the full set of locally-noted commits in one subprocess call.
+    // `git notes --ref=refs/notes/ai list` outputs "<note-sha> <commit-sha>" per line.
+    let mut args = repository.global_args_for_exec();
+    args.extend(
+        ["notes", "--ref=refs/notes/ai", "list"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    let noted_commits: HashSet<String> = exec_git(&args)
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().nth(1).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let missing: Vec<&String> = source_commits
+        .iter()
+        .filter(|sha| !noted_commits.contains(sha.as_str()))
+        .collect();
+
+    if missing.is_empty() {
+        return;
+    }
+
+    debug_log(&format!(
+        "Source commits missing notes: {:?}, trying to fetch from remotes",
+        missing
+    ));
+
+    if let Ok(remotes) = repository.remotes_with_urls() {
+        for (remote_name, _) in remotes {
+            debug_log(&format!(
+                "Attempting safe notes fetch from remote {}",
+                remote_name
+            ));
+            match fetch_authorship_notes(repository, &remote_name) {
+                Ok(_) => debug_log(&format!(
+                    "✓ Fetched and merged notes from remote {}",
+                    remote_name
+                )),
+                Err(e) => debug_log(&format!(
+                    "Notes fetch from remote {} failed (best-effort): {}",
+                    remote_name, e
+                )),
+            }
+        }
+    }
+}
+
 // for use with post-fetch and post-pull and post-clone hooks
 // Returns Ok(NotesExistence::Found) if notes were found and fetched,
 // Ok(NotesExistence::NotFound) if confirmed no notes exist on remote,

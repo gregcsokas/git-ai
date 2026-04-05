@@ -195,6 +195,12 @@ pub fn rewrite_authorship_if_needed(
         RewriteLogEvent::CherryPickComplete {
             cherry_pick_complete,
         } => {
+            // Fix #955: fetch missing notes before attribution rewriting so that
+            // daemon mode has the same remote-note resolution as wrapper mode.
+            crate::git::sync_authorship::fetch_missing_notes_for_commits(
+                repo,
+                &cherry_pick_complete.source_commits,
+            );
             rewrite_authorship_after_cherry_pick(
                 repo,
                 &cherry_pick_complete.source_commits,

@@ -1488,22 +1488,28 @@ fn apply_checkout_switch_working_log_side_effect(
     if is_merge {
         let tracked_files = tracked_working_log_files(&repo, &old_head)?;
         if !tracked_files.is_empty() && carryover_snapshot.is_none() {
-            return Err(GitAiError::Generic(format!(
-                "{} --merge missing captured carryover snapshot",
+            // Carryover snapshot was not captured (e.g. the trace arrived before
+            // the worktree reflog was fully populated, or the wrapper already
+            // handled the migration).  Fall through to the rename path so the
+            // working log is migrated rather than lost.  Attribution may be
+            // slightly misaligned but is preserved.
+            debug_log(&format!(
+                "{} --merge missing carryover snapshot, falling back to rename",
                 cmd.primary_command.as_deref().unwrap_or("checkout")
-            )));
+            ));
+        } else {
+            if let Some(snapshot) = carryover_snapshot {
+                restore_working_log_carryover(
+                    &repo,
+                    &old_head,
+                    &new_head,
+                    snapshot.clone(),
+                    Some(repo.git_author_identity().name_or_unknown()),
+                )?;
+            }
+            repo.storage.delete_working_log_for_base_commit(&old_head)?;
+            return Ok(());
         }
-        if let Some(snapshot) = carryover_snapshot {
-            restore_working_log_carryover(
-                &repo,
-                &old_head,
-                &new_head,
-                snapshot.clone(),
-                Some(repo.git_author_identity().name_or_unknown()),
-            )?;
-        }
-        repo.storage.delete_working_log_for_base_commit(&old_head)?;
-        return Ok(());
     }
 
     repo.storage.rename_working_log(&old_head, &new_head)?;
@@ -2714,22 +2720,40 @@ fn strict_cherry_pick_mappings_from_command(
             context
         )));
     }
-    let (original_head, new_commits) = resolve_linear_head_commit_chain_for_worktree(
-        worktree,
+    // Try to reconstruct the cherry-pick chain.  When `--skip` is used, one or
+    // more source commits produce no new commit (they were empty / already applied),
+    // so the actual number of new commits may be less than source_commits.len().
+    // We iterate from the largest plausible count downward, taking the first
+    // (largest) match.  The skipped commits are always at the FRONT of the source
+    // queue, so we trim source_commits from the front to match the actual count.
+    let has_skip = cmd.invoked_args.iter().any(|arg| arg == "--skip");
+    let min_count = if has_skip { 1 } else { source_commits.len() };
+    let mut last_err = String::new();
+    for count in (min_count..=source_commits.len()).rev() {
+        match resolve_linear_head_commit_chain_for_worktree(
+            worktree,
+            new_head,
+            count,
+            Some("cherry-pick"),
+        ) {
+            Ok((original_head, new_commits)) => {
+                let trimmed_source = if count < source_commits.len() {
+                    source_commits[source_commits.len() - count..].to_vec()
+                } else {
+                    source_commits
+                };
+                return Ok((original_head, trimmed_source, new_commits));
+            }
+            Err(err) => last_err = err.to_string(),
+        }
+    }
+    Err(GitAiError::Generic(format!(
+        "{} failed to reconstruct cherry-pick commits new={} expected_count={}: {}",
+        context,
         new_head,
         source_commits.len(),
-        Some("cherry-pick"),
-    )
-    .map_err(|err| {
-        GitAiError::Generic(format!(
-            "{} failed to reconstruct cherry-pick commits new={} expected_count={}: {}",
-            context,
-            new_head,
-            source_commits.len(),
-            err
-        ))
-    })?;
-    Ok((original_head, source_commits, new_commits))
+        last_err
+    )))
 }
 
 /// Collect positional arguments from a cherry-pick command as potential commit
@@ -4173,15 +4197,22 @@ impl ActorDaemonCoordinator {
         &self,
         input: CarryoverCaptureInput<'_>,
     ) -> Result<Option<String>, GitAiError> {
-        if input.exit_code != 0 {
-            return Ok(None);
-        }
-
         let parsed = parse_git_cli_args(trace_invocation_args(input.argv));
         let command = parsed.command.as_deref().or(input.primary_command);
         let Some(command) = command else {
             return Ok(None);
         };
+
+        // `checkout/switch --merge` exits with code 1 when it produces conflict
+        // markers, but HEAD still moves to the new branch.  The daemon requires a
+        // carryover snapshot for such commands, so we must not bail out early on
+        // non-zero exit here.  All other commands with non-zero exit produce no
+        // meaningful state transition and need no snapshot.
+        let is_merge_checkout = (command == "checkout" || command == "switch")
+            && (parsed.has_command_flag("--merge") || parsed.has_command_flag("-m"));
+        if input.exit_code != 0 && !is_merge_checkout {
+            return Ok(None);
+        }
 
         // Repo-creating commands (clone, init) have no meaningful carryover
         // state — the target repo doesn't exist before the command runs, and the
