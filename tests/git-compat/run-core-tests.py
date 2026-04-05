@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 import shlex
@@ -39,17 +40,90 @@ def read_tests_list(path: Path) -> List[str]:
     return tests
 
 
-def ensure_git_clone(clone_dir: Path, clone_url: str) -> None:
+def make_isolated_env(isolated_home: str) -> dict:
+    """
+    Build an environment dict with HOME redirected to an isolated temp directory
+    and a git-ai config optimised for compatibility testing:
+
+    - async_mode=false   : disables daemon auto-spawn entirely
+    - git_path           : hardcoded real-git path so git-ai never probes on
+                           every invocation
+    - allow_repositories : non-empty sentinel so no compat-test repo (which has
+                           no remotes) ever matches → skip_hooks=true → git-ai
+                           acts as a pure passthrough proxy for every command.
+                           Without this, git-ai runs its full hook machinery
+                           (checkpoint creation, repo-state diffing, …) for every
+                           single git call in the ~1 000-command test suite, which
+                           makes the suite take 10+ minutes instead of ~30 s.
+
+    This prevents compat tests from:
+    - Reading/writing the developer's ~/.git-ai/config.json or ~/.claude/
+    - Triggering daemon auto-start for every git command
+    - Running hook overhead (checkpoints, authorship notes) on throwaway repos
+    """
+    env = os.environ.copy()
+    env["HOME"] = isolated_home
+    env["XDG_CONFIG_HOME"] = os.path.join(isolated_home, ".config")
+
+    # Sanitize PATH first so shutil.which finds the real git, not a git-ai wrapper.
+    sanitized = []
+    for entry in env.get("PATH", "").split(os.pathsep):
+        git_bin = os.path.join(entry, "git")
+        if os.path.isfile(git_bin) or os.path.islink(git_bin):
+            try:
+                real = os.path.realpath(git_bin)
+                if "git-ai" in real:
+                    continue  # skip git-ai wrapper directories
+            except OSError:
+                pass
+        sanitized.append(entry)
+    env["PATH"] = os.pathsep.join(sanitized)
+
+    # Find the real git binary (PATH already sanitised above).
+    import shutil
+
+    real_git = shutil.which("git", path=env["PATH"]) or "/usr/bin/git"
+
+    # Write git-ai config.
+    git_ai_dir = os.path.join(isolated_home, ".git-ai")
+    os.makedirs(git_ai_dir, exist_ok=True)
+    with open(os.path.join(git_ai_dir, "config.json"), "w") as f:
+        json.dump(
+            {
+                "git_path": real_git,
+                "feature_flags": {"async_mode": False},
+                # Sentinel allow_repositories: compat-test repos have no remotes,
+                # so none will match this pattern.  is_allowed_repository() returns
+                # False → skip_hooks=True → git-ai proxies without running hooks.
+                "allow_repositories": ["GIT_AI_COMPAT_TEST_SENTINEL_NEVER_MATCHES"],
+            },
+            f,
+        )
+
+    # Override async_mode via env var too.  Some git test scripts temporarily
+    # change HOME inside subshells (e.g. HOME=$(pwd)/alias-config).  Any git-ai
+    # process launched inside such a subshell finds no config at the new HOME,
+    # falls back to release defaults (async_mode=true), and blocks for 2 seconds
+    # waiting for a daemon that will never start.  GIT_AI_ASYNC_MODE is read by
+    # FeatureFlags::from_env_and_file and overrides the file config, so it
+    # suppresses daemon auto-spawn even when HOME changes mid-test.
+    env["GIT_AI_ASYNC_MODE"] = "false"
+
+    return env
+
+
+def ensure_git_clone(clone_dir: Path, clone_url: str, env: dict) -> None:
     if clone_dir.exists():
         return
     clone_dir.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "clone", "--depth", "1", clone_url, str(clone_dir)],
         check=True,
+        env=env,
     )
 
 
-def ensure_git_build(clone_dir: Path, jobs: int) -> None:
+def ensure_git_build(clone_dir: Path, jobs: int, env: dict) -> None:
     build_options = clone_dir / "GIT-BUILD-OPTIONS"
     if build_options.exists():
         return
@@ -63,11 +137,12 @@ def ensure_git_build(clone_dir: Path, jobs: int) -> None:
             "NO_GETTEXT=YesPlease",
         ],
         check=True,
+        env=env,
     )
 
 
-def run_prove(git_tests_dir: Path, tests: List[str], git_installed: Path, jobs: int) -> Tuple[int, str]:
-    env = os.environ.copy()
+def run_prove(git_tests_dir: Path, tests: List[str], git_installed: Path, jobs: int, env: dict) -> Tuple[int, str]:
+    env = dict(env)  # copy so we can add GIT_TEST_INSTALLED without mutating caller's dict
     env["GIT_TEST_INSTALLED"] = str(git_installed)
     env.setdefault("GIT_TEST_DEFAULT_HASH", "sha1")
 
@@ -251,25 +326,51 @@ def main() -> int:
             f"git-ai binary not found at {args.git_ai_bin}. Build it with `cargo build --release`."
         )
 
-    ensure_git_clone(args.clone_dir, args.git_url)
-    ensure_git_build(args.clone_dir, args.jobs)
-    git_tests_dir = args.clone_dir / "t"
-
-    if not git_tests_dir.exists():
-        raise FileNotFoundError(f"Git tests directory not found at {git_tests_dir}")
-
     whitelist = load_whitelist(args.whitelist)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        wrapper_dir = Path(tmpdir)
-        (wrapper_dir / "git").symlink_to(args.git_ai_bin)
-        (wrapper_dir / "git-ai").symlink_to(args.git_ai_bin)
+    # Wrap the entire test run (including git clone/build) in an isolated HOME so
+    # that the release git-ai binary cannot read or write the developer's real
+    # ~/.git-ai/config.json, ~/.claude/settings.json, etc.  The isolated config
+    # sets async_mode=false which prevents daemon auto-spawn and the resulting
+    # 2-second-per-git-command timeout that causes CI to run for hours.
+    with tempfile.TemporaryDirectory(prefix="git-ai-compat-home-") as isolated_home:
+        env = make_isolated_env(isolated_home)
 
-        cmd_preview = " ".join(shlex.quote(t) for t in tests)
-        print(f"[+] Running core Git tests with: prove -j{args.jobs} {cmd_preview}")
-        print(f"[+] GIT_TEST_INSTALLED={wrapper_dir}")
+        ensure_git_clone(args.clone_dir, args.git_url, env)
+        ensure_git_build(args.clone_dir, args.jobs, env)
+        git_tests_dir = args.clone_dir / "t"
 
-        exit_code, output = run_prove(git_tests_dir, tests, wrapper_dir, args.jobs)
+        if not git_tests_dir.exists():
+            raise FileNotFoundError(f"Git tests directory not found at {git_tests_dir}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wrapper_dir = Path(tmpdir)
+            # Use a shell wrapper (not a symlink) for the "git" entry so we can
+            # re-inject GIT_AI_ASYNC_MODE=false before every invocation.
+            # Git's test-lib.sh unsets all GIT_* environment variables when it
+            # initialises (to isolate tests from the developer environment), so
+            # any GIT_AI_ASYNC_MODE we set in the outer Python env is stripped
+            # before the first git call.  The wrapper runs *after* test-lib.sh's
+            # unset block, so it re-establishes the override every time.
+            git_wrapper = wrapper_dir / "git"
+            git_wrapper.write_text(
+                f"#!/bin/bash\n"
+                f"GIT_AI_ASYNC_MODE=false\n"
+                f"export GIT_AI_ASYNC_MODE\n"
+                # exec -a git sets argv[0] to "git" so git-ai's binary-name check
+                # routes to handle_git() instead of handle_git_ai() (help text).
+                # bash is required for exec -a; /bin/sh (dash) does not support it.
+                f'exec -a git "{args.git_ai_bin}" "$@"\n'
+            )
+            git_wrapper.chmod(0o755)
+            (wrapper_dir / "git-ai").symlink_to(args.git_ai_bin)
+
+            cmd_preview = " ".join(shlex.quote(t) for t in tests)
+            print(f"[+] Running core Git tests with: prove -j{args.jobs} {cmd_preview}")
+            print(f"[+] GIT_TEST_INSTALLED={wrapper_dir}")
+            print(f"[+] HOME={isolated_home} (isolated)")
+
+            exit_code, output = run_prove(git_tests_dir, tests, wrapper_dir, args.jobs, env)
 
     summary = extract_summary_section(output)
     failures = parse_failures(summary) if summary else {}
