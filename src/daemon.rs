@@ -6499,13 +6499,11 @@ impl ActorDaemonCoordinator {
             // conflict markers but HEAD still moves to the target branch.  We must not
             // return early here — fall through so apply_checkout_switch_working_log_side_effect
             // and recent_checkout_switch_prerequisite_from_command can migrate the working log.
-            let is_merge_checkout = matches!(
-                cmd.primary_command.as_deref(),
-                Some("checkout" | "switch")
-            ) && {
-                let p = parsed_invocation_for_normalized_command(cmd);
-                p.has_command_flag("--merge") || p.has_command_flag("-m")
-            };
+            let is_merge_checkout =
+                matches!(cmd.primary_command.as_deref(), Some("checkout" | "switch")) && {
+                    let p = parsed_invocation_for_normalized_command(cmd);
+                    p.has_command_flag("--merge") || p.has_command_flag("-m")
+                };
             // For stash pop/apply/branch with non-zero exit (typically conflict), don't
             // skip processing. The stash may have been partially applied and attribution
             // should still be restored. We cannot rely on `has_stash_conflict_for_repo`
