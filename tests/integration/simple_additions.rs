@@ -256,7 +256,7 @@ fn test_multiple_ai_checkpoints_with_human_deletions() {
     assert_eq!(commit.authorship_log.attestations.len(), 1);
 
     file.assert_lines_and_blame(crate::lines![
-        "Base".human(),
+        "Base".ai(),
         "AI2 Line 1".ai(),
         "AI2 Line 2".ai(),
     ]);
@@ -406,7 +406,7 @@ fn test_human_stages_some_ai_lines() {
     file.assert_committed_lines(crate::lines![
         "line1".human(),
         "line2".human(),
-        "line3".human(),
+        "line3".ai(),
         "ai_line4".ai(),
         "ai_line5".ai(),
         "ai_line6".ai(),

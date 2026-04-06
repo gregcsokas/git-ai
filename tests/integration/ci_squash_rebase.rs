@@ -225,7 +225,7 @@ fn test_ci_squash_merge_mixed_content() {
     file.assert_lines_and_blame(crate::lines![
         "// Base code".human(),
         "const base = 1;".human(),
-        "// Human comment".human(),
+        "// Human comment".ai(),
         "// AI generated function".ai(),
         "function aiHelper() {".ai(),
         "  return true;".ai(),

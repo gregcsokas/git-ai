@@ -342,7 +342,7 @@ fn test_amend_with_partially_staged_ai_file() {
 
     // Verify: first 3 AI lines should be attributed, and last 3 should also be attributed
     file.assert_lines_and_blame(crate::lines![
-        "// Initial line".human(),
+        "// Initial line".ai(),
         "// AI line 1".ai(),
         "// AI line 2".ai(),
         "// AI line 3".ai(),
@@ -444,7 +444,7 @@ fn test_amend_with_unstaged_middle_section() {
 
     // Verify all AI attributions preserved
     file.assert_lines_and_blame(crate::lines![
-        "// File header".human(),
+        "// File header".ai(),
         "// AI section 1 line 1".ai(),
         "// AI section 1 line 2".ai(),
         "// AI section 2 line 1".ai(),
