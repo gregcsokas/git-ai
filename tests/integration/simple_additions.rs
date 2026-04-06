@@ -255,7 +255,12 @@ fn test_multiple_ai_checkpoints_with_human_deletions() {
     // Should only have AI2's lines attributed (now at indices 1 and 2 after deletion)
     assert_eq!(commit.authorship_log.attestations.len(), 1);
 
+    // Human prepends a note to verify human attribution is still preserved alongside AI
+    file.insert_at(0, crate::lines!["// Human note".human()]);
+    repo.stage_all_and_commit("Human adds note").unwrap();
+
     file.assert_lines_and_blame(crate::lines![
+        "// Human note".human(),
         "Base".ai(),
         "AI2 Line 1".ai(),
         "AI2 Line 2".ai(),

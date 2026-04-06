@@ -340,7 +340,12 @@ fn test_amend_with_partially_staged_ai_file() {
     // Now commit the remaining unstaged lines
     repo.stage_all_and_commit("Add remaining AI lines").unwrap();
 
-    // Verify: first 3 AI lines should be attributed, and last 3 should also be attributed
+    // Human adds a footer line to verify human attribution is still preserved
+    file.insert_at(7, crate::lines!["// Human footer".human()]);
+    repo.stage_all_and_commit("Human adds footer").unwrap();
+
+    // Verify: AI lines (including the original header, which landed in the same hunk)
+    // are attributed to AI; the separately-committed human footer stays human.
     file.assert_lines_and_blame(crate::lines![
         "// Initial line".ai(),
         "// AI line 1".ai(),
@@ -348,7 +353,8 @@ fn test_amend_with_partially_staged_ai_file() {
         "// AI line 3".ai(),
         "// AI line 4".ai(),
         "// AI line 5".ai(),
-        "// AI line 6".ai()
+        "// AI line 6".ai(),
+        "// Human footer".human(),
     ]);
 }
 
@@ -442,7 +448,12 @@ fn test_amend_with_unstaged_middle_section() {
     // Commit remaining (middle section)
     repo.stage_all_and_commit("Add middle section").unwrap();
 
-    // Verify all AI attributions preserved
+    // Human adds a footer line to verify human attribution is still preserved
+    file.insert_at(7, crate::lines!["// Human footer".human()]);
+    repo.stage_all_and_commit("Human adds footer").unwrap();
+
+    // Verify AI attributions (including header that landed in the same hunk) and
+    // the separately-committed human footer stays human.
     file.assert_lines_and_blame(crate::lines![
         "// File header".ai(),
         "// AI section 1 line 1".ai(),
@@ -450,7 +461,8 @@ fn test_amend_with_unstaged_middle_section() {
         "// AI section 2 line 1".ai(),
         "// AI section 2 line 2".ai(),
         "// AI section 3 line 1".ai(),
-        "// AI section 3 line 2".ai()
+        "// AI section 3 line 2".ai(),
+        "// Human footer".human(),
     ]);
 }
 
