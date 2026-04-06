@@ -4075,8 +4075,11 @@ index 0000000..abc1234 100644
         // start_with(workdir) — no .git file inspection is needed.  This test
         // passes even without the is_linked_worktree_git_file fix.
         let temp = tempfile::tempdir().expect("tempdir");
-        let main_repo = temp.path().join("main");
-        let worktree = temp.path().join("linked");
+        // Canonicalize temp.path() so constructed sub-paths resolve symlinks
+        // (on macOS /var/folders/... is a symlink to /private/var/folders/...).
+        let temp_path = temp.path().canonicalize().expect("canonical temp");
+        let main_repo = temp_path.join("main");
+        let worktree = temp_path.join("linked");
 
         fs::create_dir_all(&main_repo).expect("create main repo dir");
         run_git(&main_repo, &["init"]);
@@ -4085,7 +4088,10 @@ index 0000000..abc1234 100644
         run_git(&main_repo, &["worktree", "add", worktree.to_str().unwrap()]);
 
         let dot_git = worktree.join(".git");
-        assert!(dot_git.is_file(), ".git should be a file in a linked worktree");
+        assert!(
+            dot_git.is_file(),
+            ".git should be a file in a linked worktree"
+        );
 
         let main = find_repository_in_path(main_repo.to_str().unwrap()).expect("find main repo");
 
@@ -4110,7 +4116,10 @@ index 0000000..abc1234 100644
         // and only is_linked_worktree_git_file makes path_is_in_workdir return
         // false.  This test FAILS without the fix.
         let temp = tempfile::tempdir().expect("tempdir");
-        let main_repo = temp.path().join("main");
+        // Canonicalize temp.path() so constructed sub-paths resolve symlinks
+        // (on macOS /var/folders/... is a symlink to /private/var/folders/...).
+        let temp_path = temp.path().canonicalize().expect("canonical temp");
+        let main_repo = temp_path.join("main");
         let worktree = main_repo.join(".worktrees").join("feature");
 
         fs::create_dir_all(&main_repo).expect("create main repo dir");
@@ -4127,7 +4136,10 @@ index 0000000..abc1234 100644
         );
 
         let dot_git = worktree.join(".git");
-        assert!(dot_git.is_file(), ".git should be a file in a nested worktree");
+        assert!(
+            dot_git.is_file(),
+            ".git should be a file in a nested worktree"
+        );
         let gitfile_content = fs::read_to_string(&dot_git).expect("read .git file");
         assert!(
             gitfile_content.contains("/worktrees/"),

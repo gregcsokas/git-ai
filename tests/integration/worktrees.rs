@@ -522,7 +522,10 @@ fn checkpoint_routes_to_linked_worktree_when_cwd_is_main_repo() {
 
     // Create a second linked worktree alongside the main working tree.
     let linked_wt = unique_worktree_path();
-    run_git(&main_repo_root, &["worktree", "add", linked_wt.to_str().unwrap()]);
+    run_git(
+        &main_repo_root,
+        &["worktree", "add", linked_wt.to_str().unwrap()],
+    );
 
     // Write a file inside the linked worktree.
     let wt_file = linked_wt.join("feature.rs");
@@ -539,14 +542,16 @@ fn checkpoint_routes_to_linked_worktree_when_cwd_is_main_repo() {
 
     // The checkpoint must land in the *linked worktree's* isolated storage,
     // not in the main repo's plain working_logs.
-    let wt_repo =
-        GitAiRepository::find_repository_in_path(linked_wt.to_str().unwrap())
-            .expect("find linked worktree repo");
+    let wt_repo = GitAiRepository::find_repository_in_path(linked_wt.to_str().unwrap())
+        .expect("find linked worktree repo");
 
     // Storage must be under {main_repo}/.git/ai/worktrees/ (worktree-isolated).
     let expected_storage_prefix = main_repo_root.join(".git").join("ai").join("worktrees");
     assert!(
-        wt_repo.storage.working_logs.starts_with(&expected_storage_prefix),
+        wt_repo
+            .storage
+            .working_logs
+            .starts_with(&expected_storage_prefix),
         "linked worktree storage should be under .git/ai/worktrees: {}",
         wt_repo.storage.working_logs.display()
     );
@@ -586,7 +591,10 @@ fn checkpoint_routes_to_linked_worktree_when_cwd_is_main_repo() {
     );
 
     // Cleanup the temporary worktree.
-    run_git(&main_repo_root, &["worktree", "remove", "--force", linked_wt.to_str().unwrap()]);
+    run_git(
+        &main_repo_root,
+        &["worktree", "remove", "--force", linked_wt.to_str().unwrap()],
+    );
 }
 
 /// Same as `checkpoint_routes_to_linked_worktree_when_cwd_is_main_repo` but the linked
@@ -641,7 +649,10 @@ fn checkpoint_routes_to_nested_linked_worktree_when_cwd_is_main_repo() {
 
     let expected_storage_prefix = main_repo_root.join(".git").join("ai").join("worktrees");
     assert!(
-        wt_repo.storage.working_logs.starts_with(&expected_storage_prefix),
+        wt_repo
+            .storage
+            .working_logs
+            .starts_with(&expected_storage_prefix),
         "nested worktree storage should be under .git/ai/worktrees: {}",
         wt_repo.storage.working_logs.display()
     );
@@ -698,7 +709,10 @@ fn human_checkpoint_routes_to_linked_worktree_when_cwd_is_main_repo() {
     let main_repo_root = repo.path().to_path_buf();
 
     let linked_wt = unique_worktree_path();
-    run_git(&main_repo_root, &["worktree", "add", linked_wt.to_str().unwrap()]);
+    run_git(
+        &main_repo_root,
+        &["worktree", "add", linked_wt.to_str().unwrap()],
+    );
 
     // Write a file in the worktree before the hook so there's an "uncaptured zone".
     let wt_file = linked_wt.join("preexisting.rs");
@@ -709,9 +723,8 @@ fn human_checkpoint_routes_to_linked_worktree_when_cwd_is_main_repo() {
         .expect("pre-tool-use checkpoint should succeed");
 
     // The PreToolUse (Human) checkpoint should land in the worktree log.
-    let wt_repo =
-        GitAiRepository::find_repository_in_path(linked_wt.to_str().unwrap())
-            .expect("find linked worktree repo");
+    let wt_repo = GitAiRepository::find_repository_in_path(linked_wt.to_str().unwrap())
+        .expect("find linked worktree repo");
 
     let commit_sha = wt_repo
         .head()
