@@ -356,20 +356,21 @@ fn is_wm_covered(
 // Path filtering
 // ---------------------------------------------------------------------------
 
-/// Build the git-ai ignore ruleset for snapshot filtering.
+/// Build the git-ai ignore ruleset for use in `filter_entry` on the snapshot walker.
 ///
-/// Combines `.gitignore` files found in the tree with:
-/// - git-ai's default ignore patterns (lock files, node_modules, etc.)
+/// Only covers the git-ai-specific patterns:
+/// - Default ignore patterns (lock files, node_modules, etc.)
 /// - Patterns from `.git-ai-ignore` at the repo root
 /// - Linguist-generated patterns from `.gitattributes` at the repo root
 ///
-/// Applied uniformly to all files (tracked and untracked alike).
+/// Standard `.gitignore` handling — including nested `.gitignore` files throughout
+/// the repo tree — is left to `WalkBuilder` with `git_ignore(true)`, which discovers
+/// and applies them natively as it descends. Adding them here too would be redundant
+/// and would require a separate pre-walk that can't apply rules during traversal.
 pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
     let mut builder = GitignoreBuilder::new(repo_root);
 
-    // --- Shared ignore patterns (same source of truth as non-bash checkpoints) ---
-    // Combines: git-ai defaults, .git-ai-ignore, linguist-generated from .gitattributes.
-    // This keeps bash-tool snapshot filtering in sync with human/mock-AI checkpoint filtering.
+    // git-ai-specific patterns: same source of truth as non-bash checkpoints.
     let shared_patterns: Vec<String> = default_ignore_patterns()
         .into_iter()
         .chain(load_git_ai_ignore_patterns_from_path(repo_root))
@@ -383,66 +384,6 @@ pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
             ));
         }
     }
-
-    // Recursively collect .gitignore files from the repo tree.
-    // Depth-limited and time-limited to avoid excessive traversal.
-    const MAX_GITIGNORE_DEPTH: usize = 10;
-
-    /// Well-known directory names that are almost always gitignored.
-    /// Skipping these avoids descending into very large ignored trees
-    /// (e.g. `node_modules/`) when we cannot yet match against the
-    /// partially-built gitignore ruleset.
-    const SKIP_DIR_NAMES: &[&str] = &[
-        "node_modules",
-        "target",
-        ".build",
-        "vendor",
-        "__pycache__",
-        ".venv",
-        "dist",
-        "build",
-    ];
-
-    fn collect_gitignores(
-        builder: &mut GitignoreBuilder,
-        dir: &Path,
-        depth: usize,
-        deadline: Instant,
-    ) {
-        if depth >= MAX_GITIGNORE_DEPTH || Instant::now() > deadline {
-            return;
-        }
-
-        let gitignore_path = dir.join(".gitignore");
-        if gitignore_path.exists()
-            && let Some(err) = builder.add(&gitignore_path)
-        {
-            debug_log(&format!(
-                "Warning: failed to parse {}: {}",
-                gitignore_path.display(),
-                err
-            ));
-        }
-
-        // Recurse into subdirectories to find nested .gitignore files
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() && !path.ends_with(".git") {
-                    // Skip well-known large ignored directory trees.
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                        && SKIP_DIR_NAMES.contains(&name)
-                    {
-                        continue;
-                    }
-                    collect_gitignores(builder, &path, depth + 1, deadline);
-                }
-            }
-        }
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    collect_gitignores(&mut builder, repo_root, 0, deadline);
 
     builder
         .build()
