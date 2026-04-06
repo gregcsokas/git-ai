@@ -2399,14 +2399,12 @@ fn run_diff_tree_with_hunks(
         // so every `+` line is a genuine addition — exactly what we need for the
         // content-match attribution pass in the hunk-based transfer path.
         if line.starts_with('+') && !line.starts_with("+++ ") {
-            if let (Some(commit), Some(file)) = (&current_commit, &current_diff_file) {
-                if let Some(file_hunks) = hunks_by_commit.get_mut(commit) {
-                    if let Some(hunks) = file_hunks.get_mut(file.as_str()) {
-                        if let Some(last_hunk) = hunks.last_mut() {
-                            last_hunk.added_lines.push(line[1..].to_string());
-                        }
-                    }
-                }
+            if let (Some(commit), Some(file)) = (&current_commit, &current_diff_file)
+                && let Some(file_hunks) = hunks_by_commit.get_mut(commit)
+                && let Some(hunks) = file_hunks.get_mut(file.as_str())
+                && let Some(last_hunk) = hunks.last_mut()
+            {
+                last_hunk.added_lines.push(line[1..].to_string());
             }
             continue;
         }
