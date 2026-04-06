@@ -21,32 +21,6 @@ impl OpenCodeInstaller {
             .join("git-ai.ts")
     }
 
-    /// Legacy plugin path from old installations (~/.config/opencode/plugin/git-ai.ts)
-    fn legacy_plugin_path() -> PathBuf {
-        home_dir()
-            .join(".config")
-            .join("opencode")
-            .join("plugin")
-            .join("git-ai.ts")
-    }
-
-    /// Remove the legacy plugin file if it exists (old installations used "plugin" instead of "plugins")
-    fn cleanup_legacy_plugin(dry_run: bool) -> Option<String> {
-        let legacy_path = Self::legacy_plugin_path();
-        if !legacy_path.exists() {
-            return None;
-        }
-
-        let existing_content = fs::read_to_string(&legacy_path).unwrap_or_default();
-        let diff_output = generate_diff(&legacy_path, &existing_content, "");
-
-        if !dry_run {
-            let _ = fs::remove_file(&legacy_path);
-        }
-
-        Some(diff_output)
-    }
-
     /// Generate plugin content with the absolute binary path substituted in
     fn generate_plugin_content(binary_path: &Path) -> String {
         // Escape backslashes for the TypeScript string literal (needed for Windows paths)
@@ -81,13 +55,12 @@ impl HookInstaller for OpenCodeInstaller {
             });
         }
 
-        // Check if plugin is installed (current or legacy path)
+        // Check if plugin is installed
         let plugin_path = Self::plugin_path();
-        let has_legacy_plugin = Self::legacy_plugin_path().exists();
         if !plugin_path.exists() {
             return Ok(HookCheckResult {
                 tool_installed: true,
-                hooks_installed: has_legacy_plugin,
+                hooks_installed: false,
                 hooks_up_to_date: false,
             });
         }
@@ -111,8 +84,15 @@ impl HookInstaller for OpenCodeInstaller {
     ) -> Result<Option<String>, GitAiError> {
         let plugin_path = Self::plugin_path();
 
-        // Clean up legacy plugin path from old installations
-        let legacy_diff = Self::cleanup_legacy_plugin(dry_run);
+        // Remove legacy plugin from old installations (~/.config/opencode/plugin/ singular)
+        if !dry_run {
+            let legacy_path = home_dir()
+                .join(".config")
+                .join("opencode")
+                .join("plugin")
+                .join("git-ai.ts");
+            let _ = fs::remove_file(&legacy_path);
+        }
 
         // Ensure directory exists
         if let Some(dir) = plugin_path.parent()
@@ -132,21 +112,11 @@ impl HookInstaller for OpenCodeInstaller {
 
         // Check if there are changes
         if existing_content.trim() == new_content.trim() {
-            // Even if the new plugin is up to date, we may have cleaned up legacy
-            return Ok(legacy_diff);
+            return Ok(None);
         }
 
         // Generate diff
-        let mut diff_output = String::new();
-        if let Some(ld) = legacy_diff {
-            diff_output.push_str(&ld);
-            diff_output.push('\n');
-        }
-        diff_output.push_str(&generate_diff(
-            &plugin_path,
-            &existing_content,
-            &new_content,
-        ));
+        let diff_output = generate_diff(&plugin_path, &existing_content, &new_content);
 
         // Write if not dry-run
         if !dry_run {
@@ -167,20 +137,22 @@ impl HookInstaller for OpenCodeInstaller {
     ) -> Result<Option<String>, GitAiError> {
         let plugin_path = Self::plugin_path();
 
-        // Also clean up legacy plugin path from old installations
-        let legacy_diff = Self::cleanup_legacy_plugin(dry_run);
+        // Remove legacy plugin from old installations (~/.config/opencode/plugin/ singular)
+        if !dry_run {
+            let legacy_path = home_dir()
+                .join(".config")
+                .join("opencode")
+                .join("plugin")
+                .join("git-ai.ts");
+            let _ = fs::remove_file(&legacy_path);
+        }
 
         if !plugin_path.exists() {
-            return Ok(legacy_diff);
+            return Ok(None);
         }
 
         let existing_content = fs::read_to_string(&plugin_path)?;
-        let mut diff_output = String::new();
-        if let Some(ld) = legacy_diff {
-            diff_output.push_str(&ld);
-            diff_output.push('\n');
-        }
-        diff_output.push_str(&generate_diff(&plugin_path, &existing_content, ""));
+        let diff_output = generate_diff(&plugin_path, &existing_content, "");
 
         if !dry_run {
             fs::remove_file(&plugin_path)?;
