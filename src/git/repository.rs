@@ -4075,16 +4075,18 @@ index 0000000..abc1234 100644
         // start_with(workdir) — no .git file inspection is needed.  This test
         // passes even without the is_linked_worktree_git_file fix.
         let temp = tempfile::tempdir().expect("tempdir");
-        // Canonicalize temp.path() so constructed sub-paths resolve symlinks
-        // (on macOS /var/folders/... is a symlink to /private/var/folders/...).
-        let temp_path = temp.path().canonicalize().expect("canonical temp");
-        let main_repo = temp_path.join("main");
-        let worktree = temp_path.join("linked");
+        let main_repo = temp.path().join("main");
+        let worktree = temp.path().join("linked");
 
         fs::create_dir_all(&main_repo).expect("create main repo dir");
         run_git(&main_repo, &["init"]);
         run_git(&main_repo, &["config", "user.name", "Test User"]);
         run_git(&main_repo, &["config", "user.email", "test@example.com"]);
+        // Write a file so the sanity-check path exists on disk — path_is_in_workdir
+        // calls path.canonicalize() which only resolves symlinks for existing paths
+        // (on macOS /var/... is a symlink to /private/var/...; on Windows temp paths
+        // may use short names that differ from the canonical workdir stored by git).
+        fs::write(main_repo.join("README.md"), "# main\n").expect("write README");
         run_git(&main_repo, &["worktree", "add", worktree.to_str().unwrap()]);
 
         let dot_git = worktree.join(".git");
@@ -4101,7 +4103,8 @@ index 0000000..abc1234 100644
             "sibling linked worktree file should not be in main repo workdir"
         );
 
-        let main_file = main_repo.join("src").join("lib.rs");
+        // Use an existing file so path.canonicalize() resolves symlinks correctly.
+        let main_file = main_repo.join("README.md");
         assert!(
             main.path_is_in_workdir(&main_file),
             "main repo file should be in main repo workdir"
@@ -4116,10 +4119,7 @@ index 0000000..abc1234 100644
         // and only is_linked_worktree_git_file makes path_is_in_workdir return
         // false.  This test FAILS without the fix.
         let temp = tempfile::tempdir().expect("tempdir");
-        // Canonicalize temp.path() so constructed sub-paths resolve symlinks
-        // (on macOS /var/folders/... is a symlink to /private/var/folders/...).
-        let temp_path = temp.path().canonicalize().expect("canonical temp");
-        let main_repo = temp_path.join("main");
+        let main_repo = temp.path().join("main");
         let worktree = main_repo.join(".worktrees").join("feature");
 
         fs::create_dir_all(&main_repo).expect("create main repo dir");
@@ -4167,7 +4167,9 @@ index 0000000..abc1234 100644
         );
 
         // Sanity: a normal file in the main repo is still in the main workdir.
-        let main_file = main_repo.join("src").join("lib.rs");
+        // Use README.md which already exists so path.canonicalize() resolves
+        // symlinks correctly (macOS /var/... → /private/var/...; Windows short names).
+        let main_file = main_repo.join("README.md");
         assert!(
             main.path_is_in_workdir(&main_file),
             "main repo file should be in main repo workdir"
