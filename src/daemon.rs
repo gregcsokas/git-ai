@@ -6381,7 +6381,20 @@ impl ActorDaemonCoordinator {
                     self.set_pending_cherry_pick_sources_for_worktree(worktree, source_refs)?;
                 }
             }
-            return Ok(());
+            // Fix #957: `checkout/switch --merge` exits with code 1 when it produces
+            // conflict markers but HEAD still moves to the target branch.  We must not
+            // return early here — fall through so apply_checkout_switch_working_log_side_effect
+            // and recent_checkout_switch_prerequisite_from_command can migrate the working log.
+            let is_merge_checkout = matches!(
+                cmd.primary_command.as_deref(),
+                Some("checkout" | "switch")
+            ) && {
+                let p = parsed_invocation_for_normalized_command(cmd);
+                p.has_command_flag("--merge") || p.has_command_flag("-m")
+            };
+            if !is_merge_checkout {
+                return Ok(());
+            }
         }
 
         if let Some(worktree) = cmd.worktree.as_ref() {
