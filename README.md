@@ -73,8 +73,8 @@ That's it — **no per-repo setup required.** Prompt and commit as normal. Git A
 <th align="center" width="50%">For Teams</th>
 </tr>
 <tr>
-<td align="center"><img src="https://github.com/git-ai-project/git-ai/raw/new-readme/assets/docs/solo-player.svg" alt="Solo — everything stays on your machine" width="400"></td>
-<td align="center"><img src="https://github.com/git-ai-project/git-ai/raw/new-readme/assets/docs/for-teams.svg" alt="For teams — shared context across your team" width="400"></td>
+<td align="center"><img src="https://github.com/git-ai-project/git-ai/blob/main/assets/docs/solo-player.svg" alt="Solo — everything stays on your machine" width="400"></td>
+<td align="center"><img src="https://github.com/git-ai-project/git-ai/blob/main/assets/docs/for-teams.svg" alt="For teams — shared context across your team" width="400"></td>
 </tr>
 <tr>
 <td valign="top">
