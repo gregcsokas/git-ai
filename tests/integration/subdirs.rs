@@ -1318,7 +1318,7 @@ crate::subdir_test_variants! {
 
         // Verify final file state - hooks should have preserved AI authorship
         file.assert_lines_and_blame(crate::lines![
-            "fn main() {".human(),
+            "fn main() {".ai(),
             "    println!(\"Starting\");".ai(),
             "    // TODO: Add error handling".ai(),
             "}".human(),
