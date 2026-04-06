@@ -84,6 +84,16 @@ impl HookInstaller for OpenCodeInstaller {
     ) -> Result<Option<String>, GitAiError> {
         let plugin_path = Self::plugin_path();
 
+        // Remove legacy plugin from old installations (~/.config/opencode/plugin/ singular)
+        if !dry_run {
+            let legacy_path = home_dir()
+                .join(".config")
+                .join("opencode")
+                .join("plugin")
+                .join("git-ai.ts");
+            let _ = fs::remove_file(&legacy_path);
+        }
+
         // Ensure directory exists
         if let Some(dir) = plugin_path.parent()
             && !dry_run
@@ -126,6 +136,16 @@ impl HookInstaller for OpenCodeInstaller {
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
         let plugin_path = Self::plugin_path();
+
+        // Remove legacy plugin from old installations (~/.config/opencode/plugin/ singular)
+        if !dry_run {
+            let legacy_path = home_dir()
+                .join(".config")
+                .join("opencode")
+                .join("plugin")
+                .join("git-ai.ts");
+            let _ = fs::remove_file(&legacy_path);
+        }
 
         if !plugin_path.exists() {
             return Ok(None);
