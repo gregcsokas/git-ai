@@ -1986,6 +1986,96 @@ fn test_rebase_non_head_attribution_survives_slow_path() {
     ]);
 }
 
+/// Regression test: interactive rebase that drops a commit must preserve attribution
+/// on surviving commits (issue #970).
+///
+/// When an interactive rebase uses `drop` to skip commit B from [A, B, C], the
+/// surviving rebased commits A′ and C′ must retain the attribution originally
+/// associated with A and C respectively.
+///
+/// The bug: `rewrite_authorship_after_rebase_v2` used a positional zip to pair
+/// `original_commits` with `new_commits`.  When commit B was dropped the lists
+/// had different lengths: originals = [A, B, C] but new = [A′, C′].  The zip
+/// produced [(A, A′), (B, C′)] so C′ was attributed using B's (wrong) note
+/// instead of C's note, causing C′ to lose its attribution entirely.
+///
+/// The fix: when original and new commit counts differ, pair commits by matching
+/// the commit subject line rather than by position.
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn test_rebase_interactive_drop_preserves_attribution() {
+    let repo = TestRepo::new();
+
+    // Create a base commit on main
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with three AI commits A, B, C
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    let mut file_a = repo.filename("file_a.txt");
+    file_a.set_contents(crate::lines!["AI line A".ai()]);
+    repo.stage_all_and_commit("Commit A").unwrap();
+
+    let mut file_b = repo.filename("file_b.txt");
+    file_b.set_contents(crate::lines!["AI line B".ai()]);
+    repo.stage_all_and_commit("Commit B").unwrap();
+
+    let mut file_c = repo.filename("file_c.txt");
+    file_c.set_contents(crate::lines!["AI line C".ai()]);
+    repo.stage_all_and_commit("Commit C").unwrap();
+
+    // Advance main so the rebase has a new base (forces non-fast-forward)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut other = repo.filename("other.txt");
+    other.set_contents(crate::lines!["other content"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+    let base_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Interactive rebase: drop Commit B, keep A and C
+    repo.git(&["checkout", "feature"]).unwrap();
+    // Drop the 2nd pick line (Commit B) — the three commits appear in order A, B, C.
+    let drop_script = r#"#!/bin/sh
+sed -i.bak '2s/^pick/drop/' "$1"
+"#;
+    let script_path = repo.path().join("drop_script.sh");
+    std::fs::write(&script_path, drop_script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script_path, perms).unwrap();
+
+    let rebase_result = repo.git_with_env(
+        &["rebase", "-i", &base_commit],
+        &[
+            ("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap()),
+            ("GIT_EDITOR", "true"),
+        ],
+        None,
+    );
+    assert!(
+        rebase_result.is_ok(),
+        "interactive rebase with drop should succeed: {:?}",
+        rebase_result
+    );
+
+    // file_b should be gone (its commit was dropped)
+    assert!(
+        !repo.path().join("file_b.txt").exists(),
+        "file_b.txt should not exist after its commit was dropped"
+    );
+
+    // Commit A's rewrite (A′) must still carry AI attribution
+    file_a.assert_lines_and_blame(crate::lines!["AI line A".ai()]);
+
+    // Commit C's rewrite (C′) must still carry AI attribution.
+    // This is the assertion that failed before the fix: the broken positional zip
+    // paired C′ with B's note (no AI content), causing the attribution to be lost.
+    file_c.assert_lines_and_blame(crate::lines!["AI line C".ai()]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_rebase_no_conflicts_identical_trees,
     test_rebase_with_different_trees,
@@ -2022,6 +2112,7 @@ crate::reuse_tests_in_worktree_with_attrs!(
     (#[cfg(not(target_os = "windows"))])
     test_rebase_squash_preserves_all_authorship,
     test_rebase_reword_commit_with_children,
+    test_rebase_interactive_drop_preserves_attribution,
 );
 
 /// Regression test: file modified via hunk path, then deleted, then recreated.

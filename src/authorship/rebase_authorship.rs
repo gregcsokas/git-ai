@@ -959,6 +959,84 @@ fn batch_read_file_contents_at_commit(
     Ok(results)
 }
 
+/// Pair original commits with new (rebased) commits for authorship rewriting.
+///
+/// When the counts are equal we use positional pairing (the common case for a
+/// normal rebase where every original commit becomes exactly one new commit).
+///
+/// When counts differ — which happens when an interactive rebase *drops* one or
+/// more commits — positional pairing is wrong: e.g. with originals [A, B, C] and
+/// new commits [A′, C′] (B was dropped), a positional zip gives [(A,A′),(B,C′)]
+/// so C′ is incorrectly attributed using B's note instead of C's.
+///
+/// We fix this by matching each new commit to the first unused original commit
+/// that has the same subject line (first line of the commit message).  If no
+/// subject match is found we fall back to the next positionally-available original
+/// so that the pairing is never shorter than `new_commits`.
+fn pair_commits_for_rewrite(
+    repo: &Repository,
+    original_commits: &[String],
+    new_commits: &[String],
+) -> Vec<(String, String)> {
+    if original_commits.len() == new_commits.len() {
+        // Equal length: positional pairing is correct and avoids extra git calls.
+        return original_commits
+            .iter()
+            .zip(new_commits.iter())
+            .map(|(a, b)| (a.clone(), b.clone()))
+            .collect();
+    }
+
+    // Unequal length (dropped or squashed commits): match by commit subject.
+    let original_subjects: Vec<(String, String)> = original_commits
+        .iter()
+        .map(|sha| {
+            let subject = repo
+                .find_commit(sha.clone())
+                .and_then(|c| c.summary())
+                .unwrap_or_default();
+            (sha.clone(), subject)
+        })
+        .collect();
+
+    let mut used: HashSet<String> = HashSet::new();
+    let mut pairs: Vec<(String, String)> = Vec::with_capacity(new_commits.len());
+
+    for new_sha in new_commits {
+        let new_subject = repo
+            .find_commit(new_sha.clone())
+            .and_then(|c| c.summary())
+            .unwrap_or_default();
+
+        // Prefer an unused original with the same subject.
+        let matched = original_subjects.iter().find(|(orig_sha, orig_subject)| {
+            !used.contains(orig_sha) && *orig_subject == new_subject
+        });
+
+        let orig_sha = if let Some((orig_sha, _)) = matched {
+            orig_sha.clone()
+        } else {
+            // No subject match — fall back to the next positionally-available
+            // unused original so every new commit gets a pairing.
+            match original_subjects
+                .iter()
+                .find(|(orig_sha, _)| !used.contains(orig_sha))
+            {
+                Some((orig_sha, _)) => orig_sha.clone(),
+                None => {
+                    // All originals consumed (shouldn't happen in practice).
+                    continue;
+                }
+            }
+        };
+
+        used.insert(orig_sha.clone());
+        pairs.push((orig_sha, new_sha.clone()));
+    }
+
+    pairs
+}
+
 pub fn rewrite_authorship_after_rebase_v2(
     repo: &Repository,
     original_head: &str,
@@ -1017,13 +1095,12 @@ pub fn rewrite_authorship_after_rebase_v2(
     ));
     let commits_to_process_lookup: HashSet<&str> =
         commits_to_process.iter().map(String::as_str).collect();
-    let commit_pairs_to_process: Vec<(String, String)> = original_commits
-        .iter()
-        .zip(new_commits.iter())
+    let all_commit_pairs = pair_commits_for_rewrite(repo, original_commits, new_commits);
+    let commit_pairs_to_process: Vec<(String, String)> = all_commit_pairs
+        .into_iter()
         .filter(|(_original_commit, new_commit)| {
             commits_to_process_lookup.contains(new_commit.as_str())
         })
-        .map(|(original_commit, new_commit)| (original_commit.clone(), new_commit.clone()))
         .collect();
     let original_commits_for_processing: Vec<String> = commit_pairs_to_process
         .iter()
