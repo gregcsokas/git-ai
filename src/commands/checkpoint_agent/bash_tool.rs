@@ -490,11 +490,16 @@ pub fn snapshot(
     //   wm = Some(w) with real worktree wm → use it directly (warm start).
     //   wm = Some(w) with no worktree wm → daemon up but hasn't seen a full
     //                Human checkpoint yet; use .git/index mtime as proxy.
-    //   wm = None   → daemon not running; still use .git/index mtime as proxy
-    //                so we don't snapshot every file in the repo on cold start.
+    //   wm = None   → no filtering (caller opted out or direct snapshot() call
+    //                without daemon context).
+    //
+    // Note: the cold-start proxy (git_index_mtime_ns) is injected by
+    // handle_bash_tool when no daemon is running, not here, so direct
+    // snapshot() callers (e.g. tests, git_status_fallback) are unaffected.
     let effective_worktree_wm: Option<u128> = match wm {
         Some(w) if w.worktree.is_some() => w.worktree,
-        _ => git_index_mtime_ns(repo_root),
+        Some(_) => git_index_mtime_ns(repo_root),
+        None => None,
     };
 
     let per_file_wm: HashMap<String, u128> = wm.map(|w| w.per_file.clone()).unwrap_or_default();
