@@ -187,3 +187,56 @@ fn test_fetch_notes_human_output_with_notes() {
         output
     );
 }
+
+#[test]
+fn test_fetch_notes_remote_missing_value_fails() {
+    let repo = TestRepo::new();
+
+    let err = repo
+        .git_ai(&["fetch-notes", "--remote"])
+        .expect_err("--remote without value should fail");
+    assert!(
+        err.contains("--remote requires a value"),
+        "error should mention missing value, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_fetch_notes_duplicate_remote_fails() {
+    let repo = TestRepo::new();
+
+    let err = repo
+        .git_ai(&["fetch-notes", "origin", "--remote", "upstream"])
+        .expect_err("duplicate remote should fail");
+    assert!(
+        err.contains("remote specified more than once"),
+        "error should mention duplicate remote, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_fetch_notes_json_error_includes_remote() {
+    let (mirror, _upstream) = TestRepo::new_with_remote();
+
+    fs::write(mirror.path().join("hello.txt"), "hello\n").expect("should write file");
+    mirror
+        .stage_all_and_commit("initial commit")
+        .expect("commit should succeed");
+
+    // Remove the origin remote so the fetch fails
+    mirror
+        .git_og(&["remote", "remove", "origin"])
+        .expect("should remove origin");
+
+    let err = mirror
+        .git_ai(&["fetch-notes", "--json", "--remote", "nonexistent"])
+        .expect_err("fetch from nonexistent remote should fail");
+
+    // Error JSON should include the remote name we passed
+    let parsed = extract_json(&err);
+    assert_eq!(parsed["status"], "fetch_failed");
+    assert_eq!(parsed["remote"], "nonexistent");
+    assert!(parsed["error"].as_str().is_some());
+}

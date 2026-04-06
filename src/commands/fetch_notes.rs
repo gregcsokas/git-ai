@@ -26,6 +26,10 @@ pub fn handle_fetch_notes(args: &[String]) {
                     eprintln!("Error: --remote requires a value");
                     std::process::exit(1);
                 }
+                if remote.is_some() {
+                    eprintln!("Error: remote specified more than once");
+                    std::process::exit(1);
+                }
                 remote = Some(args[i].clone());
             }
             "--help" | "-h" => {
@@ -54,7 +58,7 @@ pub fn handle_fetch_notes(args: &[String]) {
         Ok(repo) => repo,
         Err(e) => {
             if json_output {
-                print_json_error("not_a_repository", &e.to_string());
+                print_json_error("not_a_repository", &e.to_string(), remote.as_deref());
             } else {
                 eprintln!("Error: not a git repository ({})", e);
             }
@@ -69,7 +73,7 @@ pub fn handle_fetch_notes(args: &[String]) {
             Ok(r) => r,
             Err(e) => {
                 if json_output {
-                    print_json_error("no_remote", &e.to_string());
+                    print_json_error("no_remote", &e.to_string(), None);
                 } else {
                     eprintln!("Error: {}", e);
                     eprintln!(
@@ -116,7 +120,7 @@ pub fn handle_fetch_notes(args: &[String]) {
         }
         Err(e) => {
             if json_output {
-                print_json_error("fetch_failed", &e.to_string());
+                print_json_error("fetch_failed", &e.to_string(), Some(&remote_name));
             } else {
                 eprintln!(" failed.");
                 eprintln!("Error: {}", e);
@@ -139,9 +143,9 @@ fn resolve_default_remote(repo: &crate::git::repository::Repository) -> Result<S
     ))
 }
 
-fn print_json_error(status: &str, message: &str) {
+fn print_json_error(status: &str, message: &str, remote: Option<&str>) {
     let output = FetchNotesJsonOutput {
-        remote: String::new(),
+        remote: remote.unwrap_or_default().to_string(),
         status: status.to_string(),
         error: Some(message.to_string()),
     };
