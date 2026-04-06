@@ -1488,22 +1488,47 @@ fn apply_checkout_switch_working_log_side_effect(
     if is_merge {
         let tracked_files = tracked_working_log_files(&repo, &old_head)?;
         if !tracked_files.is_empty() && carryover_snapshot.is_none() {
-            return Err(GitAiError::Generic(format!(
-                "{} --merge missing captured carryover snapshot",
+            // Carryover snapshot was not captured (e.g. the trace arrived before
+            // the worktree reflog was fully populated, or the wrapper already
+            // handled the migration).  Fall through to the rename path so the
+            // working log is migrated rather than lost.  Attribution may be
+            // slightly misaligned but is preserved.
+            debug_log(&format!(
+                "{} --merge missing carryover snapshot, falling back to rename",
                 cmd.primary_command.as_deref().unwrap_or("checkout")
-            )));
+            ));
+        } else {
+            if let Some(snapshot) = carryover_snapshot {
+                // Fix #957: When --merge produced conflict markers (exit_code != 0),
+                // the snapshot files contain conflict markers.  Strip them before
+                // restoring working-log carryover so byte-level attributions align
+                // with the clean content that restore_stashed_va would see.
+                let clean_snapshot: HashMap<String, String> = if cmd.exit_code != 0 {
+                    snapshot
+                        .iter()
+                        .map(|(k, v)| {
+                            let clean = if crate::authorship::virtual_attribution::content_has_conflict_markers(v) {
+                                crate::authorship::virtual_attribution::strip_conflict_markers_keep_ours(v)
+                            } else {
+                                v.clone()
+                            };
+                            (k.clone(), clean)
+                        })
+                        .collect()
+                } else {
+                    snapshot.clone()
+                };
+                restore_working_log_carryover(
+                    &repo,
+                    &old_head,
+                    &new_head,
+                    clean_snapshot,
+                    Some(repo.git_author_identity().name_or_unknown()),
+                )?;
+            }
+            repo.storage.delete_working_log_for_base_commit(&old_head)?;
+            return Ok(());
         }
-        if let Some(snapshot) = carryover_snapshot {
-            restore_working_log_carryover(
-                &repo,
-                &old_head,
-                &new_head,
-                snapshot.clone(),
-                Some(repo.git_author_identity().name_or_unknown()),
-            )?;
-        }
-        repo.storage.delete_working_log_for_base_commit(&old_head)?;
-        return Ok(());
     }
 
     repo.storage.rename_working_log(&old_head, &new_head)?;
@@ -1552,10 +1577,31 @@ fn recent_checkout_switch_prerequisite_from_command(
     let is_merge = parsed.has_command_flag("--merge") || parsed.has_command_flag("-m");
     if is_merge {
         return carryover_snapshot.and_then(|snapshot| {
-            (!snapshot.is_empty()).then(|| RecentReplayPrerequisite::CheckoutSwitchMerge {
-                target_head: new_head,
-                old_head,
-                final_state: snapshot.clone(),
+            (!snapshot.is_empty()).then(|| {
+                // Strip conflict markers before storing so the replay path receives
+                // clean content.  Mirrors the stripping done in the direct side-effect
+                // path (apply_checkout_switch_working_log_side_effect) for the same
+                // reason: --merge with exit_code != 0 leaves conflict markers on disk.
+                let clean_state: HashMap<String, String> = if cmd.exit_code != 0 {
+                    snapshot
+                        .iter()
+                        .map(|(k, v)| {
+                            let clean = if crate::authorship::virtual_attribution::content_has_conflict_markers(v) {
+                                crate::authorship::virtual_attribution::strip_conflict_markers_keep_ours(v)
+                            } else {
+                                v.clone()
+                            };
+                            (k.clone(), clean)
+                        })
+                        .collect()
+                } else {
+                    snapshot.clone()
+                };
+                RecentReplayPrerequisite::CheckoutSwitchMerge {
+                    target_head: new_head,
+                    old_head,
+                    final_state: clean_state,
+                }
             })
         });
     }
@@ -2717,22 +2763,105 @@ fn strict_cherry_pick_mappings_from_command(
             context
         )));
     }
-    let (original_head, new_commits) = resolve_linear_head_commit_chain_for_worktree(
-        worktree,
+    // Try to reconstruct the cherry-pick chain.  When `--skip` is used, one or
+    // more source commits produce no new commit (they were empty / already applied),
+    // so the actual number of new commits may be less than source_commits.len().
+    // We iterate from the largest plausible count downward, taking the first
+    // (largest) match.  When count < source_commits.len(), we use commit-message
+    // matching to identify which source commits correspond to which new commits,
+    // since skipped commits can appear anywhere in the sequence (not only at the front).
+    let has_skip = cmd.invoked_args.iter().any(|arg| arg == "--skip");
+    let min_count = if has_skip { 1 } else { source_commits.len() };
+    let mut last_err = String::new();
+    for count in (min_count..=source_commits.len()).rev() {
+        match resolve_linear_head_commit_chain_for_worktree(
+            worktree,
+            new_head,
+            count,
+            Some("cherry-pick"),
+        ) {
+            Ok((original_head, new_commits)) => {
+                let matched_source = if count < source_commits.len() {
+                    // Some commits were skipped: use commit-message matching to find
+                    // which source commits were actually applied, since skips can occur
+                    // anywhere in the sequence (not just at the front).
+                    match_source_to_new_commits_by_message(worktree, &source_commits, &new_commits)
+                        .unwrap_or_else(|| source_commits[source_commits.len() - count..].to_vec())
+                } else {
+                    source_commits
+                };
+                return Ok((original_head, matched_source, new_commits));
+            }
+            Err(err) => last_err = err.to_string(),
+        }
+    }
+    Err(GitAiError::Generic(format!(
+        "{} failed to reconstruct cherry-pick commits new={} expected_count={}: {}",
+        context,
         new_head,
         source_commits.len(),
-        Some("cherry-pick"),
-    )
-    .map_err(|err| {
-        GitAiError::Generic(format!(
-            "{} failed to reconstruct cherry-pick commits new={} expected_count={}: {}",
-            context,
-            new_head,
-            source_commits.len(),
-            err
-        ))
-    })?;
-    Ok((original_head, source_commits, new_commits))
+        last_err
+    )))
+}
+
+/// Match source commits to new commits by commit subject (first line of message).
+///
+/// Cherry-pick preserves commit messages, so we can align source commits with new commits
+/// by matching their subjects in order.  This correctly handles `--skip` when the skipped
+/// commit is not the first in the sequence.  Returns `None` if matching is ambiguous or
+/// fails so the caller can fall back to the simpler front-trim heuristic.
+fn match_source_to_new_commits_by_message(
+    worktree: &Path,
+    source_commits: &[String],
+    new_commits: &[String],
+) -> Option<Vec<String>> {
+    if new_commits.is_empty() || source_commits.len() <= new_commits.len() {
+        return None;
+    }
+
+    let get_subject = |sha: &str| -> Option<String> {
+        let args = vec![
+            "-C".to_string(),
+            worktree.to_string_lossy().to_string(),
+            "log".to_string(),
+            "--format=%s".to_string(),
+            "-1".to_string(),
+            sha.to_string(),
+        ];
+        exec_git(&args)
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    let new_subjects: Vec<String> = new_commits.iter().filter_map(|s| get_subject(s)).collect();
+    if new_subjects.len() != new_commits.len() {
+        return None; // Could not get all subjects
+    }
+
+    // For each new_subject, find the first source commit (after the last match) with the same subject.
+    let mut matched = Vec::with_capacity(new_commits.len());
+    let mut search_from = 0usize;
+    for new_subj in &new_subjects {
+        let found = source_commits[search_from..]
+            .iter()
+            .enumerate()
+            .find(|(_, src)| get_subject(src).as_deref() == Some(new_subj.as_str()));
+        match found {
+            Some((rel_idx, src)) => {
+                matched.push(src.clone());
+                search_from += rel_idx + 1;
+            }
+            None => return None, // Could not match — fall back
+        }
+    }
+
+    if matched.len() == new_commits.len() {
+        Some(matched)
+    } else {
+        None
+    }
 }
 
 /// Collect positional arguments from a cherry-pick command as potential commit
@@ -4176,15 +4305,22 @@ impl ActorDaemonCoordinator {
         &self,
         input: CarryoverCaptureInput<'_>,
     ) -> Result<Option<String>, GitAiError> {
-        if input.exit_code != 0 {
-            return Ok(None);
-        }
-
         let parsed = parse_git_cli_args(trace_invocation_args(input.argv));
         let command = parsed.command.as_deref().or(input.primary_command);
         let Some(command) = command else {
             return Ok(None);
         };
+
+        // `checkout/switch --merge` exits with code 1 when it produces conflict
+        // markers, but HEAD still moves to the new branch.  The daemon requires a
+        // carryover snapshot for such commands, so we must not bail out early on
+        // non-zero exit here.  All other commands with non-zero exit produce no
+        // meaningful state transition and need no snapshot.
+        let is_merge_checkout = (command == "checkout" || command == "switch")
+            && (parsed.has_command_flag("--merge") || parsed.has_command_flag("-m"));
+        if input.exit_code != 0 && !is_merge_checkout {
+            return Ok(None);
+        }
 
         // Repo-creating commands (clone, init) have no meaningful carryover
         // state — the target repo doesn't exist before the command runs, and the
@@ -6359,6 +6495,15 @@ impl ActorDaemonCoordinator {
                     self.set_pending_cherry_pick_sources_for_worktree(worktree, source_refs)?;
                 }
             }
+            // Fix #957: `checkout/switch --merge` exits with code 1 when it produces
+            // conflict markers but HEAD still moves to the target branch.  We must not
+            // return early here — fall through so apply_checkout_switch_working_log_side_effect
+            // and recent_checkout_switch_prerequisite_from_command can migrate the working log.
+            let is_merge_checkout =
+                matches!(cmd.primary_command.as_deref(), Some("checkout" | "switch")) && {
+                    let p = parsed_invocation_for_normalized_command(cmd);
+                    p.has_command_flag("--merge") || p.has_command_flag("-m")
+                };
             // For stash pop/apply/branch with non-zero exit (typically conflict), don't
             // skip processing. The stash may have been partially applied and attribution
             // should still be restored. We cannot rely on `has_stash_conflict_for_repo`
@@ -6378,13 +6523,15 @@ impl ActorDaemonCoordinator {
                         }
                     )
                 });
-            if !is_stash_restore {
+            if !is_merge_checkout && !is_stash_restore {
                 return Ok(());
             }
-            debug_log(&format!(
-                "Stash restore with non-zero exit for sid={}, continuing to restore attribution",
-                cmd.root_sid
-            ));
+            if is_stash_restore {
+                debug_log(&format!(
+                    "Stash restore with non-zero exit for sid={}, continuing to restore attribution",
+                    cmd.root_sid
+                ));
+            }
         }
 
         if let Some(worktree) = cmd.worktree.as_ref() {
