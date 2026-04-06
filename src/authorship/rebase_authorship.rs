@@ -1279,18 +1279,16 @@ pub fn rewrite_authorship_after_rebase_v2(
     let prompt_line_metrics = build_prompt_line_metrics_from_attributions(&current_attributions);
     apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
 
-    // Track which files actually exist in each rebased commit.
-    let mut existing_files: HashSet<String> = current_file_contents
-        .iter()
-        .filter_map(|(file, content)| {
-            if content.is_empty() {
-                None
-            } else {
-                Some(file.clone())
-            }
-        })
-        .collect();
+    // Bug fix: start existing_files EMPTY and build it up per-commit as files are
+    // introduced by new commits.  Previously this was pre-seeded from the final
+    // pre-rebase HEAD state, which caused every intermediate commit's note to include
+    // files from future commits (future-file leak).
+    let mut existing_files: HashSet<String> = HashSet::new();
 
+    // Build current_authorship_log solely for its metadata (used for the initial
+    // metadata_json_template_parts below).  Attestations will be empty because
+    // existing_files is empty, but that's fine — cached_file_attestation_text is also
+    // empty and gets rebuilt per-commit.
     let current_authorship_log = build_authorship_log_from_state(
         original_head,
         &current_prompts,
@@ -1302,13 +1300,11 @@ pub fn rewrite_authorship_after_rebase_v2(
     // Instead of calling serialize_to_string() per commit (which rebuilds the entire JSON),
     // we cache each file's attestation text and only update changed files. Assembly is
     // pure string concatenation.
+    //
+    // Bug fix: start EMPTY rather than pre-seeding from current_authorship_log.attestations.
+    // The per-commit loop populates this map as each file is first processed via content-diff.
     let mut cached_file_attestation_text: HashMap<String, String> = HashMap::new();
-    for file_attestation in &current_authorship_log.attestations {
-        cached_file_attestation_text.insert(
-            file_attestation.file_path.clone(),
-            serialize_file_attestation(file_attestation),
-        );
-    }
+
     // Pre-split metadata JSON template at a placeholder so we only swap the commit SHA per commit.
     // This is rebuilt per-commit when metrics change (attributions updated by hunk/diff transfer).
     let mut metadata_json_template_parts: Option<(String, String)> =
@@ -1406,7 +1402,31 @@ pub fn rewrite_authorship_after_rebase_v2(
                         .get(file_path)
                         .map(|(_, la)| la.as_slice())
                         .unwrap_or(&[]);
-                    let result = apply_hunks_to_line_attributions(old_attrs, hunks);
+                    let mut result = apply_hunks_to_line_attributions(old_attrs, hunks);
+                    // Bug fix: stamp AI attribution for inserted/replaced lines by
+                    // content-matching against the original-HEAD line→author map.
+                    // apply_hunks_to_line_attributions only shifts existing attributions;
+                    // lines in Replace or Insert hunk regions get no attribution from it.
+                    // We recover those by looking up each added line's content.
+                    if let Some(file_author_map) = original_head_line_to_author.get(file_path) {
+                        for hunk in hunks.iter() {
+                            if hunk.new_count > 0 {
+                                for (i, added_line) in hunk.added_lines.iter().enumerate() {
+                                    if let Some(author_id) =
+                                        file_author_map.get(added_line.as_str())
+                                    {
+                                        let line_num = hunk.new_start + i as u32;
+                                        overlay_attribution(
+                                            &mut result,
+                                            line_num,
+                                            line_num,
+                                            author_id.clone(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     total_files_hunk_transferred += 1;
                     loop_hunk_ms += thunk.elapsed().as_micros();
                     result
@@ -2109,9 +2129,12 @@ impl DiffTreeResult {
 struct DiffHunk {
     old_start: u32,
     old_count: u32,
-    #[allow(dead_code)]
     new_start: u32,
     new_count: u32,
+    /// Content of `+` lines from the unified diff output for this hunk.
+    /// Used by the hunk-based attribution path to stamp AI attribution on
+    /// newly-inserted/replaced lines via content-matching.
+    added_lines: Vec<String>,
 }
 
 /// Per-commit, per-file hunk information extracted from `git diff-tree -p -U0`.
@@ -2138,6 +2161,7 @@ fn parse_hunk_header(line: &str) -> Option<DiffHunk> {
         old_count,
         new_start,
         new_count,
+        added_lines: Vec::new(),
     })
 }
 
@@ -2370,7 +2394,24 @@ fn run_diff_tree_with_hunks(
             continue;
         }
 
-        // Skip other lines (index, ---, +++, content lines)
+        // Capture `+` lines (added content) into the most-recent hunk for this file.
+        // The `+++` file-header line is excluded. With -U0 there are no context lines,
+        // so every `+` line is a genuine addition — exactly what we need for the
+        // content-match attribution pass in the hunk-based transfer path.
+        if line.starts_with('+') && !line.starts_with("+++") {
+            if let (Some(commit), Some(file)) = (&current_commit, &current_diff_file) {
+                if let Some(file_hunks) = hunks_by_commit.get_mut(commit) {
+                    if let Some(hunks) = file_hunks.get_mut(file.as_str()) {
+                        if let Some(last_hunk) = hunks.last_mut() {
+                            last_hunk.added_lines.push(line[1..].to_string());
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Skip other lines (index, ---, context lines)
     }
 
     // Save last commit's delta

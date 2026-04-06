@@ -70,6 +70,7 @@ mod push_upstream_authorship;
 mod realistic_complex_edits;
 mod rebase;
 mod rebase_benchmark;
+mod rebase_note_integrity;
 mod reset;
 mod search;
 mod secrets_benchmark;
