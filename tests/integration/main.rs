@@ -16,6 +16,7 @@ mod attribution_tracker_comprehensive;
 mod bash_tool_benchmark;
 mod bash_tool_conformance;
 mod bash_tool_provenance;
+mod bash_tool_timeouts;
 mod blame_comprehensive;
 mod blame_flags;
 mod blame_subdirectory;

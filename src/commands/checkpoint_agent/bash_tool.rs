@@ -33,17 +33,80 @@ use std::time::{Duration, Instant, SystemTime};
 /// Grace window for low-resolution filesystem detection (seconds).
 const MTIME_GRACE_WINDOW_SECS: u64 = 2;
 
-/// Maximum time for stat-diff walk before fallback (ms).
-const STAT_DIFF_TIMEOUT_MS: u64 = 5000;
+/// Hard limit for the filesystem stat-diff walk.  If the walk exceeds this,
+/// the snapshot is abandoned (returning Err) and the hook falls back gracefully.
+const WALK_TIMEOUT_MS: u64 = 1500;
+
+/// Hard limit for the entire handle_bash_tool execution.  If this is exceeded
+/// at any checkpoint, the hook returns Fallback immediately.
+const HOOK_TIMEOUT_MS: u64 = 4000;
 
 /// Pre-snapshots older than this are garbage-collected (seconds).
 const SNAPSHOT_STALE_SECS: u64 = 300;
+
+// ---------------------------------------------------------------------------
+// Test-only timeout overrides (thread-local so parallel tests don't interfere)
+// ---------------------------------------------------------------------------
+
+// Thread-local overrides for WALK_TIMEOUT_MS and HOOK_TIMEOUT_MS, injected
+// by tests via `set_walk_timeout_ms_for_test` / `set_hook_timeout_ms_for_test`.
+// Setting either to 0 causes the corresponding timeout to fire immediately.
+// Thread-local (not global) so parallel tests in other modules are unaffected.
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static TEST_WALK_TIMEOUT_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static TEST_HOOK_TIMEOUT_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Return the walk timeout, honouring any test-time thread-local override.
+fn effective_walk_timeout_ms() -> u64 {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(v) = TEST_WALK_TIMEOUT_MS.with(|c| c.get()) {
+        return v;
+    }
+    WALK_TIMEOUT_MS
+}
+
+/// Return the hook timeout, honouring any test-time thread-local override.
+fn effective_hook_timeout_ms() -> u64 {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(v) = TEST_HOOK_TIMEOUT_MS.with(|c| c.get()) {
+        return v;
+    }
+    HOOK_TIMEOUT_MS
+}
+
+/// Override the walk timeout for the current thread.  Call
+/// `reset_timeout_overrides_for_test()` at the end of the test.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_walk_timeout_ms_for_test(ms: u64) {
+    TEST_WALK_TIMEOUT_MS.with(|c| c.set(Some(ms)));
+}
+
+/// Override the hook timeout for the current thread.  Call
+/// `reset_timeout_overrides_for_test()` at the end of the test.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_hook_timeout_ms_for_test(ms: u64) {
+    TEST_HOOK_TIMEOUT_MS.with(|c| c.set(Some(ms)));
+}
+
+/// Clear all test-time timeout overrides for the current thread.
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_timeout_overrides_for_test() {
+    TEST_WALK_TIMEOUT_MS.with(|c| c.set(None));
+    TEST_HOOK_TIMEOUT_MS.with(|c| c.set(None));
+}
 
 /// Grace window in nanoseconds for low-resolution filesystem mtime comparison.
 const MTIME_GRACE_WINDOW_NS: u128 = (MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
 
 /// Maximum number of stale files before skipping content capture.
 const MAX_STALE_FILES_FOR_CAPTURE: usize = 1000;
+
+/// Maximum number of files to track in a snapshot.  Repos larger than this
+/// skip the stat-diff system entirely (returning Fallback) to avoid adding
+/// seconds of latency to every Bash tool call.
+const MAX_TRACKED_FILES: usize = 50_000;
 
 /// Maximum file size for content capture (10 MB).
 const MAX_CAPTURE_FILE_SIZE: u64 = 10 * 1024 * 1024; // used by capture_file_contents
@@ -424,16 +487,14 @@ pub fn snapshot(
     let invocation_key = format!("{}:{}", session_id, tool_use_id);
 
     // Compute the effective worktree-level watermark:
-    //   wm = None  → caller opted out (daemon not running, or explicitly no
-    //                filtering); fall back to full snapshot.
     //   wm = Some(w) with real worktree wm → use it directly (warm start).
-    //   wm = Some(w) with no worktree wm → daemon is up but hasn't seen a full
-    //                Human checkpoint yet (cold start); use .git/index mtime as
-    //                a proxy so we don't snapshot every file in the repo.
+    //   wm = Some(w) with no worktree wm → daemon up but hasn't seen a full
+    //                Human checkpoint yet; use .git/index mtime as proxy.
+    //   wm = None   → daemon not running; still use .git/index mtime as proxy
+    //                so we don't snapshot every file in the repo on cold start.
     let effective_worktree_wm: Option<u128> = match wm {
         Some(w) if w.worktree.is_some() => w.worktree,
-        Some(_) => git_index_mtime_ns(repo_root),
-        None => None,
+        _ => git_index_mtime_ns(repo_root),
     };
 
     let per_file_wm: HashMap<String, u128> = wm.map(|w| w.per_file.clone()).unwrap_or_default();
@@ -474,10 +535,27 @@ pub fn snapshot(
         })
         .build();
 
+    let walk_timeout = Duration::from_millis(effective_walk_timeout_ms());
     for result in walker {
-        if start.elapsed().as_millis() > STAT_DIFF_TIMEOUT_MS as u128 {
-            debug_log("Stat-diff timeout exceeded; returning partial snapshot");
-            break;
+        let elapsed = start.elapsed();
+        if elapsed >= walk_timeout {
+            let elapsed_ms = elapsed.as_millis();
+            let timeout_ms = walk_timeout.as_millis();
+            let msg = format!(
+                "bash_tool: snapshot walk exceeded {}ms limit ({}ms elapsed, {} entries so far); abandoning stat-diff",
+                timeout_ms, elapsed_ms, entries.len()
+            );
+            debug_log(&msg);
+            crate::observability::log_message(
+                &msg,
+                "warning",
+                Some(serde_json::json!({
+                    "elapsed_ms": elapsed_ms,
+                    "entries_so_far": entries.len(),
+                    "walk_timeout_ms": timeout_ms,
+                })),
+            );
+            return Err(GitAiError::Generic(msg));
         }
 
         let entry = match result {
@@ -517,6 +595,16 @@ pub fn snapshot(
                 let posix_key = crate::utils::normalize_to_posix(&normalized.to_string_lossy());
                 if !is_wm_covered(mtime_ns, effective_worktree_wm, &per_file_wm, &posix_key) {
                     entries.insert(normalized, stat);
+                    if entries.len() > MAX_TRACKED_FILES {
+                        debug_log(&format!(
+                            "Snapshot: exceeded MAX_TRACKED_FILES ({}), skipping stat-diff",
+                            MAX_TRACKED_FILES
+                        ));
+                        return Err(GitAiError::Generic(format!(
+                            "repo has more than {} recently-modified files; skipping stat-diff",
+                            MAX_TRACKED_FILES
+                        )));
+                    }
                 }
             }
             Err(e) => {
@@ -807,6 +895,11 @@ pub struct DaemonWatermarks {
 
 fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
     let config = DaemonConfig::from_env_or_default_paths().ok()?;
+    // Fast-exit when the socket file does not exist — avoids the connect
+    // timeout on every hook call when no daemon is running.
+    if !config.control_socket_path.exists() {
+        return None;
+    }
     let request = ControlRequest::SnapshotWatermarks {
         repo_working_dir: repo_working_dir.to_string(),
     };
@@ -1232,11 +1325,39 @@ pub fn handle_bash_tool(
     session_id: &str,
     tool_use_id: &str,
 ) -> Result<BashToolResult, GitAiError> {
+    let hook_start = Instant::now();
+    let hook_timeout = Duration::from_millis(effective_hook_timeout_ms());
+
     // Resolve the effective tool_use_id — generates/reads a sidecar UUID when
     // the caller passes the generic "bash" fallback (no per-call ID from agent).
     let tool_use_id = resolve_bash_tool_use_id(hook_event, repo_root, session_id, tool_use_id);
     let tool_use_id = tool_use_id.as_str();
     let invocation_key = format!("{}:{}", session_id, tool_use_id);
+
+    /// Log a hook timeout event to both stderr and telemetry, then return Fallback.
+    macro_rules! hook_timeout_fallback {
+        ($label:expr) => {{
+            let elapsed_ms = hook_start.elapsed().as_millis();
+            let msg = format!(
+                "bash_tool: {} exceeded {}ms hook limit ({}ms elapsed); abandoning",
+                $label, hook_timeout.as_millis(), elapsed_ms
+            );
+            debug_log(&msg);
+            crate::observability::log_message(
+                &msg,
+                "warning",
+                Some(serde_json::json!({
+                    "label": $label,
+                    "elapsed_ms": elapsed_ms,
+                    "hook_timeout_ms": hook_timeout.as_millis(),
+                })),
+            );
+            return Ok(BashToolResult {
+                action: BashCheckpointAction::Fallback,
+                captured_checkpoint: None,
+            });
+        }};
+    }
 
     match hook_event {
         HookEvent::PreToolUse => {
@@ -1248,6 +1369,10 @@ pub fn handle_bash_tool(
             let repo_working_dir = repo_root.to_string_lossy().to_string();
             let wm = query_daemon_watermarks(&repo_working_dir);
 
+            if hook_start.elapsed() >= hook_timeout {
+                hook_timeout_fallback!("pre-hook after daemon query");
+            }
+
             // Take and store pre-snapshot (filtered by watermarks)
             match snapshot(repo_root, session_id, tool_use_id, wm.as_ref()) {
                 Ok(snap) => {
@@ -1258,6 +1383,10 @@ pub fn handle_bash_tool(
                         snap.entries.len(),
                         snap.effective_worktree_wm,
                     ));
+
+                    if hook_start.elapsed() >= hook_timeout {
+                        hook_timeout_fallback!("pre-hook after snapshot");
+                    }
 
                     // Attempt watermark-based pre-hook content capture using
                     // the embedded watermarks (no second daemon query needed).
@@ -1287,6 +1416,10 @@ pub fn handle_bash_tool(
 
             match pre_snapshot {
                 Some(pre) => {
+                    if hook_start.elapsed() >= hook_timeout {
+                        hook_timeout_fallback!("post-hook before snapshot");
+                    }
+
                     // Take post-snapshot using the same effective watermark as
                     // the pre-snapshot so the coverage filter is consistent.
                     // Files that bash modified will have crossed the threshold
@@ -1329,6 +1462,10 @@ pub fn handle_bash_tool(
                                     diff_result.created.len(),
                                     diff_result.modified.len(),
                                 ));
+
+                                if hook_start.elapsed() >= hook_timeout {
+                                    hook_timeout_fallback!("post-hook after snapshot");
+                                }
 
                                 // Attempt post-hook content capture for async checkpoint.
                                 let captured_checkpoint =
