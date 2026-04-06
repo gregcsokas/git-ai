@@ -2055,7 +2055,7 @@ pub fn restore_stashed_va(
 /// Requires both an opening `<<<<<<<` and a closing `>>>>>>>` marker to avoid
 /// false positives on files that happen to contain `=======` (e.g. Markdown
 /// setext headings).
-fn content_has_conflict_markers(content: &str) -> bool {
+pub fn content_has_conflict_markers(content: &str) -> bool {
     let mut has_open = false;
     let mut has_close = false;
     for line in content.lines() {
@@ -2103,7 +2103,7 @@ fn content_has_conflict_markers(content: &str) -> bool {
 ///
 /// Also preserves the trailing newline of the original content so byte-level
 /// attribution diffing sees the same length as the actual on-disk file.
-fn strip_conflict_markers_keep_ours(content: &str) -> String {
+pub fn strip_conflict_markers_keep_ours(content: &str) -> String {
     let mut result = Vec::new();
     let mut in_conflict = false;
     let mut in_ours = false; // true only while inside the ======= … >>>>>>> section

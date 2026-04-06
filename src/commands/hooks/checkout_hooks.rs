@@ -122,13 +122,11 @@ pub fn post_checkout_hook(
         return;
     }
 
-    // Case 2: HEAD unchanged (e.g., checkout current branch).
-    // For --merge checkouts that produced conflict markers (exit 1, HEAD stays), we still
-    // want to restore stashed VA.  However, a completely failed --merge (e.g. bad branch
-    // name) also leaves HEAD unchanged and must not corrupt the working log.  The two
-    // cases are distinguished by exit status: if exit failed *and* HEAD didn't change,
-    // treat it as a no-op — the stashed VA (if any) is discarded harmlessly.
-    if old_head == new_head && (!is_merge || !exit_status.success()) {
+    // Case 2: HEAD unchanged — always a no-op.
+    // This covers: non-merge checkouts that did nothing, --merge checkouts that failed
+    // due to a bad branch name (HEAD stays, no VA to restore), and --merge checkouts
+    // that succeed but stay on the same branch (no branch switch occurred).
+    if old_head == new_head {
         debug_log("HEAD unchanged after checkout, no working log handling needed");
         return;
     }

@@ -1499,11 +1499,30 @@ fn apply_checkout_switch_working_log_side_effect(
             ));
         } else {
             if let Some(snapshot) = carryover_snapshot {
+                // Fix #957: When --merge produced conflict markers (exit_code != 0),
+                // the snapshot files contain conflict markers.  Strip them before
+                // restoring working-log carryover so byte-level attributions align
+                // with the clean content that restore_stashed_va would see.
+                let clean_snapshot: HashMap<String, String> = if cmd.exit_code != 0 {
+                    snapshot
+                        .iter()
+                        .map(|(k, v)| {
+                            let clean = if crate::authorship::virtual_attribution::content_has_conflict_markers(v) {
+                                crate::authorship::virtual_attribution::strip_conflict_markers_keep_ours(v)
+                            } else {
+                                v.clone()
+                            };
+                            (k.clone(), clean)
+                        })
+                        .collect()
+                } else {
+                    snapshot.clone()
+                };
                 restore_working_log_carryover(
                     &repo,
                     &old_head,
                     &new_head,
-                    snapshot.clone(),
+                    clean_snapshot,
                     Some(repo.git_author_identity().name_or_unknown()),
                 )?;
             }
@@ -2724,8 +2743,9 @@ fn strict_cherry_pick_mappings_from_command(
     // more source commits produce no new commit (they were empty / already applied),
     // so the actual number of new commits may be less than source_commits.len().
     // We iterate from the largest plausible count downward, taking the first
-    // (largest) match.  The skipped commits are always at the FRONT of the source
-    // queue, so we trim source_commits from the front to match the actual count.
+    // (largest) match.  When count < source_commits.len(), we use commit-message
+    // matching to identify which source commits correspond to which new commits,
+    // since skipped commits can appear anywhere in the sequence (not only at the front).
     let has_skip = cmd.invoked_args.iter().any(|arg| arg == "--skip");
     let min_count = if has_skip { 1 } else { source_commits.len() };
     let mut last_err = String::new();
@@ -2737,12 +2757,16 @@ fn strict_cherry_pick_mappings_from_command(
             Some("cherry-pick"),
         ) {
             Ok((original_head, new_commits)) => {
-                let trimmed_source = if count < source_commits.len() {
-                    source_commits[source_commits.len() - count..].to_vec()
+                let matched_source = if count < source_commits.len() {
+                    // Some commits were skipped: use commit-message matching to find
+                    // which source commits were actually applied, since skips can occur
+                    // anywhere in the sequence (not just at the front).
+                    match_source_to_new_commits_by_message(worktree, &source_commits, &new_commits)
+                        .unwrap_or_else(|| source_commits[source_commits.len() - count..].to_vec())
                 } else {
                     source_commits
                 };
-                return Ok((original_head, trimmed_source, new_commits));
+                return Ok((original_head, matched_source, new_commits));
             }
             Err(err) => last_err = err.to_string(),
         }
@@ -2754,6 +2778,66 @@ fn strict_cherry_pick_mappings_from_command(
         source_commits.len(),
         last_err
     )))
+}
+
+/// Match source commits to new commits by commit subject (first line of message).
+///
+/// Cherry-pick preserves commit messages, so we can align source commits with new commits
+/// by matching their subjects in order.  This correctly handles `--skip` when the skipped
+/// commit is not the first in the sequence.  Returns `None` if matching is ambiguous or
+/// fails so the caller can fall back to the simpler front-trim heuristic.
+fn match_source_to_new_commits_by_message(
+    worktree: &Path,
+    source_commits: &[String],
+    new_commits: &[String],
+) -> Option<Vec<String>> {
+    if new_commits.is_empty() || source_commits.len() <= new_commits.len() {
+        return None;
+    }
+
+    let get_subject = |sha: &str| -> Option<String> {
+        let args = vec![
+            "-C".to_string(),
+            worktree.to_string_lossy().to_string(),
+            "log".to_string(),
+            "--format=%s".to_string(),
+            "-1".to_string(),
+            sha.to_string(),
+        ];
+        exec_git(&args)
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    let new_subjects: Vec<String> = new_commits.iter().filter_map(|s| get_subject(s)).collect();
+    if new_subjects.len() != new_commits.len() {
+        return None; // Could not get all subjects
+    }
+
+    // For each new_subject, find the first source commit (after the last match) with the same subject.
+    let mut matched = Vec::with_capacity(new_commits.len());
+    let mut search_from = 0usize;
+    for new_subj in &new_subjects {
+        let found = source_commits[search_from..]
+            .iter()
+            .enumerate()
+            .find(|(_, src)| get_subject(src).as_deref() == Some(new_subj.as_str()));
+        match found {
+            Some((rel_idx, src)) => {
+                matched.push(src.clone());
+                search_from += rel_idx + 1;
+            }
+            None => return None, // Could not match — fall back
+        }
+    }
+
+    if matched.len() == new_commits.len() {
+        Some(matched)
+    } else {
+        None
+    }
 }
 
 /// Collect positional arguments from a cherry-pick command as potential commit
