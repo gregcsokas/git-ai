@@ -2912,11 +2912,16 @@ pub fn discover_repository_in_path_no_git_exec(path: &Path) -> Result<Repository
     )
 }
 
-/// Check if any directory between `workdir` and `file_path` contains a `.git/`
-/// directory, indicating a nested independent git repo.
+/// Check if any directory between `workdir` and `file_path` contains a `.git`
+/// entry that represents a **separate** git repository boundary.
 ///
-/// Only `.git` directories count -- `.git` files indicate submodules, which are
-/// transparent to the parent repo.
+/// `.git` directories (nested independent repos) and `.git` files that point
+/// to a *linked worktree* (i.e., `gitdir: .../worktrees/…`) are treated as
+/// boundaries — a file inside such a directory belongs to a different repo.
+///
+/// `.git` files that point to a *submodule* (i.e., `gitdir: .git/modules/…`)
+/// are intentionally transparent: the parent repo tracks the submodule's
+/// files, so they should still be considered part of the parent's workdir.
 fn has_intervening_git_dir(file_path: &Path, workdir: &Path) -> bool {
     let Ok(relative) = file_path.strip_prefix(workdir) else {
         return false;
@@ -2936,11 +2941,40 @@ fn has_intervening_git_dir(file_path: &Path, workdir: &Path) -> bool {
         }
         let potential_git = workdir.join(parent).join(".git");
         if potential_git.is_dir() {
+            // A .git directory always indicates a separate independent repo.
             return true;
+        }
+        if potential_git.is_file() {
+            // A .git file is either a submodule pointer or a linked-worktree
+            // pointer.  Only linked worktrees (gitdir points to …/worktrees/…)
+            // represent a separate working-tree boundary; submodule pointers
+            // (gitdir points to …/modules/…) are transparent to the parent.
+            if is_linked_worktree_git_file(&potential_git) {
+                return true;
+            }
         }
         current = parent;
     }
     false
+}
+
+/// Returns `true` if `git_file` is a `.git` file that points to a linked
+/// worktree (i.e., the `gitdir:` target path contains `/worktrees/`).
+fn is_linked_worktree_git_file(git_file: &Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(git_file) else {
+        return false;
+    };
+    // Format: "gitdir: <path>\n"
+    let Some(gitdir) = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("gitdir:").map(str::trim))
+    else {
+        return false;
+    };
+    // A linked worktree's gitdir resolves to something like
+    // `/repo/.git/worktrees/<name>`.  A submodule's gitdir looks like
+    // `../.git/modules/<name>`.
+    gitdir.contains("/.git/worktrees/")
 }
 
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
@@ -4031,6 +4065,114 @@ index 0000000..abc1234 100644
                 .starts_with(common_dir.join("ai").join("worktrees")),
             "discovered worktree storage should be isolated under common-dir/ai/worktrees: {}",
             discovered.storage.working_logs.display()
+        );
+    }
+
+    #[test]
+    fn path_is_in_workdir_returns_false_for_linked_worktree_file() {
+        // Sibling worktree: the worktree lives OUTSIDE the main repo's working tree.
+        // path_is_in_workdir returns false purely because the path doesn't
+        // start_with(workdir) — no .git file inspection is needed.  This test
+        // passes even without the is_linked_worktree_git_file fix.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let main_repo = temp.path().join("main");
+        let worktree = temp.path().join("linked");
+
+        fs::create_dir_all(&main_repo).expect("create main repo dir");
+        run_git(&main_repo, &["init"]);
+        run_git(&main_repo, &["config", "user.name", "Test User"]);
+        run_git(&main_repo, &["config", "user.email", "test@example.com"]);
+        // Write a file so the sanity-check path exists on disk — path_is_in_workdir
+        // calls path.canonicalize() which only resolves symlinks for existing paths
+        // (on macOS /var/... is a symlink to /private/var/...; on Windows temp paths
+        // may use short names that differ from the canonical workdir stored by git).
+        fs::write(main_repo.join("README.md"), "# main\n").expect("write README");
+        run_git(&main_repo, &["worktree", "add", worktree.to_str().unwrap()]);
+
+        let dot_git = worktree.join(".git");
+        assert!(
+            dot_git.is_file(),
+            ".git should be a file in a linked worktree"
+        );
+
+        let main = find_repository_in_path(main_repo.to_str().unwrap()).expect("find main repo");
+
+        let wt_file = worktree.join("somefile.rs");
+        assert!(
+            !main.path_is_in_workdir(&wt_file),
+            "sibling linked worktree file should not be in main repo workdir"
+        );
+
+        // Use an existing file so path.canonicalize() resolves symlinks correctly.
+        let main_file = main_repo.join("README.md");
+        assert!(
+            main.path_is_in_workdir(&main_file),
+            "main repo file should be in main repo workdir"
+        );
+    }
+
+    #[test]
+    fn path_is_in_workdir_returns_false_for_nested_linked_worktree_file() {
+        // Nested worktree: the worktree lives INSIDE the main repo's working tree
+        // (e.g. main_repo/.worktrees/feature).  This is the exact Bug-A / Bug-B
+        // scenario: path starts_with(workdir) so the starts_with check passes,
+        // and only is_linked_worktree_git_file makes path_is_in_workdir return
+        // false.  This test FAILS without the fix.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let main_repo = temp.path().join("main");
+        let worktree = main_repo.join(".worktrees").join("feature");
+
+        fs::create_dir_all(&main_repo).expect("create main repo dir");
+        run_git(&main_repo, &["init"]);
+        run_git(&main_repo, &["config", "user.name", "Test User"]);
+        run_git(&main_repo, &["config", "user.email", "test@example.com"]);
+        // git worktree add requires at least one commit
+        fs::write(main_repo.join("README.md"), "# test\n").expect("write README");
+        run_git(&main_repo, &["add", "."]);
+        run_git(&main_repo, &["commit", "-m", "initial"]);
+        run_git(
+            &main_repo,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        );
+
+        let dot_git = worktree.join(".git");
+        assert!(
+            dot_git.is_file(),
+            ".git should be a file in a nested worktree"
+        );
+        let gitfile_content = fs::read_to_string(&dot_git).expect("read .git file");
+        assert!(
+            gitfile_content.contains("/worktrees/"),
+            ".git file should reference /worktrees/: {}",
+            gitfile_content.trim()
+        );
+
+        let main = find_repository_in_path(main_repo.to_str().unwrap()).expect("find main repo");
+
+        // The nested worktree file is physically under main_repo/ but must NOT
+        // be reported as part of the main repo's working tree.
+        let wt_file = worktree.join("somefile.rs");
+        assert!(
+            !main.path_is_in_workdir(&wt_file),
+            "nested linked worktree file should not be in main repo workdir \
+             (path starts_with workdir, but .git file marks a repo boundary)"
+        );
+
+        // Sanity: file is in the worktree's own workdir.
+        let wt_repo =
+            find_repository_in_path(worktree.to_str().unwrap()).expect("find nested worktree");
+        assert!(
+            wt_repo.path_is_in_workdir(&wt_file),
+            "nested worktree file should be in the worktree's own workdir"
+        );
+
+        // Sanity: a normal file in the main repo is still in the main workdir.
+        // Use README.md which already exists so path.canonicalize() resolves
+        // symlinks correctly (macOS /var/... → /private/var/...; Windows short names).
+        let main_file = main_repo.join("README.md");
+        assert!(
+            main.path_is_in_workdir(&main_file),
+            "main repo file should be in main repo workdir"
         );
     }
 
