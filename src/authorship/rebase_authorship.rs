@@ -1549,26 +1549,48 @@ pub fn rewrite_authorship_after_rebase_v2(
             }
             loop_transform_ms += t0.elapsed().as_millis();
 
-            // Recompute prompt_line_metrics from current attributions and rebuild
-            // the metadata template so each commit's note reflects accurate line counts.
+            // Recompute prompt_line_metrics scoped to only the files changed by THIS commit.
+            // Per-commit-delta semantics: each note records only the attribution for the
+            // diff of that specific commit (like `git show <commit>`), not cumulative totals.
             let tmetrics = std::time::Instant::now();
             let prompt_line_metrics =
-                build_prompt_line_metrics_from_attributions(&current_attributions);
+                build_prompt_line_metrics_from_attributions_filtered(&current_attributions, &changed_files_in_commit);
             apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
+            // Only include prompts that contributed AI lines to this commit's changed files.
+            let active_prompts_for_commit: BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>> = current_prompts
+                .iter()
+                .filter(|(pid, _)| {
+                    prompt_line_metrics
+                        .get(pid.as_str())
+                        .map_or(false, |m| m.accepted_lines > 0)
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             metadata_json_template_parts =
-                build_metadata_template_parts(&current_authorship_log.metadata, &current_prompts);
+                build_metadata_template_parts(&current_authorship_log.metadata, &active_prompts_for_commit);
             loop_metrics_ms += tmetrics.elapsed().as_micros();
         }
 
         // Serialize note for this commit using fast cached assembly.
+        // Per-commit-delta: include only files changed by this specific commit.
         let t0 = std::time::Instant::now();
-        let has_attestations = cached_file_attestation_text.values().any(|v| !v.is_empty());
-        let authorship_json = if has_attestations || metadata_json_template_parts.is_some() {
-            // Fast path: assemble note from cached per-file text + templated metadata.
-            let mut output = String::with_capacity(4096);
-            for (file_path, text) in &cached_file_attestation_text {
-                if existing_files.contains(file_path) && !text.is_empty() {
-                    output.push_str(text);
+        let commit_has_attestations = !changed_files_in_commit.is_empty()
+            && changed_files_in_commit.iter().any(|f| {
+                cached_file_attestation_text
+                    .get(f.as_str())
+                    .map_or(false, |t| !t.is_empty())
+            });
+        // Only write a note if there are actual AI-attributed lines in this commit's
+        // changed files. A commit with no AI attribution (e.g. human conflict resolution)
+        // should produce no note — not a metadata-only empty note.
+        let authorship_json = if commit_has_attestations {
+            // Assemble note from cached per-file text for THIS commit's changed files only.
+            let mut output = String::with_capacity(512);
+            for file_path in &changed_files_in_commit {
+                if let Some(text) = cached_file_attestation_text.get(file_path.as_str()) {
+                    if !text.is_empty() {
+                        output.push_str(text);
+                    }
                 }
             }
             output.push_str("---\n");
@@ -1595,9 +1617,13 @@ pub fn rewrite_authorship_after_rebase_v2(
         };
         loop_serialize_us += t0.elapsed().as_micros();
         if let Some(authorship_json) = authorship_json {
-            let file_count = cached_file_attestation_text
-                .values()
-                .filter(|v| !v.is_empty())
+            let file_count = changed_files_in_commit
+                .iter()
+                .filter(|f| {
+                    cached_file_attestation_text
+                        .get(f.as_str())
+                        .map_or(false, |t| !t.is_empty())
+                })
                 .count();
             pending_note_entries.push((new_commit.clone(), authorship_json));
             pending_note_debug.push((new_commit.clone(), file_count));
@@ -3841,6 +3867,28 @@ fn build_prompt_line_metrics_from_attributions(
     let mut metrics = HashMap::new();
     for (_char_attrs, line_attrs) in attributions.values() {
         add_prompt_line_metrics_for_line_attributions(&mut metrics, line_attrs);
+    }
+    metrics
+}
+
+/// Like `build_prompt_line_metrics_from_attributions` but only counts files
+/// whose path is present in `filter`. Zero allocation beyond the output map —
+/// no clone or sub-HashMap is created.
+fn build_prompt_line_metrics_from_attributions_filtered(
+    attributions: &HashMap<
+        String,
+        (
+            Vec<crate::authorship::attribution_tracker::Attribution>,
+            Vec<crate::authorship::attribution_tracker::LineAttribution>,
+        ),
+    >,
+    filter: &HashSet<String>,
+) -> HashMap<String, PromptLineMetrics> {
+    let mut metrics = HashMap::new();
+    for (file_path, (_char_attrs, line_attrs)) in attributions.iter() {
+        if filter.contains(file_path.as_str()) {
+            add_prompt_line_metrics_for_line_attributions(&mut metrics, line_attrs);
+        }
     }
     metrics
 }
