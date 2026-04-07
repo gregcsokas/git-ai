@@ -42,7 +42,7 @@ fn load_rebase_note_cache(
     let all_note_oids = note_blob_oids_for_commits(repo, &all_commits)?;
 
     let mut original_note_blob_oids = HashMap::new();
-    let mut new_commits_with_notes = HashSet::new();
+    let mut new_commit_note_blob_oids: HashMap<String, String> = HashMap::new();
 
     for commit in original_commits {
         if let Some(oid) = all_note_oids.get(commit) {
@@ -50,20 +50,37 @@ fn load_rebase_note_cache(
         }
     }
     for commit in new_commits {
-        if all_note_oids.contains_key(commit) {
-            new_commits_with_notes.insert(commit.clone());
+        if let Some(oid) = all_note_oids.get(commit) {
+            new_commit_note_blob_oids.insert(commit.clone(), oid.clone());
         }
     }
 
-    // Step 2: Read all original note blob contents in one batch call.
+    // Step 2: Read all note blob contents (original + new) in one batch call.
     let mut unique_blob_oids: Vec<String> = original_note_blob_oids
         .values()
+        .chain(new_commit_note_blob_oids.values())
         .cloned()
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
     unique_blob_oids.sort();
     let blob_contents = batch_read_blob_contents(repo, &unique_blob_oids)?;
+
+    // A new commit's note only counts as "already processed" when it has actual
+    // attestations.  Empty notes (no attestations) arise when a post-commit hook
+    // fires during `rebase --continue` for a human-resolved conflict commit —
+    // in that case we must still run the slow-path rewrite to transfer attribution
+    // for any AI lines that survived the merge.
+    let mut new_commits_with_notes = HashSet::new();
+    for (commit, blob_oid) in &new_commit_note_blob_oids {
+        if let Some(content) = blob_contents.get(blob_oid) {
+            if let Ok(log) = AuthorshipLog::deserialize_from_string(content) {
+                if !log.attestations.is_empty() {
+                    new_commits_with_notes.insert(commit.clone());
+                }
+            }
+        }
+    }
 
     let mut original_note_contents = HashMap::new();
     let mut ai_touched_files = HashSet::new();
@@ -1580,9 +1597,11 @@ pub fn rewrite_authorship_after_rebase_v2(
                     .get(f.as_str())
                     .map_or(false, |t| !t.is_empty())
             });
-        // Only write a note if there are actual AI-attributed lines in this commit's
-        // changed files. A commit with no AI attribution (e.g. human conflict resolution)
-        // should produce no note — not a metadata-only empty note.
+        // If the slow-path computation produced AI attestations for this commit's changed
+        // files, assemble a fresh note from the per-file cache. Otherwise fall back to
+        // the original pre-rebase note (remapped to the new SHA) — this preserves fast-path
+        // semantics for commits whose content was unaffected by the rebase, and produces
+        // no note when the original commit had none (human-only commits).
         let authorship_json = if commit_has_attestations {
             // Assemble note from cached per-file text for THIS commit's changed files only.
             let mut output = String::with_capacity(512);

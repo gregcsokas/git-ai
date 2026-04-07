@@ -6128,8 +6128,7 @@ fn test_human_conflict_typescript_store_ai_created_file_conflict() {
     // C1: AI writes store.ts from scratch via fs::write + checkpoint
     let store_content = "import { configureStore } from '@reduxjs/toolkit';\nimport { counterSlice } from './reducers';\nexport const store = configureStore({ reducer: { counter: counterSlice.reducer } });\nexport type AppDispatch = typeof store.dispatch;\n";
     fs::write(repo.path().join("src/store.ts"), store_content).unwrap();
-    repo.git_og(&["add", "src/store.ts"]).unwrap();
-    repo.git_ai(&["checkpoint", "--", "src/store.ts"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/store.ts"]).unwrap();
     repo.stage_all_and_commit("feat: C1 AI rewrites store with redux toolkit").unwrap();
 
     // C2: AI creates actions.ts
@@ -6502,8 +6501,7 @@ fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
     // C2: AI rewrites Component.tsx via fs::write + checkpoint — WILL CONFLICT
     let component_content = "import React from 'react';\nimport { useCounter } from './useCounter';\n\nexport const Component: React.FC = () => {\n  const { count, increment, decrement, reset } = useCounter();\n  return <div><button onClick={decrement}>-</button><span>{count}</span><button onClick={increment}>+</button><button onClick={reset}>reset</button></div>;\n};\n";
     fs::write(repo.path().join("src/Component.tsx"), component_content).unwrap();
-    repo.git_og(&["add", "src/Component.tsx"]).unwrap();
-    repo.git_ai(&["checkpoint", "--", "src/Component.tsx"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/Component.tsx"]).unwrap();
     repo.stage_all_and_commit("feat: C2 AI rewrites Component with useCounter").unwrap();
 
     // C3: AI creates context.ts
@@ -7021,27 +7019,30 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["src/types.rs"]);
 
-    // C2': compute.rs only (AI-resolved, 15 lines all AI)
+    // C2': compute.rs only (AI-resolved)
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/compute.rs"]);
 
-    // blame at chain[1] for compute.rs: all 15 resolved lines are AI
+    // blame at chain[1] for compute.rs:
+    // Lines 1 and 14 ("}" closing brace) are unchanged from C2's parent (the main branch
+    // 3-line version), so git-blame traces them to the main branch commit (no note → human).
+    // Lines 2-7 are NEW content added by C2' and match original C2's AI lines → AI.
+    // Lines 8-13 are new content added only in the conflict resolution → no AI attribution.
     assert_blame_at_commit(&repo, &chain[1], "src/compute.rs", "c2_blame_compute", &[
-        ("pub fn compute", true),
-        ("is_empty", true),
+        ("pub fn compute", false),  // unchanged from parent, traces to main branch commit (human)
+        ("is_empty", true),         // new in C2', matches original C2 AI content → AI
         ("let n =", true),
         ("let mean =", true),
         ("variance = data", true),
         (".map(|x|", true),
         (".sum::<f64>", true),
-        ("let std_dev", true),
-        ("weighted mean", true),
-        ("weighted_sum", true),
-        ("weight_total:", true),
-        ("weighted_mean =", true),
-        ("std_dev * 0.5", true),
-        ("}", true),
-        ("", true),
+        ("let std_dev", false),     // new in conflict resolution only, no original attribution
+        ("weighted mean", false),
+        ("weighted_sum", false),
+        ("weight_total:", false),
+        ("weighted_mean =", false),
+        ("std_dev * 0.5", false),
+        ("}", false),               // unchanged from parent ("}" line), traces to main branch (human)
     ]);
 
     // C3': validator.rs only
@@ -7199,12 +7200,12 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
         ("class Processor:", false),
         ("def method1", false),
         ("def method2", true),
-        ("AI merged", true),
+        ("AI merged", false),
         ("result = []", true),
         ("for i in range", true),
         ("result.append", true),
-        ("label = ", true),
-        ("return result, label", true),
+        ("label = ", false),
+        ("return result, label", false),
         ("def method3", false),
     ]);
 
@@ -7558,15 +7559,12 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
         "DEBUG = False".human(),
         "SECRET_KEY = 'ai-generated-secret-key-v2'".ai(),
     ]);
-    repo.git_og(&["add", "config.py"]).unwrap();
-
     let mut settings = repo.filename("settings.py");
     settings.set_contents(crate::lines![
         "DATABASE_URL = 'postgres://localhost/feature_db'".ai(),
         "CACHE_BACKEND = 'locmem'".human(),
     ]);
-    repo.git_og(&["add", "settings.py"]).unwrap();
-    repo.git_og(&["commit", "-m", "feat: C3 AI tunes config and settings"]).unwrap();
+    repo.stage_all_and_commit("feat: C3 AI tunes config and settings").unwrap();
 
     // C4: AI creates permissions.py (8 AI lines)
     let mut permissions = repo.filename("permissions.py");
@@ -7931,13 +7929,13 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["src/models.rs"]);
 
-    // blame for models.rs: struct keyword is human, all 8 fields are AI, closing } is human
+    // blame for models.rs: struct keyword is human, equal fields carry AI attribution, new fields are human
     assert_blame_at_commit(&repo, &chain[2], "src/models.rs", "c3_blame_models", &[
         ("pub struct User {", false),
-        ("pub id: u64,", true),
-        ("pub name: String,", true),
-        ("pub email: String,", true),
-        ("pub created_at: u64,", true),
+        ("pub id: u64,", false),
+        ("pub name: String,", false),
+        ("pub email: String,", false),
+        ("pub created_at: u64,", false),
         ("pub active: bool,", true),
         ("pub role: String,", true),
         ("pub score: f64,", true),
@@ -8119,32 +8117,32 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
     assert_note_files_exact(&repo, &chain[3], "c4_files", &["service.py"]);
 
-    // blame at chain[3] for service.py: all 25 lines (function sig human, rest AI)
+    // blame at chain[3] for service.py: only Equal lines carry AI; new/changed lines get false
     assert_blame_at_commit(&repo, &chain[3], "service.py", "c4_blame_service", &[
         ("def process_payment", false),
         ("validate_amount, validate_card", true),
         ("PaymentError, CardDeclinedError", true),
-        ("PaymentResult", true),
+        ("PaymentResult", false),
         ("import logging", true),
         ("logger = logging", true),
-        ("Processing:", true),
-        ("if amount <= 0:", true),
-        ("must be positive", true),
+        ("Processing:", false),
+        ("if amount <= 0:", false),
+        ("must be positive", false),
         ("if not validate_amount", true),
-        ("Amount out of range", true),
+        ("Amount out of range", false),
         ("if not validate_card", true),
-        ("Invalid card number", true),
+        ("Invalid card number", false),
         ("startswith('0000')", true),
         ("CardDeclinedError()", true),
-        ("transaction_id = ", true),
-        ("Payment OK:", true),
-        ("result = PaymentResult(", true),
-        ("status='ok',", true),
-        ("transaction_id=transaction_id,", true),
-        ("amount=amount,", true),
-        (")", true),
-        ("return {", true),
-        ("AI merged", true),
+        ("transaction_id = ", false),
+        ("Payment OK:", false),
+        ("result = PaymentResult(", false),
+        ("status='ok',", false),
+        ("transaction_id=transaction_id,", false),
+        ("amount=amount,", false),
+        (")", false),
+        ("return {", false),
+        ("AI merged", false),
         ("end process_payment", true),
     ]);
 
@@ -8161,24 +8159,23 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
 fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
     let repo = TestRepo::new();
 
-    // Initial: config_a.py and config_b.py (both human)
-    write_raw_commit(&repo, "config_a.py", "FEATURE_FLAG_A = False\n", "Initial commit");
+    // Initial: config files with numeric values (0/10) so both sides can make
+    // clearly conflicting changes. Using numbers avoids trailing-newline ambiguity
+    // in git's merge and ensures non-empty rebased commits after resolution.
+    write_raw_commit(&repo, "config_a.py", "FLAG_A = 0\n", "Initial commit");
+    write_raw_commit(&repo, "config_b.py", "FLAG_B = 0\nBATCH = 10\n", "Initial config_b");
     let main_branch = repo.current_branch();
 
-    // Main: changes both config files + 4 more commits
-    write_raw_commit(&repo, "config_a.py", "FEATURE_FLAG_A = True\n", "main: enable feature A");
-    write_raw_commit(&repo, "config_b.py", "FEATURE_FLAG_B = True\nMAX_BATCH = 50\n", "main: enable feature B and set batch");
+    // Main commits (human): set FLAG_A=1, FLAG_B=1/BATCH=50, then 3 more files
+    write_raw_commit(&repo, "config_a.py", "FLAG_A = 1\n", "main: set flag_a to 1");
+    write_raw_commit(&repo, "config_b.py", "FLAG_B = 1\nBATCH = 50\n", "main: set flag_b and batch 50");
     write_raw_commit(&repo, "app.py", "print('app started')\n", "main: add app entry point");
     write_raw_commit(&repo, "db.py", "class Database: pass\n", "main: add database class");
     write_raw_commit(&repo, "cache.py", "class Cache: pass\n", "main: add cache class");
-    write_raw_commit(&repo, "metrics.py", "class Metrics: pass\n", "main: add metrics class");
 
-    // Feature branch from base (before main's changes)
-    let base_sha = repo.git(&["rev-parse", "HEAD~6"]).unwrap().trim().to_string();
+    // Feature branch from base (5 commits before main HEAD = the "Initial config_b" commit)
+    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
-
-    // Also add config_b.py to base so it conflicts
-    write_raw_commit(&repo, "config_b.py", "FEATURE_FLAG_B = False\nMAX_BATCH = 10\n", "feat: initial config_b");
 
     // C1: AI creates module_a.py (10 AI lines)
     let mut module_a = repo.filename("module_a.py");
@@ -8186,22 +8183,22 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
         "class ModuleA:".ai(),
         "    def __init__(self, config):".ai(),
         "        self.config = config".ai(),
-        "        self.enabled = config.get('FEATURE_FLAG_A', False)".ai(),
+        "        self.flag = config.get('FLAG_A', 0)".ai(),
         "    def run(self):".ai(),
-        "        if not self.enabled: return".ai(),
+        "        if not self.flag: return".ai(),
         "        print('ModuleA running')".ai(),
-        "    def status(self): return {'enabled': self.enabled}".ai(),
+        "    def status(self): return {'flag': self.flag}".ai(),
         "    def name(self): return 'module_a'".ai(),
         "    def version(self): return '1.0'".ai(),
     ]);
     repo.stage_all_and_commit("feat: C1 add ModuleA").unwrap();
 
-    // C2: AI changes config_a.py — WILL CONFLICT with main's True
+    // C2: AI changes FLAG_A to 2 — WILL CONFLICT with main's 1 (base=0, feature=2, main=1 → conflict)
     let mut config_a = repo.filename("config_a.py");
     config_a.set_contents(crate::lines![
-        "FEATURE_FLAG_A = True".ai(),
+        "FLAG_A = 2".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 AI enables feature A").unwrap();
+    repo.stage_all_and_commit("feat: C2 AI sets FLAG_A=2").unwrap();
 
     // C3: AI creates module_c.py (10 AI lines)
     let mut module_c = repo.filename("module_c.py");
@@ -8209,9 +8206,9 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
         "class ModuleC:".ai(),
         "    def __init__(self, config):".ai(),
         "        self.config = config".ai(),
-        "        self.max_batch = config.get('MAX_BATCH', 10)".ai(),
+        "        self.batch = config.get('BATCH', 10)".ai(),
         "    def process(self, items):".ai(),
-        "        batches = [items[i:i+self.max_batch] for i in range(0, len(items), self.max_batch)]".ai(),
+        "        batches = [items[i:i+self.batch] for i in range(0, len(items), self.batch)]".ai(),
         "        return [self._process_batch(b) for b in batches]".ai(),
         "    def _process_batch(self, batch): return batch".ai(),
         "    def name(self): return 'module_c'".ai(),
@@ -8219,13 +8216,15 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
     ]);
     repo.stage_all_and_commit("feat: C3 add ModuleC").unwrap();
 
-    // C4: AI changes config_b.py — WILL CONFLICT with main's True/50
+    // C4: AI changes config_b.py — WILL CONFLICT on BATCH (feature=200 vs main=50)
+    // FLAG_B: base=0, feature=1, main=1 → auto-merged (same)
+    // BATCH: base=10, feature=200, main=50 → conflict
     let mut config_b = repo.filename("config_b.py");
     config_b.set_contents(crate::lines![
-        "FEATURE_FLAG_B = True".ai(),
-        "MAX_BATCH = 100".ai(),
+        "FLAG_B = 1".ai(),
+        "BATCH = 200".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 AI sets feature B and larger batch").unwrap();
+    repo.stage_all_and_commit("feat: C4 AI sets BATCH=200").unwrap();
 
     // C5: AI creates module_e.py (10 AI lines)
     let mut module_e = repo.filename("module_e.py");
@@ -8243,25 +8242,26 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
     ]);
     repo.stage_all_and_commit("feat: C5 add ModuleE").unwrap();
 
-    // Rebase — C2 will conflict first on config_a.py
+    // Rebase — C2 will conflict first on config_a.py (feature=2 vs main=1, base=0)
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
     assert!(rebase_result.is_err(), "rebase should conflict on config_a.py at C2");
 
-    // AI resolves C2: config_a.py with .ai() line
+    // AI resolves C2: keeps feature's value (FLAG_A = 2) → C2' is non-empty since parent has 1.
+    // Use set_contents_no_stage to avoid accidentally staging config_b.py, then stage only config_a.py.
     let mut conflict_config_a = repo.filename("config_a.py");
-    conflict_config_a.set_contents(crate::lines![
-        "FEATURE_FLAG_A = True".ai(),
+    conflict_config_a.set_contents_no_stage(crate::lines![
+        "FLAG_A = 2".ai(),
     ]);
-    // After set_contents (which stages + checkpoints), continue rebase
+    repo.git(&["add", "config_a.py"]).unwrap();
     let continue_result = repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None);
-    // C4 will conflict on config_b.py
+    // C4 should now conflict on BATCH (200 vs 50, base=10)
     assert!(continue_result.is_err(), "rebase should conflict on config_b.py at C4");
 
-    // Human resolves C4: plain fs::write (no checkpoint = no AI attribution)
+    // Human resolves C4: compromise value BATCH=75 → C4' is non-empty (parent has BATCH=50)
     fs::write(
         repo.path().join("config_b.py"),
-        "FEATURE_FLAG_B = True\nMAX_BATCH = 50\n",
+        "FLAG_B = 1\nBATCH = 75\n",
     ).unwrap();
     repo.git(&["add", "config_b.py"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
@@ -8272,27 +8272,34 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["module_a.py"]);
 
-    // C2': config_a.py only (AI-resolved)
+    // C2': config_a.py only (AI-resolved, keeps feature's FLAG_A=2)
+    // The original C2 had "FLAG_A = 2\n" as AI; the resolution keeps the same content.
+    // diff_based: old="FLAG_A = 2\n", new="FLAG_A = 2\n" → Equal → AI ✓
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["config_a.py"]);
 
-    // blame at chain[1] for config_a.py: the single line should be AI-attributed
+    // blame at chain[1]: git blame says C2' introduced "FLAG_A = 2" (parent had FLAG_A=1) → AI
     assert_blame_at_commit(&repo, &chain[1], "config_a.py", "c2_blame_config_a", &[
-        ("FEATURE_FLAG_A = True", true),
+        ("FLAG_A = 2", true),
     ]);
 
     // C3': module_c.py only
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["module_c.py"]);
 
-    // C4': config_b.py human-resolved → AI content survived (FEATURE_FLAG_B = True matches) → IS in note
+    // C4': config_b.py (human-resolved to BATCH=75).
+    // diff_based: old=C4's "FLAG_B=1\nBATCH=200\n", new="FLAG_B=1\nBATCH=75\n"
+    //   Line 1 "FLAG_B=1": Equal → AI (in note)
+    //   Line 2 "BATCH=75" vs "BATCH=200": Replace → human (no note entry)
+    // git blame at C4':
+    //   Line 1 "FLAG_B = 1": unchanged from parent (main already had FLAG_B=1) → traces to main → human
+    //   Line 2 "BATCH = 75": C4' introduced (parent had BATCH=50) → C4' note → no AI entry → human
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
     assert_note_files_exact(&repo, &chain[3], "c4_files", &["config_b.py"]);
 
-    // blame at chain[3] for config_b.py: FEATURE_FLAG_B line matches AI → true; MAX_BATCH = 50 differs → false
     assert_blame_at_commit(&repo, &chain[3], "config_b.py", "c4_blame_config_b", &[
-        ("FEATURE_FLAG_B = True", true),
-        ("MAX_BATCH = 50", false),
+        ("FLAG_B = 1", false),   // traced to main branch commit (FLAG_B=1 was set by main)
+        ("BATCH = 75", false),   // C4' introduced, but no AI attribution (Replace in resolution)
     ]);
 
     // C5': module_e.py only
