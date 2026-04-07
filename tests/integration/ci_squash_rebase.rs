@@ -691,8 +691,14 @@ fn test_ci_local_rebase_merge_two_commits() {
         .trim()
         .to_string();
 
-    assert_ne!(new_sha1, feature_sha1, "rebase must produce a new SHA for commit 1");
-    assert_ne!(new_sha2, feature_sha2, "rebase must produce a new SHA for commit 2");
+    assert_ne!(
+        new_sha1, feature_sha1,
+        "rebase must produce a new SHA for commit 1"
+    );
+    assert_ne!(
+        new_sha2, feature_sha2,
+        "rebase must produce a new SHA for commit 2"
+    );
 
     // --- Fast-forward main to the rebased feature HEAD ---
     repo.git_og(&["checkout", "main"]).unwrap();
@@ -847,9 +853,18 @@ fn test_ci_local_rebase_merge_three_commits() {
         .trim()
         .to_string();
 
-    assert_ne!(new_sha1, feature_sha1, "rebase must produce a new SHA for commit 1");
-    assert_ne!(new_sha2, feature_sha2, "rebase must produce a new SHA for commit 2");
-    assert_ne!(new_sha3, feature_sha3, "rebase must produce a new SHA for commit 3");
+    assert_ne!(
+        new_sha1, feature_sha1,
+        "rebase must produce a new SHA for commit 1"
+    );
+    assert_ne!(
+        new_sha2, feature_sha2,
+        "rebase must produce a new SHA for commit 2"
+    );
+    assert_ne!(
+        new_sha3, feature_sha3,
+        "rebase must produce a new SHA for commit 3"
+    );
 
     // --- Fast-forward main to the rebased feature HEAD ---
     repo.git_og(&["checkout", "main"]).unwrap();
@@ -926,7 +941,9 @@ fn test_ci_local_rebase_merge_three_commits() {
         files1
     );
     assert!(
-        !files1.iter().any(|f| f.contains("file_b") || f.contains("file_c")),
+        !files1
+            .iter()
+            .any(|f| f.contains("file_b") || f.contains("file_c")),
         "COMMIT ORDER BUG: rebased commit 1 references wrong file. Got: {:?}",
         files1
     );
@@ -938,7 +955,9 @@ fn test_ci_local_rebase_merge_three_commits() {
         files2
     );
     assert!(
-        !files2.iter().any(|f| f.contains("file_a") || f.contains("file_c")),
+        !files2
+            .iter()
+            .any(|f| f.contains("file_a") || f.contains("file_c")),
         "COMMIT ORDER BUG: rebased commit 2 references wrong file. Got: {:?}",
         files2
     );
@@ -950,7 +969,9 @@ fn test_ci_local_rebase_merge_three_commits() {
         files3
     );
     assert!(
-        !files3.iter().any(|f| f.contains("file_a") || f.contains("file_b")),
+        !files3
+            .iter()
+            .any(|f| f.contains("file_a") || f.contains("file_b")),
         "COMMIT ORDER BUG: rebased commit 3 references wrong file. Got: {:?}",
         files3
     );
