@@ -3890,6 +3890,13 @@ fn build_note_from_conflict_wl(
     let mut authorship_log = AuthorshipLog::new();
     authorship_log.metadata.base_commit_sha = new_commit.to_string();
 
+    // Collect all line_attributions per file across all AI checkpoints, then build
+    // a single FileAttestation per file. This avoids duplicate attestation entries
+    // when multiple checkpoints contain entries for the same file.
+    let mut file_line_attrs: HashMap<
+        String,
+        Vec<crate::authorship::attribution_tracker::LineAttribution>,
+    > = HashMap::new();
     let mut has_ai_content = false;
 
     for checkpoint in &checkpoints {
@@ -3897,25 +3904,32 @@ fn build_note_from_conflict_wl(
             continue;
         }
 
+        // Skip checkpoints without an agent_id: their line_attributions would
+        // reference an author_id not present in metadata.prompts, causing blame
+        // to fall back to human attribution.
+        let agent_id = match &checkpoint.agent_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        let author_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+
         // Record the prompt from this AI checkpoint in the metadata.
-        if let Some(agent_id) = &checkpoint.agent_id {
-            let author_id = generate_short_hash(&agent_id.id, &agent_id.tool);
-            authorship_log
-                .metadata
-                .prompts
-                .entry(author_id)
-                .or_insert_with(|| crate::authorship::authorship_log::PromptRecord {
-                    agent_id: agent_id.clone(),
-                    human_author: None,
-                    messages: Vec::new(),
-                    total_additions: checkpoint.line_stats.additions,
-                    total_deletions: checkpoint.line_stats.deletions,
-                    accepted_lines: 0,
-                    overriden_lines: 0,
-                    messages_url: None,
-                    custom_attributes: None,
-                });
-        }
+        authorship_log
+            .metadata
+            .prompts
+            .entry(author_id)
+            .or_insert_with(|| crate::authorship::authorship_log::PromptRecord {
+                agent_id: agent_id.clone(),
+                human_author: None,
+                messages: Vec::new(),
+                total_additions: checkpoint.line_stats.additions,
+                total_deletions: checkpoint.line_stats.deletions,
+                accepted_lines: 0,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: None,
+            });
 
         for entry in &checkpoint.entries {
             if !changed_files.contains(&entry.file) {
@@ -3924,12 +3938,20 @@ fn build_note_from_conflict_wl(
             if entry.line_attributions.is_empty() {
                 continue;
             }
-            if let Some(file_att) =
-                build_file_attestation_from_line_attributions(&entry.file, &entry.line_attributions)
-            {
-                authorship_log.attestations.push(file_att);
-                has_ai_content = true;
-            }
+            file_line_attrs
+                .entry(entry.file.clone())
+                .or_default()
+                .extend(entry.line_attributions.iter().cloned());
+        }
+    }
+
+    // Build one FileAttestation per file from the merged line attributions.
+    for (file_path, line_attrs) in &file_line_attrs {
+        if let Some(file_att) =
+            build_file_attestation_from_line_attributions(file_path, line_attrs)
+        {
+            authorship_log.attestations.push(file_att);
+            has_ai_content = true;
         }
     }
 

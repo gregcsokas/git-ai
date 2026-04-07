@@ -867,9 +867,10 @@ fn test_rebase_second_commit_note_attributes_its_own_ai_lines() {
     let lines_b = total_accepted_lines(&note_b);
 
     // A′ introduced 3 AI lines; after content-diff, its note should report ~3.
-    // B′ introduced 3 more AI lines; its note should report ~6 (cumulative up to B).
-    // With the hunk-path bug: B′'s note only has A's 3 lines in it (b1..b3 are
-    // "inserted" and get no attribution) → lines_b ≈ lines_a, not lines_a + 3.
+    // B′ introduced 3 more AI lines; per-commit-delta model means its note reports
+    // only its own ~3 new lines (not cumulative A+B).
+    // With the hunk-path bug: B′'s note has 0 lines because fn b1..fn b3 are
+    // treated as unattributed "inserts" → lines_b == 0, not ~3.
     assert!(
         lines_b > lines_a,
         "REBASE ATTRIBUTION LOSS (hunk-path drops inserted AI lines): \
