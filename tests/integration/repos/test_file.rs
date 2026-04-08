@@ -22,6 +22,7 @@ const AI_AUTHOR_NAMES: &[&str] = &[
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthorType {
     Human,
+    UnattributedHuman,
     Ai,
 }
 
@@ -46,10 +47,11 @@ impl ExpectedLine {
     }
 }
 
-/// Trait to add .ai() and .human() methods to string types
+/// Trait to add .ai(), .human(), and .unattributed_human() methods to string types
 pub trait ExpectedLineExt {
     fn ai(self) -> ExpectedLine;
     fn human(self) -> ExpectedLine;
+    fn unattributed_human(self) -> ExpectedLine;
 }
 
 impl ExpectedLineExt for &str {
@@ -59,6 +61,10 @@ impl ExpectedLineExt for &str {
 
     fn human(self) -> ExpectedLine {
         ExpectedLine::new(self.to_string(), AuthorType::Human)
+    }
+
+    fn unattributed_human(self) -> ExpectedLine {
+        ExpectedLine::new(self.to_string(), AuthorType::UnattributedHuman)
     }
 }
 
@@ -70,6 +76,10 @@ impl ExpectedLineExt for String {
     fn human(self) -> ExpectedLine {
         ExpectedLine::new(self, AuthorType::Human)
     }
+
+    fn unattributed_human(self) -> ExpectedLine {
+        ExpectedLine::new(self, AuthorType::UnattributedHuman)
+    }
 }
 
 impl ExpectedLineExt for ExpectedLine {
@@ -79,6 +89,10 @@ impl ExpectedLineExt for ExpectedLine {
 
     fn human(self) -> ExpectedLine {
         ExpectedLine::new(self.contents, AuthorType::Human)
+    }
+
+    fn unattributed_human(self) -> ExpectedLine {
+        ExpectedLine::new(self.contents, AuthorType::UnattributedHuman)
     }
 }
 
@@ -299,7 +313,7 @@ impl<'a> TestFile<'a> {
                         blame_output
                     );
                 }
-                AuthorType::Human => {
+                AuthorType::Human | AuthorType::UnattributedHuman => {
                     assert!(
                         !self.is_ai_author(actual_author),
                         "Line {}: Expected Human author but got AI author '{}'\nExpected: {:?}\nActual content: {:?}\nFull blame output:\n{}",
@@ -374,7 +388,7 @@ impl<'a> TestFile<'a> {
                         blame_output
                     );
                 }
-                AuthorType::Human => {
+                AuthorType::Human | AuthorType::UnattributedHuman => {
                     assert!(
                         !self.is_ai_author(actual_author),
                         "Line {}: Expected Human author but got AI author '{}'\nExpected: {:?}\nActual content: {:?}\nFull blame output:\n{}",
@@ -488,7 +502,7 @@ impl<'a> TestFile<'a> {
                         blame_output
                     );
                 }
-                AuthorType::Human => {
+                AuthorType::Human | AuthorType::UnattributedHuman => {
                     assert!(
                         !self.is_ai_author(actual_author),
                         "Line {}: Expected Human author but got AI author '{}'. Expected line: {:?}\n{}",
@@ -682,7 +696,12 @@ impl<'a> TestFile<'a> {
             .collect::<Vec<String>>()
             .join("\n");
 
-        self.write_and_checkpoint_with_contents(&line_contents, &AuthorType::Human);
+        let human_kind = if lines.iter().any(|l| l.author_type == AuthorType::UnattributedHuman) {
+            &AuthorType::UnattributedHuman
+        } else {
+            &AuthorType::Human
+        };
+        self.write_and_checkpoint_with_contents(&line_contents, human_kind);
 
         let line_contents_with_ai = lines
             .iter()
@@ -714,7 +733,12 @@ impl<'a> TestFile<'a> {
             .collect::<Vec<String>>()
             .join("\n");
 
-        self.write_and_checkpoint_no_stage(&line_contents, &AuthorType::Human);
+        let human_kind = if lines.iter().any(|l| l.author_type == AuthorType::UnattributedHuman) {
+            &AuthorType::UnattributedHuman
+        } else {
+            &AuthorType::Human
+        };
+        self.write_and_checkpoint_no_stage(&line_contents, human_kind);
 
         let line_contents_with_ai = lines
             .iter()
@@ -746,14 +770,17 @@ impl<'a> TestFile<'a> {
 
     fn run_checkpoint_for_author_type(&self, author_type: &AuthorType) {
         let relative_path = self.repo_relative_path();
-        let result = if author_type == &AuthorType::Ai {
-            self.repo
-                .git_ai(&["checkpoint", "mock_ai", relative_path.as_str()])
-        } else {
-            self.repo
-                .git_ai(&["checkpoint", "mock_known_human", relative_path.as_str()])
+        let result = match author_type {
+            AuthorType::Ai => self
+                .repo
+                .git_ai(&["checkpoint", "mock_ai", relative_path.as_str()]),
+            AuthorType::Human => self
+                .repo
+                .git_ai(&["checkpoint", "mock_known_human", relative_path.as_str()]),
+            AuthorType::UnattributedHuman => self
+                .repo
+                .git_ai(&["checkpoint", "--", relative_path.as_str()]),
         };
-
         result.unwrap();
     }
 
