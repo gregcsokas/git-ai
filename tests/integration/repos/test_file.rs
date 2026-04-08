@@ -751,7 +751,7 @@ impl<'a> TestFile<'a> {
                 .git_ai(&["checkpoint", "mock_ai", relative_path.as_str()])
         } else {
             self.repo
-                .git_ai(&["checkpoint", "--", relative_path.as_str()])
+                .git_ai(&["checkpoint", "mock_known_human", relative_path.as_str()])
         };
 
         result.unwrap();

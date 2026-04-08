@@ -272,7 +272,7 @@ fn test_ci_squash_merge_empty_notes_preserved() {
 
     let authorship_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
     assert!(
-        authorship_log.attestations.is_empty(),
+        authorship_log.metadata.prompts.is_empty(),
         "Expected empty attestations for human-only squash merge"
     );
 }

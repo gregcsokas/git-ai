@@ -1113,7 +1113,7 @@ fn overlay_ai_authorship(
                         }
                     }
                 } else {
-                    // Has authorship log but no attribution found = human-authored
+                    // Has authorship log but no attribution found = unattested (unknown)
                     if options.return_human_authors_as_human {
                         line_authors
                             .insert(current_line_num, CheckpointKind::Human.to_str().to_string());

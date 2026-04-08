@@ -50,9 +50,9 @@ use crate::authorship::working_log::AgentId;
 #[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const KNOWN_HUMAN_MIN_SECS_AFTER_AI: u64 = 1;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const KNOWN_HUMAN_MIN_SECS_AFTER_AI: u64 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1658,7 +1658,9 @@ fn get_checkpoint_entry_for_file(
     // Non-pre-commit fast path:
     // Preserve existing `git-ai checkpoint` behavior for human-only files by writing an
     // attribution-empty entry while still capturing line stats.
-    if !kind.is_ai() && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
+    // KnownHuman checkpoints must bypass this path so they record h_<hash> attributions
+    // that later AI checkpoints can use to identify human-written lines.
+    if kind == CheckpointKind::Human && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
         let previous_content = if let Some(state) = previous_state.as_ref() {
             working_log
                 .get_file_version(&state.blob_sha)
@@ -2910,7 +2912,7 @@ mod tests {
     }
 
     #[test]
-    fn test_human_checkpoint_without_ai_history_uses_empty_attributions() {
+    fn test_known_human_checkpoint_without_ai_history_records_h_hash_attributions() {
         let repo = TmpRepo::new().unwrap();
         let mut file = repo.write_file("simple.txt", "one\n", true).unwrap();
 
@@ -2940,17 +2942,22 @@ mod tests {
             .find(|entry| entry.file == "simple.txt")
             .unwrap();
 
+        // KnownHuman checkpoints always record h_<hash> line attributions, even with no AI history.
+        // This allows downstream stats to count these lines as human_additions.
         assert!(
-            entry.attributions.is_empty(),
-            "Human-only file should skip char-level attribution generation"
+            !entry.line_attributions.is_empty(),
+            "KnownHuman checkpoint should record line-level h_<hash> attributions"
         );
         assert!(
-            entry.line_attributions.is_empty(),
-            "Human-only file should skip line-level attribution generation"
+            entry
+                .line_attributions
+                .iter()
+                .all(|la| la.author_id.starts_with("h_")),
+            "All line attributions should be h_<hash> IDs"
         );
         assert!(
             latest.line_stats.additions > 0,
-            "Fast path should still record line stats"
+            "KnownHuman checkpoint should record line stats"
         );
     }
 
@@ -2997,13 +3004,18 @@ mod tests {
             .iter()
             .find(|entry| entry.file == "alphabet.md")
             .unwrap();
+        // KnownHuman checkpoints record h_<hash> attributions for all files, including
+        // files with no AI history. This ensures human lines are counted correctly in stats.
         assert!(
-            human_only_entry.attributions.is_empty(),
-            "Human-only file should use fast path with empty char attributions"
+            !human_only_entry.line_attributions.is_empty(),
+            "KnownHuman checkpoint should record line attributions for human-only files"
         );
         assert!(
-            human_only_entry.line_attributions.is_empty(),
-            "Human-only file should use fast path with empty line attributions"
+            human_only_entry
+                .line_attributions
+                .iter()
+                .all(|la| la.author_id.starts_with("h_")),
+            "Human-only file attributions should all be h_<hash> IDs"
         );
     }
 

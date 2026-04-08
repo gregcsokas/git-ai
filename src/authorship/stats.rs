@@ -1071,15 +1071,15 @@ mod tests {
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
         let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
 
-        // For initial commit, human lines have no h_-prefixed attestation entries yet
-        // (pure-human files bypass line-level attribution tracking), so they appear as unknown.
+        // KnownHuman checkpoints record h_<hash> attributions for all human-edited lines,
+        // so they appear as human_additions (not unknown) even on pure-human commits.
         assert_eq!(
-            stats.human_additions, 0,
-            "No KnownHuman-attested additions in pure-human commit"
+            stats.human_additions, 3,
+            "All 3 lines should be KnownHuman-attested human_additions"
         );
         assert_eq!(
-            stats.unknown_additions, 3,
-            "All 3 lines are unattested (unknown) in a pure-human initial commit"
+            stats.unknown_additions, 0,
+            "No unattested lines in a KnownHuman-checkpointed commit"
         );
         assert_eq!(stats.ai_additions, 0, "No AI additions in initial commit");
         assert_eq!(stats.ai_accepted, 0, "No AI lines to accept");
@@ -1179,9 +1179,9 @@ mod tests {
         let stats_filtered =
             stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &ignore_patterns).unwrap();
         assert_eq!(stats_filtered.git_diff_added_lines, 1);
-        // Pure-human files have no h_-prefixed line attestation entries, so lines appear as unknown.
-        assert_eq!(stats_filtered.human_additions, 0);
-        assert_eq!(stats_filtered.unknown_additions, 1);
+        // KnownHuman checkpoints record h_<hash> attributions, so the README line is human_additions.
+        assert_eq!(stats_filtered.human_additions, 1);
+        assert_eq!(stats_filtered.unknown_additions, 0);
     }
 
     #[test]

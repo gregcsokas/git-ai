@@ -357,6 +357,11 @@ fn checkpoint_human(repo: &TestRepo) {
         .expect("human checkpoint should succeed");
 }
 
+fn checkpoint_known_human(repo: &TestRepo, file_path: &str) {
+    repo.git_ai(&["checkpoint", "mock_known_human", file_path])
+        .expect("known human checkpoint should succeed");
+}
+
 fn commit_after_staging_all(repo: &TestRepo, message: &str) -> NewCommit {
     repo.git(&["add", "-A"]).expect("git add should succeed");
     repo.commit(message).expect("commit should succeed")
@@ -1347,7 +1352,7 @@ fn test_diff_json_include_stats_exact_multi_model_with_non_landing_prompt() {
             "codex-b2",
         ],
     );
-    checkpoint_human(&repo);
+    checkpoint_known_human(&repo, "multi_model_stats.txt");
 
     let commit = commit_after_staging_all(&repo, "multi model stats target");
     let diff = diff_json(
@@ -1428,7 +1433,7 @@ fn test_diff_json_include_stats_exact_human_landed_with_ai_generated() {
         "human_landed_stats.txt",
         &["base", "human-final-1", "human-final-2"],
     );
-    checkpoint_human(&repo);
+    checkpoint_known_human(&repo, "human_landed_stats.txt");
 
     let commit = commit_after_staging_all(&repo, "human landed target");
     let diff = diff_json(

@@ -522,12 +522,12 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai() {
     repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
         .expect("pre-hook checkpoint should succeed");
 
-    readme.set_contents(crate::lines!["Project README", "Updated by Codex"]);
+    readme.set_contents(crate::lines!["Project README", "Updated by Codex".ai()]);
     repo.stage_all_and_commit("Codex append proof")
         .expect("Codex append commit should succeed");
 
     readme.assert_lines_and_blame(crate::lines![
-        "Project README".ai(),
+        "Project README".human(),
         "Updated by Codex".ai(),
     ]);
 
@@ -554,14 +554,14 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai() {
 
     readme.set_contents(crate::lines![
         "Project README",
-        "Updated by Codex",
-        "Updated again by Codex",
+        "Updated by Codex".ai(),
+        "Updated again by Codex".ai(),
     ]);
     repo.stage_all_and_commit("Codex append proof 2")
         .expect("second Codex append commit should succeed");
 
     readme.assert_lines_and_blame(crate::lines![
-        "Project README".ai(),
+        "Project README".human(),
         "Updated by Codex".ai(),
         "Updated again by Codex".ai(),
     ]);

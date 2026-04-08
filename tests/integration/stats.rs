@@ -136,13 +136,17 @@ fn test_authorship_log_stats() {
     let raw = repo.git_ai(&["stats", "--json"]).unwrap();
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
-    // Integration harness uses legacy `checkpoint --` (CheckpointKind::Human), which does not
-    // produce h_-prefixed attestation entries. Until Task 16 updates the harness to use
-    // KnownHuman, human lines appear as unknown_additions.
-    assert_eq!(stats.human_additions, 0);
-    assert_eq!(stats.unknown_additions, 4);
-    assert_eq!(stats.mixed_additions, 1);
-    assert_eq!(stats.ai_additions, 6); // Includes the one mixed line (Neptune (override))
+    // The integration harness now uses mock_known_human (CheckpointKind::KnownHuman), which
+    // produces h_-prefixed attestation entries for lines written under a human checkpoint.
+    // Neptune (override) — human-overrides-AI line — gets h_<hash> attestation.
+    // Mercury, Venus, Jupiter also get h_<hash> attestation from the KnownHuman checkpoint.
+    // All 4 human-written lines now count as human_additions; unknown_additions = 0.
+    // Neptune (override) is now h_<hash> attested, so it counts as human_additions only,
+    // not mixed. mixed_additions = 0.
+    assert_eq!(stats.human_additions, 4);
+    assert_eq!(stats.unknown_additions, 0);
+    assert_eq!(stats.mixed_additions, 0);
+    assert_eq!(stats.ai_additions, 5); // Neptune (override) no longer counted as mixed AI
     assert_eq!(stats.ai_accepted, 5);
     assert_eq!(stats.total_ai_additions, 11);
     assert_eq!(stats.total_ai_deletions, 11);

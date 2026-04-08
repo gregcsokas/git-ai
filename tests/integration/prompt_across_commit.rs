@@ -41,7 +41,7 @@ fn test_change_across_commits() {
     let commit = repo.stage_all_and_commit("add more AI").unwrap();
 
     let file_attestation = commit.authorship_log.attestations.first().unwrap();
-    assert_eq!(file_attestation.entries.len(), 1);
+    assert_eq!(file_attestation.entries.len(), 2);
 
     let second_ai_prompt_hash = commit
         .authorship_log
@@ -52,7 +52,11 @@ fn test_change_across_commits() {
         .unwrap();
     assert_ne!(*second_ai_prompt_hash, initial_ai_entry.hash);
 
-    let second_ai_entry = file_attestation.entries.first().unwrap();
+    let second_ai_entry = file_attestation
+        .entries
+        .iter()
+        .find(|e| commit.authorship_log.metadata.prompts.contains_key(&e.hash))
+        .unwrap();
     assert_eq!(second_ai_entry.line_ranges, vec![LineRange::Single(6)]);
     assert_ne!(second_ai_entry.hash, initial_ai_entry.hash);
 }
