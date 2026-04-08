@@ -829,7 +829,7 @@ fn try_reconstruct_attributions_from_notes_cached(
             }
             // Collect humans (union-merge: first writer wins).
             for (hash, record) in &log.metadata.humans {
-                humans.entry(hash.clone()).or_insert_with(|| record.clone());
+                humans.entry(hash.clone()).or_insert(record.clone());
             }
         }
     }
