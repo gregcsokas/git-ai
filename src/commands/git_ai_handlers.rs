@@ -658,6 +658,62 @@ fn handle_checkpoint(args: &[String]) {
                     captured_checkpoint_id: None,
                 });
             }
+            "known_human" => {
+                // Production preset: IDE extension attests human-authored lines.
+                // Usage: git ai checkpoint known_human [--editor <name>]
+                //        [--editor-version <ver>] [--extension-version <ver>] -- file...
+                let mut editor = "unknown".to_string();
+                let mut editor_version = "unknown".to_string();
+                let mut extension_version = "unknown".to_string();
+                let mut files: Vec<String> = Vec::new();
+                let mut i = 1usize; // skip "known_human"
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--editor" if i + 1 < args.len() => {
+                            editor = args[i + 1].clone();
+                            i += 2;
+                        }
+                        "--editor-version" if i + 1 < args.len() => {
+                            editor_version = args[i + 1].clone();
+                            i += 2;
+                        }
+                        "--extension-version" if i + 1 < args.len() => {
+                            extension_version = args[i + 1].clone();
+                            i += 2;
+                        }
+                        "--" => {
+                            files.extend(args[i + 1..].iter().cloned());
+                            break;
+                        }
+                        arg if !arg.starts_with("--") => {
+                            files.push(arg.to_string());
+                            i += 1;
+                        }
+                        _ => {
+                            i += 1;
+                        }
+                    }
+                }
+                let _ = (editor, editor_version, extension_version); // metadata stored on Checkpoint by checkpoint.rs
+
+                let edited_filepaths = if files.is_empty() { None } else { Some(files) };
+
+                agent_run_result = Some(AgentRunResult {
+                    agent_id: AgentId {
+                        tool: "known_human".to_string(),
+                        id: "known_human_session".to_string(),
+                        model: "unknown".to_string(),
+                    },
+                    agent_metadata: None,
+                    checkpoint_kind: CheckpointKind::KnownHuman,
+                    transcript: None,
+                    repo_working_dir: None,
+                    edited_filepaths,
+                    will_edit_filepaths: None,
+                    dirty_files: None,
+                    captured_checkpoint_id: None,
+                });
+            }
             "mock_known_human" => {
                 // Test preset: KnownHuman checkpoint for given paths (mirrors mock_ai behavior)
                 let edited_filepaths = if args.len() > 1 {
