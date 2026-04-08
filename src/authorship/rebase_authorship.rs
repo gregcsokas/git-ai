@@ -42,7 +42,7 @@ fn load_rebase_note_cache(
     let all_note_oids = note_blob_oids_for_commits(repo, &all_commits)?;
 
     let mut original_note_blob_oids = HashMap::new();
-    let mut new_commits_with_notes = HashSet::new();
+    let mut new_commit_note_blob_oids: HashMap<String, String> = HashMap::new();
 
     for commit in original_commits {
         if let Some(oid) = all_note_oids.get(commit) {
@@ -50,20 +50,36 @@ fn load_rebase_note_cache(
         }
     }
     for commit in new_commits {
-        if all_note_oids.contains_key(commit) {
-            new_commits_with_notes.insert(commit.clone());
+        if let Some(oid) = all_note_oids.get(commit) {
+            new_commit_note_blob_oids.insert(commit.clone(), oid.clone());
         }
     }
 
-    // Step 2: Read all original note blob contents in one batch call.
+    // Step 2: Read all note blob contents (original + new) in one batch call.
     let mut unique_blob_oids: Vec<String> = original_note_blob_oids
         .values()
+        .chain(new_commit_note_blob_oids.values())
         .cloned()
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
     unique_blob_oids.sort();
     let blob_contents = batch_read_blob_contents(repo, &unique_blob_oids)?;
+
+    // A new commit's note only counts as "already processed" when it has actual
+    // attestations.  Empty notes (no attestations) arise when a post-commit hook
+    // fires during `rebase --continue` for a human-resolved conflict commit —
+    // in that case we must still run the slow-path rewrite to transfer attribution
+    // for any AI lines that survived the merge.
+    let mut new_commits_with_notes = HashSet::new();
+    for (commit, blob_oid) in &new_commit_note_blob_oids {
+        if let Some(content) = blob_contents.get(blob_oid)
+            && let Ok(log) = AuthorshipLog::deserialize_from_string(content)
+            && !log.attestations.is_empty()
+        {
+            new_commits_with_notes.insert(commit.clone());
+        }
+    }
 
     let mut original_note_contents = HashMap::new();
     let mut ai_touched_files = HashSet::new();
@@ -1396,8 +1412,20 @@ pub fn rewrite_authorship_after_rebase_v2(
     let mut pending_note_entries: Vec<(String, String)> =
         Vec::with_capacity(commits_to_process.len());
     let mut pending_note_debug: Vec<(String, usize)> = Vec::with_capacity(commits_to_process.len());
-    let mut original_note_content_by_new_commit: HashMap<String, String> = HashMap::new();
-    let mut original_note_content_loaded = false;
+
+    // Pre-compute parent SHAs for all commits to process.
+    // Used to look up working-log checkpoint data for AI-resolved conflicts.
+    let commit_parent_shas: HashMap<String, String> = {
+        let mut map = HashMap::new();
+        for sha in &commits_to_process {
+            if let Ok(commit) = repo.find_commit(sha.clone())
+                && let Ok(parent) = commit.parent(0)
+            {
+                map.insert(sha.clone(), parent.id());
+            }
+        }
+        map
+    };
 
     // Step 3: Process each new commit in order (oldest to newest)
     let loop_start = std::time::Instant::now();
@@ -1415,6 +1443,12 @@ pub fn rewrite_authorship_after_rebase_v2(
     // After the first content-diff, our accumulated attribution state matches the
     // commit chain, so we can use hunk-based transfer for subsequent appearances.
     let mut files_with_synced_state: HashSet<String> = HashSet::new();
+    // Cache the active prompt IDs + their accepted_lines values from the previous commit.
+    // When BOTH the prompt ID set AND the accepted_lines counts are unchanged, the metadata
+    // template is unchanged and we skip the serde_json serialization entirely.
+    // We must include accepted_lines in the key: consecutive commits from the same AI session
+    // share the same prompt IDs but accumulate different accepted_lines values each commit.
+    let mut prev_active_prompt_key: HashMap<String, u32> = HashMap::new();
 
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
         debug_log(&format!(
@@ -1549,25 +1583,60 @@ pub fn rewrite_authorship_after_rebase_v2(
             }
             loop_transform_ms += t0.elapsed().as_millis();
 
-            // Recompute prompt_line_metrics from current attributions and rebuild
-            // the metadata template so each commit's note reflects accurate line counts.
+            // Recompute prompt_line_metrics scoped to only the DELTA of this commit:
+            // count only AI lines at positions that were inserted/replaced by this commit
+            // (from hunk data), not all accumulated AI lines in the file.  This gives each
+            // commit's note an accepted_lines that reflects its own contribution.
             let tmetrics = std::time::Instant::now();
-            let prompt_line_metrics =
-                build_prompt_line_metrics_from_attributions(&current_attributions);
-            apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
-            metadata_json_template_parts =
-                build_metadata_template_parts(&current_authorship_log.metadata, &current_prompts);
+            let delta_prompt_metrics = build_delta_prompt_metrics_from_hunks_and_attrs(
+                &current_attributions,
+                &changed_files_in_commit,
+                commit_hunks,
+            );
+            apply_prompt_line_metrics_to_prompts(&mut current_prompts, &delta_prompt_metrics);
+            // Collect IDs + accepted_lines for prompts that contributed new AI lines to this
+            // commit's diff.  Avoids cloning the full BTreeMap — we pass a filter to the builder.
+            let active_prompt_key: HashMap<String, u32> = delta_prompt_metrics
+                .iter()
+                .filter(|(_, m)| m.accepted_lines > 0)
+                .map(|(pid, m)| (pid.clone(), m.accepted_lines))
+                .collect();
+            // Only rebuild the (expensive) serde_json metadata template when the active-prompt
+            // set OR accepted_lines values changed.  Consecutive same-session commits share the
+            // same prompt IDs but differ in accepted_lines, so the key includes both.
+            if active_prompt_key != prev_active_prompt_key {
+                let active_ids: HashSet<String> = active_prompt_key.keys().cloned().collect();
+                metadata_json_template_parts = build_metadata_template_parts_filtered(
+                    &current_authorship_log.metadata,
+                    &current_prompts,
+                    Some(&active_ids),
+                );
+                prev_active_prompt_key = active_prompt_key;
+            }
             loop_metrics_ms += tmetrics.elapsed().as_micros();
         }
 
         // Serialize note for this commit using fast cached assembly.
+        // Per-commit-delta: include only files changed by this specific commit.
         let t0 = std::time::Instant::now();
-        let has_attestations = cached_file_attestation_text.values().any(|v| !v.is_empty());
-        let authorship_json = if has_attestations || metadata_json_template_parts.is_some() {
-            // Fast path: assemble note from cached per-file text + templated metadata.
-            let mut output = String::with_capacity(4096);
-            for (file_path, text) in &cached_file_attestation_text {
-                if existing_files.contains(file_path) && !text.is_empty() {
+        let commit_has_attestations = !changed_files_in_commit.is_empty()
+            && changed_files_in_commit.iter().any(|f| {
+                cached_file_attestation_text
+                    .get(f.as_str())
+                    .is_some_and(|t| !t.is_empty())
+            });
+        // If the slow-path computation produced AI attestations for this commit's changed
+        // files, assemble a fresh note from the per-file cache. Otherwise fall back to
+        // the original pre-rebase note (remapped to the new SHA) — this preserves fast-path
+        // semantics for commits whose content was unaffected by the rebase, and produces
+        // no note when the original commit had none (human-only commits).
+        let authorship_json = if commit_has_attestations {
+            // Assemble note from cached per-file text for THIS commit's changed files only.
+            let mut output = String::with_capacity(512);
+            for file_path in &changed_files_in_commit {
+                if let Some(text) = cached_file_attestation_text.get(file_path.as_str())
+                    && !text.is_empty()
+                {
                     output.push_str(text);
                 }
             }
@@ -1579,26 +1648,40 @@ pub fn rewrite_authorship_after_rebase_v2(
             }
             Some(output)
         } else {
-            if !original_note_content_loaded {
-                // Build from cached note contents instead of another git call
-                for (original_commit, new_commit) in &commit_pairs_to_process {
-                    if let Some(content) = note_cache.original_note_contents.get(original_commit) {
-                        original_note_content_by_new_commit
-                            .insert(new_commit.clone(), content.clone());
-                    }
-                }
-                original_note_content_loaded = true;
+            // No AI attribution from the diff-based transfer.  This is the normal case
+            // for human-only commits.  However, it also fires when the conflict was
+            // resolved by AI with *different* content than the original commit (e.g.
+            // MAX_CONNECTIONS = 100 → 75), because the content-diff can't carry
+            // attribution for changed lines.
+            //
+            // Check the working log for this commit's parent: if it contains an AI
+            // checkpoint for any of the changed files (written by `git-ai checkpoint`
+            // during `rebase --continue` conflict resolution), use those line_attributions
+            // directly to build the note.
+            if let Some(parent_sha) = commit_parent_shas.get(new_commit) {
+                build_note_from_conflict_wl(repo, new_commit, parent_sha, &changed_files_in_commit)
+            } else {
+                None
             }
-            original_note_content_by_new_commit
-                .get(new_commit)
-                .map(|raw_note| remap_note_content_for_target_commit(raw_note, new_commit))
         };
         loop_serialize_us += t0.elapsed().as_micros();
         if let Some(authorship_json) = authorship_json {
-            let file_count = cached_file_attestation_text
-                .values()
-                .filter(|v| !v.is_empty())
+            // Count AI-attributed files for the debug log.  For content-diff notes the count
+            // comes from the per-file cache; for working-log conflict notes that cache is empty
+            // so fall back to the total changed-file count as an approximation.
+            let file_count_from_cache = changed_files_in_commit
+                .iter()
+                .filter(|f| {
+                    cached_file_attestation_text
+                        .get(f.as_str())
+                        .is_some_and(|t| !t.is_empty())
+                })
                 .count();
+            let file_count = if file_count_from_cache > 0 {
+                file_count_from_cache
+            } else {
+                changed_files_in_commit.len()
+            };
             pending_note_entries.push((new_commit.clone(), authorship_json));
             pending_note_debug.push((new_commit.clone(), file_count));
         }
@@ -3524,9 +3607,21 @@ fn build_metadata_template_parts(
     metadata: &crate::authorship::authorship_log_serialization::AuthorshipMetadata,
     prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
 ) -> Option<(String, String)> {
+    build_metadata_template_parts_filtered(metadata, prompts, None)
+}
+
+/// Like `build_metadata_template_parts` but only includes prompts whose IDs are in
+/// `active_ids`. Passing `None` includes all prompts (same as the unfiltered variant).
+/// This avoids cloning the entire prompts map per commit — callers pass a `HashSet<&str>`
+/// built from `delta_prompt_metrics` instead of pre-filtering and cloning the map.
+fn build_metadata_template_parts_filtered(
+    metadata: &crate::authorship::authorship_log_serialization::AuthorshipMetadata,
+    prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
+    active_ids: Option<&HashSet<String>>,
+) -> Option<(String, String)> {
     let mut template_meta = metadata.clone();
     template_meta.base_commit_sha = "BASE_COMMIT_SHA_PLACEHOLDER".to_string();
-    template_meta.prompts = flatten_prompts_for_metadata(prompts);
+    template_meta.prompts = flatten_prompts_for_metadata_filtered(prompts, active_ids);
     serde_json::to_string_pretty(&template_meta)
         .ok()
         .map(|template| {
@@ -3541,8 +3636,16 @@ fn build_metadata_template_parts(
 fn flatten_prompts_for_metadata(
     prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
 ) -> BTreeMap<String, crate::authorship::authorship_log::PromptRecord> {
+    flatten_prompts_for_metadata_filtered(prompts, None)
+}
+
+fn flatten_prompts_for_metadata_filtered(
+    prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
+    active_ids: Option<&HashSet<String>>,
+) -> BTreeMap<String, crate::authorship::authorship_log::PromptRecord> {
     prompts
         .iter()
+        .filter(|(prompt_id, _)| active_ids.is_none_or(|ids| ids.contains(prompt_id.as_str())))
         .filter_map(|(prompt_id, commits)| {
             commits
                 .values()
@@ -3749,13 +3852,15 @@ fn diff_based_line_attribution_transfer(
     let old_lines: Vec<&str> = old_content.lines().collect();
     let new_lines: Vec<&str> = new_content.lines().collect();
 
-    // Build a lookup from 0-indexed line index → author_id for old content
-    let mut old_line_author: Vec<Option<&str>> = vec![None; old_lines.len()];
+    // Build a sparse lookup from 0-indexed line position → author_id for old content.
+    // Using a HashMap instead of a full-size Vec avoids allocating O(file_size) memory
+    // when only a small fraction of lines carry AI attribution.
+    let mut old_line_author: HashMap<usize, &str> = HashMap::new();
     for attr in old_line_attrs {
         for line_num in attr.start_line..=attr.end_line {
             let idx = (line_num as usize).saturating_sub(1);
-            if idx < old_line_author.len() {
-                old_line_author[idx] = Some(&attr.author_id);
+            if idx < old_lines.len() {
+                old_line_author.insert(idx, &attr.author_id);
             }
         }
     }
@@ -3763,7 +3868,7 @@ fn diff_based_line_attribution_transfer(
     let diff_ops = capture_diff_slices(&old_lines, &new_lines);
 
     let mut new_line_attrs: Vec<crate::authorship::attribution_tracker::LineAttribution> =
-        Vec::with_capacity(new_lines.len());
+        Vec::with_capacity(old_line_author.len());
 
     for op in &diff_ops {
         match op {
@@ -3776,7 +3881,7 @@ fn diff_based_line_attribution_transfer(
                 for i in 0..*len {
                     let old_idx = old_index + i;
                     let new_line_num = (new_index + i + 1) as u32;
-                    if let Some(Some(author_id)) = old_line_author.get(old_idx) {
+                    if let Some(author_id) = old_line_author.get(&old_idx) {
                         new_line_attrs.push(
                             crate::authorship::attribution_tracker::LineAttribution {
                                 start_line: new_line_num,
@@ -3797,6 +3902,116 @@ fn diff_based_line_attribution_transfer(
     }
 
     new_line_attrs
+}
+
+/// Build an authorship note for `new_commit` from working-log checkpoint data stored
+/// under `parent_sha`.  This is the fallback path for AI-resolved rebase conflicts:
+/// when content-diff transfer produces no AI attribution (because the AI wrote *different*
+/// content from the original commit), we fall back to the `line_attributions` that
+/// `git-ai checkpoint` recorded in the working log during `rebase --continue`.
+///
+/// Returns `None` when no AI checkpoint data exists for any of `changed_files`
+/// (human-only resolution or no checkpoint at all).
+fn build_note_from_conflict_wl(
+    repo: &crate::git::repository::Repository,
+    new_commit: &str,
+    parent_sha: &str,
+    changed_files: &HashSet<String>,
+) -> Option<String> {
+    use crate::authorship::authorship_log_serialization::generate_short_hash;
+    use crate::authorship::working_log::CheckpointKind;
+
+    let working_log = repo.storage.working_log_for_base_commit(parent_sha).ok()?;
+    let checkpoints = working_log.read_all_checkpoints().ok()?;
+
+    let mut authorship_log = AuthorshipLog::new();
+    authorship_log.metadata.base_commit_sha = new_commit.to_string();
+
+    // Collect all line_attributions per file across all AI checkpoints, then build
+    // a single FileAttestation per file. This avoids duplicate attestation entries
+    // when multiple checkpoints contain entries for the same file.
+    let mut file_line_attrs: HashMap<
+        String,
+        Vec<crate::authorship::attribution_tracker::LineAttribution>,
+    > = HashMap::new();
+    let mut has_ai_content = false;
+
+    for checkpoint in &checkpoints {
+        if checkpoint.kind == CheckpointKind::Human {
+            continue;
+        }
+
+        // Skip checkpoints without an agent_id: their line_attributions would
+        // reference an author_id not present in metadata.prompts, causing blame
+        // to fall back to human attribution.
+        let agent_id = match &checkpoint.agent_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        let author_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+
+        // Record the prompt from this AI checkpoint in the metadata.
+        authorship_log
+            .metadata
+            .prompts
+            .entry(author_id)
+            .or_insert_with(|| crate::authorship::authorship_log::PromptRecord {
+                agent_id: agent_id.clone(),
+                human_author: None,
+                messages: Vec::new(),
+                total_additions: checkpoint.line_stats.additions,
+                total_deletions: checkpoint.line_stats.deletions,
+                accepted_lines: 0,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: None,
+            });
+
+        for entry in &checkpoint.entries {
+            if !changed_files.contains(&entry.file) {
+                continue;
+            }
+            if entry.line_attributions.is_empty() {
+                continue;
+            }
+            file_line_attrs
+                .entry(entry.file.clone())
+                .or_default()
+                .extend(entry.line_attributions.iter().cloned());
+        }
+    }
+
+    // Build one FileAttestation per file from the merged line attributions.
+    // Also tally accepted_lines per author_id so the metadata prompts section
+    // reflects the actual AI line count (not the hard-coded zero set above).
+    let mut accepted_per_author: HashMap<String, u32> = HashMap::new();
+    for (file_path, line_attrs) in &file_line_attrs {
+        // Tally accepted lines per author from the raw LineAttribution slice.
+        for la in line_attrs {
+            // end_line is inclusive (1-indexed); count = end_line - start_line + 1.
+            *accepted_per_author.entry(la.author_id.clone()).or_insert(0) +=
+                la.end_line - la.start_line + 1;
+        }
+        if let Some(file_att) = build_file_attestation_from_line_attributions(file_path, line_attrs)
+        {
+            authorship_log.attestations.push(file_att);
+            has_ai_content = true;
+        }
+    }
+
+    // Patch each prompt's accepted_lines with the actual tally.
+    for (author_id, count) in accepted_per_author {
+        if let Some(record) = authorship_log.metadata.prompts.get_mut(&author_id) {
+            record.accepted_lines = count;
+        }
+    }
+
+    if !has_ai_content {
+        return None;
+    }
+
+    authorship_log.serialize_to_string().ok()
 }
 
 fn build_authorship_log_from_state(
@@ -3842,6 +4057,76 @@ fn build_prompt_line_metrics_from_attributions(
     for (_char_attrs, line_attrs) in attributions.values() {
         add_prompt_line_metrics_for_line_attributions(&mut metrics, line_attrs);
     }
+    metrics
+}
+
+/// Compute per-commit-delta prompt line metrics by intersecting the
+/// post-processing line attributions with the hunk data for this commit.
+/// Only counts AI lines at line positions that were INSERTED or REPLACED
+/// by this commit (i.e., lines in the hunk's new-side range).
+///
+/// This gives the correct per-commit contribution: a commit that carries
+/// forward 8 AI lines from its parent plus adds 8 new AI lines will report
+/// accepted_lines = 8, not 16.
+fn build_delta_prompt_metrics_from_hunks_and_attrs(
+    attributions: &HashMap<
+        String,
+        (
+            Vec<crate::authorship::attribution_tracker::Attribution>,
+            Vec<crate::authorship::attribution_tracker::LineAttribution>,
+        ),
+    >,
+    changed_files: &HashSet<String>,
+    commit_hunks: Option<&HashMap<String, Vec<DiffHunk>>>,
+) -> HashMap<String, PromptLineMetrics> {
+    let human_id = crate::authorship::working_log::CheckpointKind::Human.to_str();
+    let mut metrics: HashMap<String, PromptLineMetrics> = HashMap::new();
+
+    for file_path in changed_files {
+        let Some((_, line_attrs)) = attributions.get(file_path) else {
+            continue;
+        };
+
+        let file_hunks = commit_hunks.and_then(|h| h.get(file_path.as_str()));
+        let Some(file_hunks) = file_hunks else {
+            // No hunk data for this file — count all AI lines as delta.
+            // Happens for files not tracked by the diff (e.g. new binary files).
+            add_prompt_line_metrics_for_line_attributions(&mut metrics, line_attrs);
+            continue;
+        };
+
+        // Build set of new-side line numbers (lines inserted/replaced by this commit).
+        let mut added_line_nums: HashSet<u32> =
+            HashSet::with_capacity(file_hunks.iter().map(|h| h.new_count as usize).sum());
+        for hunk in file_hunks {
+            for i in 0..hunk.new_count {
+                added_line_nums.insert(hunk.new_start + i);
+            }
+        }
+
+        // Count AI attributions only at inserted positions.
+        for attr in line_attrs {
+            if attr.author_id == human_id {
+                continue;
+            }
+            for line_num in attr.start_line..=attr.end_line {
+                if added_line_nums.contains(&line_num) {
+                    if let Some(m) = metrics.get_mut(&attr.author_id) {
+                        m.accepted_lines = m.accepted_lines.saturating_add(1);
+                    } else {
+                        metrics.insert(
+                            attr.author_id.clone(),
+                            PromptLineMetrics {
+                                accepted_lines: 1,
+                                overridden_lines: 0,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     metrics
 }
 
