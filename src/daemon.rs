@@ -2414,13 +2414,12 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         // edited *after* the last checkpoint (e.g. modified between PostToolUse A
         // and the final commit) are absent from the snapshot.  Supplement with the
         // full committed diff so those files also receive attribution.
-        if crate::commands::checkpoint_agent::bash_tool::has_active_bash_inflight(repo_root) {
-            if let Ok(full_diff) =
+        if crate::commands::checkpoint_agent::bash_tool::has_active_bash_inflight(repo_root)
+            && let Ok(full_diff) =
                 committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)
-            {
-                for (path, content) in full_diff {
-                    dirty.entry(path).or_insert(content);
-                }
+        {
+            for (path, content) in full_diff {
+                dirty.entry(path).or_insert(content);
             }
         }
         dirty
