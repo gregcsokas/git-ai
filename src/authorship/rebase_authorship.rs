@@ -678,6 +678,9 @@ pub fn rewrite_authorship_after_squash_or_rebase(
                 entry.0 = entry.0.saturating_add(record.total_additions);
                 entry.1 = entry.1.saturating_add(record.total_deletions);
             }
+            for (hash, record) in log.metadata.humans {
+                authorship_log.metadata.humans.entry(hash).or_insert(record);
+            }
         }
     }
 
@@ -713,7 +716,7 @@ pub fn rewrite_authorship_after_squash_or_rebase(
 /// expensive git blame operations. This reads notes from ALL original commits in batch
 /// and merges their attributions to get the full state at original_head.
 /// Cached version: uses pre-loaded note contents from RebaseNoteCache.
-/// Returns: (attributions, file_contents, prompts) or None if reconstruction fails.
+/// Returns: (attributions, file_contents, prompts, humans) or None if reconstruction fails.
 #[allow(clippy::type_complexity)]
 fn try_reconstruct_attributions_from_notes_cached(
     repo: &Repository,
@@ -733,8 +736,10 @@ fn try_reconstruct_attributions_from_notes_cached(
     >,
     HashMap<String, String>,
     BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
+    BTreeMap<String, crate::authorship::authorship_log::HumanRecord>,
 )> {
     use crate::authorship::attribution_tracker::LineAttribution;
+    use crate::authorship::authorship_log::HumanRecord;
     use crate::authorship::authorship_log_serialization::AuthorshipLog;
 
     let pathspec_set: HashSet<&str> = pathspecs.iter().map(String::as_str).collect();
@@ -742,6 +747,7 @@ fn try_reconstruct_attributions_from_notes_cached(
         String,
         BTreeMap<String, crate::authorship::authorship_log::PromptRecord>,
     > = BTreeMap::new();
+    let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
 
     // Parse all notes and check if any exist.
     let mut parsed_logs: HashMap<String, AuthorshipLog> = HashMap::new();
@@ -821,6 +827,10 @@ fn try_reconstruct_attributions_from_notes_cached(
                     .or_default()
                     .insert(commit.to_string(), prompt_record.clone());
             }
+            // Collect humans (union-merge: first writer wins).
+            for (hash, record) in &log.metadata.humans {
+                humans.entry(hash.clone()).or_insert_with(|| record.clone());
+            }
         }
     }
 
@@ -840,7 +850,7 @@ fn try_reconstruct_attributions_from_notes_cached(
         }
     }
 
-    Some((attributions, file_contents, prompts))
+    Some((attributions, file_contents, prompts, humans))
 }
 
 /// Overlay a new attribution range onto an existing sorted attribution list.
@@ -1244,8 +1254,8 @@ pub fn rewrite_authorship_after_rebase_v2(
     // Only load file contents for files that actually change — skip unchanged files.
     let va_phase_start = std::time::Instant::now();
 
-    let (mut current_attributions, mut current_file_contents, initial_prompts, _rebase_ts) =
-        if let Some((attrs, contents, prompts)) = try_reconstruct_attributions_from_notes_cached(
+    let (mut current_attributions, mut current_file_contents, initial_prompts, initial_humans, _rebase_ts) =
+        if let Some((attrs, contents, prompts, humans)) = try_reconstruct_attributions_from_notes_cached(
             repo,
             original_head,
             original_commits,
@@ -1259,7 +1269,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
-            (attrs, contents, prompts, ts)
+            (attrs, contents, prompts, humans, ts)
         } else {
             debug_log("Falling back to VirtualAttributions (blame-based reconstruction)");
             let new_head = new_commits.last().unwrap();
@@ -1302,8 +1312,9 @@ pub fn rewrite_authorship_after_rebase_v2(
                 prompts.insert(prompt_id.clone(), commit_map.clone());
             }
 
+            let humans = current_va.humans.clone();
             let ts = current_va.timestamp();
-            (attrs, contents, prompts, ts)
+            (attrs, contents, prompts, humans, ts)
         };
 
     timing_phases.push((
@@ -1397,6 +1408,7 @@ pub fn rewrite_authorship_after_rebase_v2(
     let current_authorship_log = build_authorship_log_from_state(
         original_head,
         &current_prompts,
+        &initial_humans,
         &current_attributions,
         &existing_files,
     );
@@ -2739,11 +2751,11 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
     let touched_files = working_log.all_touched_files()?;
     pathspecs.extend(touched_files);
 
-    // Check if original commit has an authorship log with prompts
+    // Check if original commit has an authorship log with prompts or humans
     let has_existing_log = get_reference_as_authorship_log_v3(repo, original_commit).is_ok();
-    let has_existing_prompts = if has_existing_log {
+    let has_existing_data = if has_existing_log {
         let original_log = get_reference_as_authorship_log_v3(repo, original_commit).unwrap();
-        !original_log.metadata.prompts.is_empty()
+        !original_log.metadata.prompts.is_empty() || !original_log.metadata.humans.is_empty()
     } else {
         false
     };
@@ -2757,7 +2769,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
                 repo_clone,
                 original_commit.to_string(),
                 &pathspecs_vec,
-                if has_existing_prompts {
+                if has_existing_data {
                     None
                 } else {
                     Some(human_author.clone())
@@ -2773,7 +2785,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
                 repo_clone,
                 original_commit.to_string(),
                 &pathspecs_vec,
-                if has_existing_prompts {
+                if has_existing_data {
                     None
                 } else {
                     Some(human_author.clone())
@@ -3292,8 +3304,11 @@ fn build_metadata_only_authorship_log_from_source_notes(
     source_commits: &[String],
     target_commit_sha: &str,
 ) -> Result<Option<AuthorshipLog>, GitAiError> {
+    use crate::authorship::authorship_log::HumanRecord;
+
     let mut merged_prompts = BTreeMap::new();
     let mut prompt_totals: HashMap<String, (u32, u32)> = HashMap::new();
+    let mut merged_humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
     let mut saw_any_note = false;
 
     for commit_sha in source_commits {
@@ -3307,6 +3322,9 @@ fn build_metadata_only_authorship_log_from_source_notes(
             entry.0 = entry.0.saturating_add(prompt_record.total_additions);
             entry.1 = entry.1.saturating_add(prompt_record.total_deletions);
             merged_prompts.insert(prompt_id, prompt_record);
+        }
+        for (hash, record) in log.metadata.humans {
+            merged_humans.entry(hash).or_insert(record);
         }
     }
 
@@ -3324,6 +3342,7 @@ fn build_metadata_only_authorship_log_from_source_notes(
     let mut authorship_log = AuthorshipLog::new();
     authorship_log.metadata.base_commit_sha = target_commit_sha.to_string();
     authorship_log.metadata.prompts = merged_prompts;
+    authorship_log.metadata.humans = merged_humans;
     Ok(Some(authorship_log))
 }
 
@@ -4056,6 +4075,7 @@ fn build_note_from_conflict_wl(
 fn build_authorship_log_from_state(
     base_commit_sha: &str,
     prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
+    humans: &BTreeMap<String, crate::authorship::authorship_log::HumanRecord>,
     attributions: &HashMap<
         String,
         (
@@ -4068,6 +4088,7 @@ fn build_authorship_log_from_state(
     let mut authorship_log = AuthorshipLog::new();
     authorship_log.metadata.base_commit_sha = base_commit_sha.to_string();
     authorship_log.metadata.prompts = flatten_prompts_for_metadata(prompts);
+    authorship_log.metadata.humans = humans.clone();
 
     for (file_path, (_, line_attrs)) in attributions {
         if !existing_files.contains(file_path) {
