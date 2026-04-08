@@ -52,7 +52,7 @@ impl Default for AuthorshipMetadata {
 /// This system only tracks AI-generated content, not human-authored content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttestationEntry {
-    /// Short hash (7 chars) that maps to an entry in the prompts section of the metadata
+    /// Short hash (16 chars) that maps to an entry in the prompts section of the metadata
     pub hash: String,
     /// Line ranges that this prompt is responsible for
     pub line_ranges: Vec<LineRange>,
@@ -625,14 +625,24 @@ fn needs_quoting(path: &str) -> bool {
     path.contains(' ') || path.contains('\t') || path.contains('\n')
 }
 
-/// Generate a short hash (7 characters) from agent_id and tool
+/// Generate a short hash (16 characters) from agent_id and tool
 pub fn generate_short_hash(agent_id: &str, tool: &str) -> String {
     let combined = format!("{}:{}", tool, agent_id);
     let mut hasher = Sha256::new();
     hasher.update(combined.as_bytes());
     let result = hasher.finalize();
-    // Take first 7 characters of the hex representation
+    // Take first 16 characters of the hex representation
     format!("{:x}", result)[..16].to_string()
+}
+
+/// Generate a short hash identifying a known human author from their git committer identity.
+/// Returns "h_" + first 14 hex chars of SHA256(author_identity) = 16 chars total.
+/// The "h_" prefix distinguishes human hashes from AI session hashes throughout the system.
+pub fn generate_human_short_hash(author_identity: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(author_identity.as_bytes());
+    let hex = format!("{:x}", hasher.finalize());
+    format!("h_{}", &hex[..14])
 }
 
 #[cfg(test)]
@@ -1349,5 +1359,21 @@ mod tests {
             .map(|attr| attr.end_line - attr.start_line + 1)
             .sum();
         assert_eq!(lines_session2, 20);
+    }
+
+    #[test]
+    fn test_generate_human_short_hash() {
+        let hash = generate_human_short_hash("Alice Smith <alice@example.com>");
+        // Must be exactly 16 chars: "h_" + 14 hex chars
+        assert_eq!(hash.len(), 16);
+        assert!(hash.starts_with("h_"));
+        assert_eq!(hash, "h_31dce776f88375");
+        // Must be deterministic
+        assert_eq!(
+            hash,
+            generate_human_short_hash("Alice Smith <alice@example.com>")
+        );
+        // Different identities → different hashes
+        assert_ne!(hash, generate_human_short_hash("Bob Jones <bob@example.com>"));
     }
 }
