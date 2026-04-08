@@ -1463,6 +1463,7 @@ fn checkpoint_kind_to_str(kind: CheckpointKind) -> &'static str {
         CheckpointKind::Human => "human",
         CheckpointKind::AiAgent => "ai_agent",
         CheckpointKind::AiTab => "ai_tab",
+        CheckpointKind::KnownHuman => "known_human",
     }
 }
 
@@ -1968,7 +1969,7 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
     let Some(result) = agent_run_result else {
         return;
     };
-    if result.checkpoint_kind == CheckpointKind::Human {
+    if !result.checkpoint_kind.is_ai() {
         return;
     }
 

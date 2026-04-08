@@ -1324,6 +1324,7 @@ fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
         "human" => Some(CheckpointKind::Human),
         "ai_agent" => Some(CheckpointKind::AiAgent),
         "ai_tab" => Some(CheckpointKind::AiTab),
+        "known_human" => Some(CheckpointKind::KnownHuman),
         _ => None,
     }
 }
@@ -2643,11 +2644,11 @@ fn rewrite_event_needs_authorship_processing(
     if has_initial {
         return Ok(true);
     }
-    let has_ai_checkpoints = working_log
+    let has_processable_checkpoints = working_log
         .read_all_checkpoints()?
         .iter()
         .any(|checkpoint| checkpoint.kind != CheckpointKind::Human);
-    Ok(has_ai_checkpoints)
+    Ok(has_processable_checkpoints)
 }
 
 fn deferred_commit_carryover_context(

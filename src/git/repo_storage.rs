@@ -613,7 +613,7 @@ impl PersistedWorkingLog {
                         touched_files.insert(entry.file);
                     }
                 }
-                CheckpointKind::Human => {
+                CheckpointKind::Human | CheckpointKind::KnownHuman => {
                     // Skip human checkpoints
                 }
             }
