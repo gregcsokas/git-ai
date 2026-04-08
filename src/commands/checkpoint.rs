@@ -804,7 +804,10 @@ fn execute_resolved_checkpoint(
         });
         if too_soon {
             debug_log(
-                "[KnownHuman] Rejected: fired within 1s of an AI checkpoint on the same file",
+                &format!(
+                    "[KnownHuman] Rejected: fired within {}s of an AI checkpoint on the same file",
+                    KNOWN_HUMAN_MIN_SECS_AFTER_AI
+                ),
             );
             return Ok((0, 0, 0));
         }
@@ -1547,7 +1550,7 @@ fn get_previous_content_from_head(
 }
 
 fn is_ai_author_id(author_id: &str) -> bool {
-    author_id != CheckpointKind::Human.to_str() && !author_id.starts_with("h_")
+    author_id != "human" && !author_id.starts_with("h_")
 }
 
 fn working_log_entry_has_non_human_attribution(entry: &WorkingLogEntry) -> bool {
