@@ -694,9 +694,15 @@ fn handle_checkpoint(args: &[String]) {
                         }
                     }
                 }
-                let _ = (editor, editor_version, extension_version); // metadata stored on Checkpoint by checkpoint.rs
-
                 let edited_filepaths = if files.is_empty() { None } else { Some(files) };
+
+                let known_human_agent_metadata = {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("kh_editor".to_string(), editor);
+                    m.insert("kh_editor_version".to_string(), editor_version);
+                    m.insert("kh_extension_version".to_string(), extension_version);
+                    m
+                };
 
                 agent_run_result = Some(AgentRunResult {
                     agent_id: AgentId {
@@ -704,7 +710,7 @@ fn handle_checkpoint(args: &[String]) {
                         id: "known_human_session".to_string(),
                         model: "unknown".to_string(),
                     },
-                    agent_metadata: None,
+                    agent_metadata: Some(known_human_agent_metadata),
                     checkpoint_kind: CheckpointKind::KnownHuman,
                     transcript: None,
                     repo_working_dir: None,
