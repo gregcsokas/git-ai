@@ -260,12 +260,13 @@ fn print_help() {
     eprintln!("Commands:");
     eprintln!("  checkpoint         Checkpoint working changes and attribute author");
     eprintln!(
-        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, ai_tab, firebender, mock_ai"
+        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, ai_tab, firebender, mock_ai, mock_known_human, known_human"
     );
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
     );
-    eprintln!("    mock_ai [pathspecs...]      Test preset accepting optional file pathspecs");
+    eprintln!("    mock_ai [pathspecs...]           Test preset accepting optional file pathspecs");
+    eprintln!("    mock_known_human [pathspecs...]  Test preset for KnownHuman checkpoints");
     eprintln!("  log [args...]      Show commit log with AI authorship notes");
     eprintln!(
         "                        Proxies git log --notes=ai with all standard git log options"
@@ -649,6 +650,36 @@ fn handle_checkpoint(args: &[String]) {
                     },
                     agent_metadata: None,
                     checkpoint_kind: CheckpointKind::AiAgent,
+                    transcript: None,
+                    repo_working_dir: None,
+                    edited_filepaths,
+                    will_edit_filepaths: None,
+                    dirty_files: None,
+                    captured_checkpoint_id: None,
+                });
+            }
+            "mock_known_human" => {
+                // Test preset: KnownHuman checkpoint for given paths (mirrors mock_ai behavior)
+                let edited_filepaths = if args.len() > 1 {
+                    let mut paths = Vec::new();
+                    for arg in &args[1..] {
+                        if !arg.starts_with("--") {
+                            paths.push(arg.clone());
+                        }
+                    }
+                    if paths.is_empty() { None } else { Some(paths) }
+                } else {
+                    None
+                };
+
+                agent_run_result = Some(AgentRunResult {
+                    agent_id: AgentId {
+                        tool: "mock_known_human".to_string(),
+                        id: "mock_known_human_session".to_string(),
+                        model: "unknown".to_string(),
+                    },
+                    agent_metadata: None,
+                    checkpoint_kind: CheckpointKind::KnownHuman,
                     transcript: None,
                     repo_working_dir: None,
                     edited_filepaths,
