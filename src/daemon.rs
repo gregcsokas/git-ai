@@ -1291,6 +1291,34 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
     }
 }
 
+fn compute_watermarks_from_stat(
+    repo_working_dir: &str,
+    file_paths: &[String],
+) -> std::collections::HashMap<String, u128> {
+    let repo_root = std::path::Path::new(repo_working_dir);
+    let mut watermarks = std::collections::HashMap::new();
+    for path in file_paths {
+        let full_path = repo_root.join(path);
+        if let Ok(metadata) = std::fs::symlink_metadata(&full_path)
+            && let Ok(mtime) = metadata.modified()
+        {
+            let nanos = mtime
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            // Normalize watermark keys the same way bash_tool::normalize_path does
+            // so that case-folded snapshot lookups on macOS/Windows find a match.
+            let key = crate::commands::checkpoint_agent::bash_tool::normalize_path(
+                std::path::Path::new(path),
+            )
+            .to_string_lossy()
+            .to_string();
+            watermarks.insert(key, nanos);
+        }
+    }
+    watermarks
+}
+
 fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
     match value {
         "human" => Some(CheckpointKind::Human),
@@ -1687,6 +1715,7 @@ fn build_human_replay_agent_result(
         edited_filepaths: None,
         will_edit_filepaths: Some(files),
         dirty_files: Some(dirty_files),
+        captured_checkpoint_id: None,
     }
 }
 
@@ -2364,19 +2393,40 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     if base_commit.trim().is_empty() || target_commit.trim().is_empty() {
         return Ok(());
     }
-    let dirty_files = if let Some(snapshot) = carryover_snapshot {
-        snapshot.clone()
+
+    // Resolve the repo working directory once — needed for bash snapshot checks below.
+    let repo_workdir = repo
+        .workdir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let repo_root = std::path::Path::new(&repo_workdir);
+
+    let committed_diff_base = if base_commit == "initial" {
+        None
     } else {
-        committed_file_snapshot_between_commits(
-            repo,
-            if base_commit == "initial" {
-                None
-            } else {
-                Some(base_commit.as_str())
-            },
-            &target_commit,
-        )?
+        Some(base_commit.as_str())
     };
+
+    let dirty_files = if let Some(snapshot) = carryover_snapshot {
+        let mut dirty = snapshot.clone();
+        // The carryover snapshot only tracks files already in the working log at
+        // checkpoint time.  When a bash tool is in-flight at commit time, files
+        // edited *after* the last checkpoint (e.g. modified between PostToolUse A
+        // and the final commit) are absent from the snapshot.  Supplement with the
+        // full committed diff so those files also receive attribution.
+        if crate::commands::checkpoint_agent::bash_tool::has_active_bash_inflight(repo_root)
+            && let Ok(full_diff) =
+                committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)
+        {
+            for (path, content) in full_diff {
+                dirty.entry(path).or_insert(content);
+            }
+        }
+        dirty
+    } else {
+        committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)?
+    };
+
     let changed_files = commit_replay_files_from_snapshot(&dirty_files);
     if changed_files.is_empty() {
         return Ok(());
@@ -2387,12 +2437,50 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     if changed_files.is_empty() {
         return Ok(());
     }
-    let replay_agent_result = build_human_replay_agent_result(changed_files, dirty_files);
+
+    // Mirror the wrapper-mode pre-commit hook: if a bash tool is in-flight when
+    // the commit lands, attribute the committed files to that AI agent rather than
+    // writing a synthetic Human checkpoint.  Bash snapshot files are written at
+    // PreToolUse time and live for 300 s, so they are always present on disk when
+    // the daemon processes the trace2 commit event (typically < 1 s later).
+    let (checkpoint_kind, replay_agent_result) =
+        match crate::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash(
+            repo_root,
+            &repo_workdir,
+        ) {
+            Some((kind, Some(ai_result))) => {
+                // Bash in flight with full context — attribute committed files to the AI agent.
+                // AiAgent checkpoints use `edited_filepaths` (not `will_edit_filepaths`) for the
+                // explicit path list, matching how `explicit_capture_target_paths` dispatches.
+                let result = AgentRunResult {
+                    edited_filepaths: Some(changed_files),
+                    dirty_files: Some(dirty_files),
+                    will_edit_filepaths: None,
+                    ..ai_result
+                };
+                (kind, result)
+            }
+            Some((kind, None)) => {
+                // Bash in flight but no context details — use AI kind with daemon agent_id.
+                let result = AgentRunResult {
+                    edited_filepaths: Some(changed_files),
+                    dirty_files: Some(dirty_files),
+                    will_edit_filepaths: None,
+                    checkpoint_kind: kind,
+                    ..build_human_replay_agent_result(vec![], HashMap::new())
+                };
+                (kind, result)
+            }
+            None => {
+                let result = build_human_replay_agent_result(changed_files, dirty_files);
+                (CheckpointKind::Human, result)
+            }
+        };
 
     crate::commands::checkpoint::run_with_base_commit_override_with_policy(
         repo,
         author,
-        CheckpointKind::Human,
+        checkpoint_kind,
         true,
         Some(replay_agent_result),
         base_commit != "initial",
@@ -5414,6 +5502,31 @@ impl ActorDaemonCoordinator {
                         CheckpointRunRequest::Live(_) => None,
                     };
                     // Compute before the future consumes `request`.
+                    let repo_wd = request.repo_working_dir().to_string();
+                    let checkpoint_file_paths: Vec<String> = match request.as_ref() {
+                        CheckpointRunRequest::Live(req) => req
+                            .agent_run_result
+                            .as_ref()
+                            .and_then(|r| {
+                                r.edited_filepaths
+                                    .clone()
+                                    .or_else(|| r.will_edit_filepaths.clone())
+                            })
+                            .unwrap_or_default(),
+                        CheckpointRunRequest::Captured(req) => {
+                            crate::commands::checkpoint::load_captured_checkpoint_manifest(
+                                &req.capture_id,
+                            )
+                            .ok()
+                            .map(|m| m.files.iter().map(|f| f.path.clone()).collect())
+                            .unwrap_or_default()
+                        }
+                    };
+                    // Extract kind before request is consumed by apply_checkpoint_side_effect.
+                    let is_live_human_checkpoint = matches!(
+                        request.as_ref(),
+                        CheckpointRunRequest::Live(req) if req.kind.as_deref() == Some("human")
+                    );
                     let should_log_completion =
                         crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
                     // Wrap checkpoint processing in catch_unwind to recover from panics.
@@ -5466,6 +5579,51 @@ impl ActorDaemonCoordinator {
                             )))
                         }
                     };
+                    if result.is_ok() {
+                        let per_file = if !checkpoint_file_paths.is_empty() {
+                            compute_watermarks_from_stat(&repo_wd, &checkpoint_file_paths)
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        // Advance the worktree watermark for every live Human checkpoint so
+                        // the bash tool pre-hook always has a baseline for files not covered
+                        // by a per-file (scoped) watermark.
+                        //
+                        // Previously this was restricted to `checkpoint_file_paths.is_empty()`,
+                        // but bare-CLI `git-ai checkpoint` always populates file paths via
+                        // `get_all_files_for_mock_ai`, so the condition was never true and the
+                        // Tier-2 worktree watermark was never set. Removing that restriction
+                        // means the worktree baseline is always updated on Human checkpoints.
+                        //
+                        // Per-file (Tier 1) watermarks set above take precedence in
+                        // `find_stale_files`, so this does not cause false positives for
+                        // files already covered by a scoped checkpoint.
+                        // AiAgent checkpoints must NOT set the baseline (no guarantee all
+                        // human-edited files were captured). Captured checkpoints are always
+                        // scoped and never reach this branch.
+                        let is_full_human_checkpoint = is_live_human_checkpoint;
+                        let per_worktree = if is_full_human_checkpoint {
+                            let now_ns = std::time::SystemTime::now()
+                                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos();
+                            std::collections::HashMap::from([(repo_wd.clone(), now_ns)])
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        if !per_file.is_empty() || !per_worktree.is_empty() {
+                            let _ = self
+                                .coordinator
+                                .update_watermarks_family(
+                                    Path::new(&repo_wd),
+                                    crate::daemon::domain::WatermarkState {
+                                        per_file,
+                                        per_worktree,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
                     if let Some(capture_id) = captured_checkpoint_id
                         && let Err(cleanup_error) =
                             crate::commands::checkpoint::delete_captured_checkpoint(&capture_id)
@@ -6777,6 +6935,15 @@ impl ActorDaemonCoordinator {
         Ok(ControlResponse::ok(None, None))
     }
 
+    async fn watermarks_for_family(
+        &self,
+        repo_working_dir: String,
+    ) -> Result<crate::daemon::domain::WatermarkState, GitAiError> {
+        self.coordinator
+            .watermarks_family(Path::new(&repo_working_dir))
+            .await
+    }
+
     async fn status_for_family(
         &self,
         repo_working_dir: String,
@@ -6810,6 +6977,18 @@ impl ActorDaemonCoordinator {
                     serde_json::to_value(status)
                         .map(|v| ControlResponse::ok(None, Some(v)))
                         .map_err(GitAiError::from)
+                }),
+            ControlRequest::SnapshotWatermarks { repo_working_dir } => self
+                .watermarks_for_family(repo_working_dir.clone())
+                .await
+                .and_then(|ws| {
+                    let worktree_wm = ws.per_worktree.get(&repo_working_dir).copied();
+                    serde_json::to_value(json!({
+                        "watermarks": ws.per_file,
+                        "worktree_watermark": worktree_wm,
+                    }))
+                    .map(|v| ControlResponse::ok(None, Some(v)))
+                    .map_err(GitAiError::from)
                 }),
             ControlRequest::SubmitTelemetry { envelopes } => {
                 if let Some(worker) = &self.telemetry_worker {
@@ -7599,6 +7778,7 @@ fn checkpoint_control_response_timeout(
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         }
         ControlRequest::CheckpointRun { .. } => DAEMON_CONTROL_RESPONSE_TIMEOUT,
+        ControlRequest::SnapshotWatermarks { .. } => Duration::from_millis(500),
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
 }
@@ -7978,6 +8158,55 @@ mod tests {
             normalize_commit_carryover_snapshot(Some(&carryover), Some(&committed)).unwrap();
 
         assert_eq!(normalized.get("example.txt"), committed.get("example.txt"));
+    }
+
+    #[test]
+    fn compute_watermarks_uses_symlink_metadata_not_target_mtime() {
+        // Verify that compute_watermarks_from_stat uses lstat (symlink's own mtime)
+        // not stat (target file's mtime), consistent with snapshot's symlink_metadata.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        // Create a target file
+        let target = dir.join("target.txt");
+        std::fs::write(&target, b"hello").unwrap();
+
+        // Create a symlink pointing to the target
+        let link = dir.join("link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+
+        // Watermark the symlink
+        let wm = compute_watermarks_from_stat(dir.to_str().unwrap(), &["link.txt".to_string()]);
+
+        // The watermark should match symlink_metadata mtime, not target metadata mtime.
+        let symlink_meta = std::fs::symlink_metadata(&link).unwrap();
+        let target_meta = std::fs::metadata(&link).unwrap(); // follows symlink
+
+        let symlink_mtime = symlink_meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target_mtime = target_meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        let recorded = *wm.get("link.txt").unwrap();
+
+        assert_eq!(
+            recorded, symlink_mtime,
+            "watermark should match lstat mtime of the symlink itself"
+        );
+        // This assertion documents the intent: if symlink and target mtimes differ,
+        // the watermark must track the symlink, not the target.
+        let _ = target_mtime; // used only as documentation; may equal symlink_mtime on some FS
     }
 
     #[test]
