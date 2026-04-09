@@ -17,12 +17,14 @@ fn fake_copilot_transcript_path(repo: &TestRepo) -> String {
 fn test_replace_string_in_file_basic() {
     let repo = TestRepo::new();
 
-    // Create initial file
-    let mut file = repo.filename("foo.py");
-    file.set_contents(crate::lines!["# Human comment"]);
-    repo.stage_all_and_commit("Initial commit").unwrap();
-
+    // Create initial file with raw I/O (not helpers that trigger checkpoints)
     let file_path = repo.path().join("foo.py");
+    std::fs::write(&file_path, "# Human comment\n").unwrap();
+
+    // Commit with direct git commands
+    repo.git(&["add", "foo.py"]).unwrap();
+    repo.git(&["commit", "-m", "Initial commit"]).unwrap();
+
     let session_id = "0ae773c0-f1c2-4904-bd18-fb1046ff61cd";
 
     // PreToolUse hook
@@ -49,19 +51,8 @@ fn test_replace_string_in_file_basic() {
     ])
     .unwrap();
 
-    // AI makes the edit
-    file.set_contents(crate::lines![
-        "# Human comment",
-        "import argparse",
-        "",
-        "def main():",
-        "    parser = argparse.ArgumentParser(description=\"Hello World CLI\")",
-        "    parser.parse_args()",
-        "    print(\"Hello, World!\")",
-        "",
-        "if __name__ == \"__main__\":",
-        "    main()"
-    ]);
+    // AI makes the edit with raw I/O
+    std::fs::write(&file_path, "# Human comment\nimport argparse\n\ndef main():\n    parser = argparse.ArgumentParser(description=\"Hello World CLI\")\n    parser.parse_args()\n    print(\"Hello, World!\")\n\nif __name__ == \"__main__\":\n    main()\n").unwrap();
 
     // PostToolUse hook
     let post_hook_input = json!({
@@ -91,12 +82,16 @@ fn test_replace_string_in_file_basic() {
     // Sync daemon before assertions
     repo.sync_daemon();
 
-    repo.stage_all_and_commit("Add CLI functionality").unwrap();
+    // Commit with direct git commands
+    repo.git(&["add", "foo.py"]).unwrap();
+    repo.git(&["commit", "-m", "Add CLI functionality"])
+        .unwrap();
 
     // Sync daemon again after commit to ensure notes are written
     repo.sync_daemon();
 
     // AI-added lines should be attributed to AI
+    let mut file = repo.filename("foo.py");
     file.assert_lines_and_blame(crate::lines![
         "# Human comment".human(),
         "import argparse".ai(),
