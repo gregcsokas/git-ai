@@ -1,3 +1,4 @@
+
 use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
@@ -1037,10 +1038,13 @@ impl Repository {
         supress_output: bool,
         apply_side_effects: bool,
     ) {
-        let log = self
-            .storage
-            .append_rewrite_event(rewrite_log_event.clone())
-            .expect("Error writing .git/ai/rewrite_log");
+        let log = match self.storage.append_rewrite_event(rewrite_log_event.clone()) {
+            Ok(log) => log,
+            Err(e) => {
+                tracing::debug!("Error writing .git/ai/rewrite_log: {}", e);
+                return;
+            }
+        };
 
         if apply_side_effects
             && let Err(error) = rewrite_authorship_if_needed(
