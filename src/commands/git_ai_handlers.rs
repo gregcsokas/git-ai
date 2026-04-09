@@ -660,41 +660,68 @@ fn handle_checkpoint(args: &[String]) {
             }
             "known_human" => {
                 // Production preset: IDE extension attests human-authored lines.
-                // Usage: git ai checkpoint known_human [--editor <name>]
-                //        [--editor-version <ver>] [--extension-version <ver>] -- file...
-                let mut editor = "unknown".to_string();
-                let mut editor_version = "unknown".to_string();
-                let mut extension_version = "unknown".to_string();
-                let mut files: Vec<String> = Vec::new();
-                let mut i = 1usize; // skip "known_human"
-                while i < args.len() {
-                    match args[i].as_str() {
-                        "--editor" if i + 1 < args.len() => {
-                            editor = args[i + 1].clone();
-                            i += 2;
+                // Stdin mode (--hook-input stdin): all data passed as JSON on stdin:
+                //   { "editor": "...", "editor_version": "...", "extension_version": "...",
+                //     "cwd": "/abs/path", "edited_filepaths": [...], "dirty_files": {...} }
+                // CLI mode: git ai checkpoint known_human [--editor <name>]
+                //           [--editor-version <ver>] [--extension-version <ver>] -- file...
+                let (editor, editor_version, extension_version, repo_working_dir, edited_filepaths, dirty_files) =
+                    if let Some(ref json_str) = hook_input {
+                        let v: serde_json::Value = serde_json::from_str(json_str)
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                        let editor = v["editor"].as_str().unwrap_or("unknown").to_string();
+                        let editor_version = v["editor_version"].as_str().unwrap_or("unknown").to_string();
+                        let extension_version = v["extension_version"].as_str().unwrap_or("unknown").to_string();
+                        let cwd = v["cwd"].as_str().map(str::to_string);
+                        let edited_filepaths = v["edited_filepaths"]
+                            .as_array()
+                            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>())
+                            .filter(|v| !v.is_empty());
+                        let dirty_files = v["dirty_files"]
+                            .as_object()
+                            .map(|obj| {
+                                obj.iter()
+                                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                    .collect::<std::collections::HashMap<String, String>>()
+                            })
+                            .filter(|m| !m.is_empty());
+                        (editor, editor_version, extension_version, cwd, edited_filepaths, dirty_files)
+                    } else {
+                        let mut editor = "unknown".to_string();
+                        let mut editor_version = "unknown".to_string();
+                        let mut extension_version = "unknown".to_string();
+                        let mut files: Vec<String> = Vec::new();
+                        let mut i = 1usize; // skip "known_human"
+                        while i < args.len() {
+                            match args[i].as_str() {
+                                "--editor" if i + 1 < args.len() => {
+                                    editor = args[i + 1].clone();
+                                    i += 2;
+                                }
+                                "--editor-version" if i + 1 < args.len() => {
+                                    editor_version = args[i + 1].clone();
+                                    i += 2;
+                                }
+                                "--extension-version" if i + 1 < args.len() => {
+                                    extension_version = args[i + 1].clone();
+                                    i += 2;
+                                }
+                                "--" => {
+                                    files.extend(args[i + 1..].iter().cloned());
+                                    break;
+                                }
+                                arg if !arg.starts_with("--") => {
+                                    files.push(arg.to_string());
+                                    i += 1;
+                                }
+                                _ => {
+                                    i += 1;
+                                }
+                            }
                         }
-                        "--editor-version" if i + 1 < args.len() => {
-                            editor_version = args[i + 1].clone();
-                            i += 2;
-                        }
-                        "--extension-version" if i + 1 < args.len() => {
-                            extension_version = args[i + 1].clone();
-                            i += 2;
-                        }
-                        "--" => {
-                            files.extend(args[i + 1..].iter().cloned());
-                            break;
-                        }
-                        arg if !arg.starts_with("--") => {
-                            files.push(arg.to_string());
-                            i += 1;
-                        }
-                        _ => {
-                            i += 1;
-                        }
-                    }
-                }
-                let edited_filepaths = if files.is_empty() { None } else { Some(files) };
+                        let edited_filepaths = if files.is_empty() { None } else { Some(files) };
+                        (editor, editor_version, extension_version, None, edited_filepaths, None)
+                    };
 
                 let known_human_agent_metadata = {
                     let mut m = std::collections::HashMap::new();
@@ -713,10 +740,10 @@ fn handle_checkpoint(args: &[String]) {
                     agent_metadata: Some(known_human_agent_metadata),
                     checkpoint_kind: CheckpointKind::KnownHuman,
                     transcript: None,
-                    repo_working_dir: None,
+                    repo_working_dir,
                     edited_filepaths,
                     will_edit_filepaths: None,
-                    dirty_files: None,
+                    dirty_files,
                     captured_checkpoint_id: None,
                 });
             }
