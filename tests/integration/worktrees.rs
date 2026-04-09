@@ -3,6 +3,7 @@ use crate::repos::test_repo::GitTestMode;
 use crate::test_utils::fixture_path;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log::PromptRecord;
+use git_ai::authorship::stats::CommitStats;
 use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::{AgentId, CheckpointKind};
 use git_ai::git::repository as GitAiRepository;
@@ -14,6 +15,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn stats_from_args(repo: &crate::repos::test_repo::TestRepo, args: &[&str]) -> CommitStats {
+    let raw = repo.git_ai(args).expect("git-ai stats should succeed");
+    let start = raw.find('{').unwrap_or(0);
+    let end = raw.rfind('}').unwrap_or(raw.len().saturating_sub(1));
+    serde_json::from_str(&raw[start..=end]).expect("valid stats json")
+}
 
 fn run_git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -475,6 +483,56 @@ crate::worktree_test_wrappers! {
         } else {
             assert_debug_snapshot!(stats);
         }
+    }
+}
+
+crate::worktree_test_wrappers! {
+    fn stats_head_arg_uses_worktree_head() {
+        // Regression test for issue #285: `git-ai stats head` in a worktree was
+        // resolving HEAD to the *main* repository's HEAD instead of the worktree's
+        // own HEAD, so it reported 100% human even for AI-heavy commits.
+        let repo = TestRepo::new();
+
+        // Make an AI-only commit in the worktree. At this point the worktree's
+        // HEAD has diverged from the main repo's initial (empty) commit.
+        let mut file = repo.filename("ai_work.txt");
+        file.set_contents(crate::lines!["line_a".ai(), "line_b".ai()]);
+        let commit = repo.stage_all_and_commit("ai commit in worktree").unwrap();
+
+        // Sanity: the explicit-SHA path works correctly.
+        let stats_by_sha = stats_from_args(
+            &repo,
+            &["stats", &commit.commit_sha, "--json"],
+        );
+        assert!(
+            stats_by_sha.git_diff_added_lines > 0,
+            "explicit SHA stats should see the 2 added lines"
+        );
+
+        // `stats HEAD` (uppercase) must resolve to the worktree's HEAD, not the
+        // main repo's initial empty commit.
+        let stats_head_upper = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+        assert_eq!(
+            stats_head_upper.git_diff_added_lines,
+            stats_by_sha.git_diff_added_lines,
+            "`stats HEAD` (uppercase) must match `stats <sha>`: got {} vs {}",
+            stats_head_upper.git_diff_added_lines,
+            stats_by_sha.git_diff_added_lines,
+        );
+
+        // `stats head` (lowercase) must behave identically to `stats HEAD` on
+        // all platforms.  Before this fix, on case-insensitive filesystems
+        // (macOS) 'head' could resolve to the *main* repo's HEAD instead of the
+        // worktree's own HEAD; on case-sensitive Linux it was rejected outright.
+        // The fix normalises 'head' → 'HEAD' before the git call.
+        let stats_head_lower = stats_from_args(&repo, &["stats", "head", "--json"]);
+        assert_eq!(
+            stats_head_lower.git_diff_added_lines,
+            stats_by_sha.git_diff_added_lines,
+            "`stats head` (lowercase) must match `stats <sha>`: got {} vs {}",
+            stats_head_lower.git_diff_added_lines,
+            stats_by_sha.git_diff_added_lines,
+        );
     }
 }
 
