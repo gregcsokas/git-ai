@@ -6452,7 +6452,8 @@ mod tests {
         let default_branch = repo.current_branch().expect("default branch");
 
         // --- Feature branch: commit A (5 AI lines in feature.txt) ---
-        repo.create_branch("feature").expect("create feature branch");
+        repo.create_branch("feature")
+            .expect("create feature branch");
         let content_a = "line1\nline2\nai-line3\nai-line4\nai-line5\nai-line6\nai-line7\nline8\nline9\nline10\n";
         repo.write_file("feature.txt", content_a, true)
             .expect("write feature.txt for commit A");
@@ -6536,7 +6537,8 @@ mod tests {
         let main_content = format!("header\n{}", base_content);
         repo.write_file("feature.txt", &main_content, true)
             .expect("write main feature.txt");
-        repo.commit_with_message("main-advance").expect("commit main advance");
+        repo.commit_with_message("main-advance")
+            .expect("commit main advance");
 
         // --- Cherry-pick A and B onto main ---
         repo.cherry_pick(&[&sha_a]).expect("cherry-pick A");
@@ -6563,8 +6565,7 @@ mod tests {
         {
             let note_raw =
                 show_authorship_note(repo.gitai_repo(), &new_a).expect("read new_A note");
-            let log =
-                AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_A note");
+            let log = AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_A note");
 
             let record = log
                 .metadata
@@ -6607,8 +6608,7 @@ mod tests {
         {
             let note_raw =
                 show_authorship_note(repo.gitai_repo(), &new_b).expect("read new_B note");
-            let log =
-                AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_B note");
+            let log = AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_B note");
 
             let record = log
                 .metadata
