@@ -339,7 +339,9 @@ impl VirtualAttributions {
 
         // Load known human records from INITIAL attributions
         for (hash, human_record) in &initial_attributions.humans {
-            humans.entry(hash.clone()).or_insert_with(|| human_record.clone());
+            humans
+                .entry(hash.clone())
+                .or_insert_with(|| human_record.clone());
         }
 
         // Process INITIAL attributions
@@ -401,9 +403,10 @@ impl VirtualAttributions {
             }
 
             if checkpoint.kind == CheckpointKind::KnownHuman {
-                let hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
-                    &checkpoint.author,
-                );
+                let hash =
+                    crate::authorship::authorship_log_serialization::generate_human_short_hash(
+                        &checkpoint.author,
+                    );
                 humans.entry(hash).or_insert_with(|| HumanRecord {
                     author: checkpoint.author.clone(),
                 });
@@ -504,7 +507,9 @@ impl VirtualAttributions {
 
         // Load known human records from INITIAL attributions
         for (hash, human_record) in &initial_attributions.humans {
-            humans.entry(hash.clone()).or_insert_with(|| human_record.clone());
+            humans
+                .entry(hash.clone())
+                .or_insert_with(|| human_record.clone());
         }
 
         for (file_path, line_attrs) in &initial_attributions.files {
@@ -556,9 +561,10 @@ impl VirtualAttributions {
             }
 
             if checkpoint.kind == CheckpointKind::KnownHuman {
-                let hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
-                    &checkpoint.author,
-                );
+                let hash =
+                    crate::authorship::authorship_log_serialization::generate_human_short_hash(
+                        &checkpoint.author,
+                    );
                 humans.entry(hash).or_insert_with(|| HumanRecord {
                     author: checkpoint.author.clone(),
                 });
@@ -651,7 +657,9 @@ impl VirtualAttributions {
 
         // Load known human records from INITIAL attributions
         for (hash, human_record) in &initial_attributions.humans {
-            humans.entry(hash.clone()).or_insert_with(|| human_record.clone());
+            humans
+                .entry(hash.clone())
+                .or_insert_with(|| human_record.clone());
         }
 
         for (file_path, line_attrs) in &initial_attributions.files {
@@ -703,9 +711,10 @@ impl VirtualAttributions {
             }
 
             if checkpoint.kind == CheckpointKind::KnownHuman {
-                let hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
-                    &checkpoint.author,
-                );
+                let hash =
+                    crate::authorship::authorship_log_serialization::generate_human_short_hash(
+                        &checkpoint.author,
+                    );
                 humans.entry(hash).or_insert_with(|| HumanRecord {
                     author: checkpoint.author.clone(),
                 });
@@ -1912,8 +1921,7 @@ pub fn merge_attributions_favoring_first(
         VirtualAttributions::merge_prompts_picking_newest(&[&primary.prompts, &secondary.prompts]);
 
     // Merge humans from both VAs
-    let merged_humans =
-        VirtualAttributions::merge_humans(&primary.humans, &secondary.humans);
+    let merged_humans = VirtualAttributions::merge_humans(&primary.humans, &secondary.humans);
 
     let mut merged = VirtualAttributions {
         repo,

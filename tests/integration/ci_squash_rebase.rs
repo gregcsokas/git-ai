@@ -227,7 +227,10 @@ fn test_ci_squash_merge_mixed_content() {
         merge_log.metadata.humans.contains_key("h_9e95a89b42f1fb"),
         "squash note should carry h_9e95a89b42f1fb from human-attributed lines in mixed content"
     );
-    assert_eq!(merge_log.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        merge_log.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
 
     // Verify mixed authorship is preserved
     file.assert_lines_and_blame(crate::lines![
@@ -407,7 +410,10 @@ fn test_ci_squash_merge_with_manual_changes() {
         merge_log.metadata.humans.contains_key("h_9e95a89b42f1fb"),
         "squash note should carry h_9e95a89b42f1fb from human-attributed lines in config"
     );
-    assert_eq!(merge_log.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        merge_log.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
 
     // Verify AI authorship is preserved for AI lines, human for manual additions
     file.assert_lines_and_blame(crate::lines![
@@ -497,7 +503,10 @@ fn test_ci_rebase_merge_multiple_commits() {
         merge_log.metadata.humans.contains_key("h_9e95a89b42f1fb"),
         "squash note should carry h_9e95a89b42f1fb from human function lines"
     );
-    assert_eq!(merge_log.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        merge_log.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
 
     // Verify all authorship is correctly attributed
     file.assert_lines_and_blame(crate::lines![
@@ -1241,7 +1250,10 @@ fn test_ci_rebase_merge_multiple_commits_standard_human() {
     let mut file = repo.filename("app.js");
 
     // Create initial commit
-    file.set_contents(crate::lines!["// App v1".unattributed_human(), "".unattributed_human()]);
+    file.set_contents(crate::lines![
+        "// App v1".unattributed_human(),
+        "".unattributed_human()
+    ]);
     let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
     repo.git(&["branch", "-M", "main"]).unwrap();
 

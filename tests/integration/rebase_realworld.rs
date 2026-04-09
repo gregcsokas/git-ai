@@ -9704,16 +9704,23 @@ fn test_conflict_ai_resolves_timeout_constant() {
     // Verify per-commit-delta humans scoping (KnownHuman variant)
     let conflict_note = parse_note(&repo, &chain[2]); // X = conflict commit index
     assert!(
-        conflict_note.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        conflict_note
+            .metadata
+            .humans
+            .contains_key("h_9e95a89b42f1fb"),
         "c3' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
     );
-    assert_eq!(conflict_note.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
         if i != 2 {
             assert!(
                 parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry", i
+                "chain[{}] (pure AI commit) should have no humans entry",
+                i
             );
         }
     }
@@ -10139,16 +10146,23 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
     // Verify per-commit-delta humans scoping (KnownHuman variant)
     let conflict_note = parse_note(&repo, &chain[2]); // X = conflict commit index
     assert!(
-        conflict_note.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        conflict_note
+            .metadata
+            .humans
+            .contains_key("h_9e95a89b42f1fb"),
         "c3' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
     );
-    assert_eq!(conflict_note.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
         if i != 2 {
             assert!(
                 parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry", i
+                "chain[{}] (pure AI commit) should have no humans entry",
+                i
             );
         }
     }
@@ -10330,16 +10344,23 @@ fn test_conflict_ai_resolves_on_first_commit() {
     // Verify per-commit-delta humans scoping (KnownHuman variant)
     let conflict_note = parse_note(&repo, &chain[0]); // X = conflict commit index
     assert!(
-        conflict_note.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        conflict_note
+            .metadata
+            .humans
+            .contains_key("h_9e95a89b42f1fb"),
         "c1' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
     );
-    assert_eq!(conflict_note.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
         if i != 0 {
             assert!(
                 parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry", i
+                "chain[{}] (pure AI commit) should have no humans entry",
+                i
             );
         }
     }
@@ -10529,16 +10550,23 @@ fn test_conflict_ai_resolves_on_last_commit() {
     // Verify per-commit-delta humans scoping (KnownHuman variant)
     let conflict_note = parse_note(&repo, &chain[4]); // X = conflict commit index
     assert!(
-        conflict_note.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        conflict_note
+            .metadata
+            .humans
+            .contains_key("h_9e95a89b42f1fb"),
         "c5' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
     );
-    assert_eq!(conflict_note.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
         if i != 4 {
             assert!(
                 parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry", i
+                "chain[{}] (pure AI commit) should have no humans entry",
+                i
             );
         }
     }
@@ -10748,16 +10776,23 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
     // Verify per-commit-delta humans scoping (KnownHuman variant)
     let conflict_note = parse_note(&repo, &chain[2]); // X = conflict commit index
     assert!(
-        conflict_note.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        conflict_note
+            .metadata
+            .humans
+            .contains_key("h_9e95a89b42f1fb"),
         "c3' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
     );
-    assert_eq!(conflict_note.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
         if i != 2 {
             assert!(
                 parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry", i
+                "chain[{}] (pure AI commit) should have no humans entry",
+                i
             );
         }
     }
@@ -10942,16 +10977,23 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result() {
     // Verify per-commit-delta humans scoping (KnownHuman variant)
     let conflict_note = parse_note(&repo, &chain[1]); // X = conflict commit index
     assert!(
-        conflict_note.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        conflict_note
+            .metadata
+            .humans
+            .contains_key("h_9e95a89b42f1fb"),
         "c2' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
     );
-    assert_eq!(conflict_note.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
         if i != 1 {
             assert!(
                 parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry", i
+                "chain[{}] (pure AI commit) should have no humans entry",
+                i
             );
         }
     }
@@ -11158,16 +11200,23 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
     // Verify per-commit-delta humans scoping (KnownHuman variant)
     let conflict_note = parse_note(&repo, &chain[2]); // X = conflict commit index
     assert!(
-        conflict_note.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        conflict_note
+            .metadata
+            .humans
+            .contains_key("h_9e95a89b42f1fb"),
         "c3' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
     );
-    assert_eq!(conflict_note.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
         if i != 2 {
             assert!(
                 parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry", i
+                "chain[{}] (pure AI commit) should have no humans entry",
+                i
             );
         }
     }
@@ -11413,16 +11462,23 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
     // Verify per-commit-delta humans scoping (KnownHuman variant)
     let conflict_note = parse_note(&repo, &chain[3]); // X = conflict commit index
     assert!(
-        conflict_note.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        conflict_note
+            .metadata
+            .humans
+            .contains_key("h_9e95a89b42f1fb"),
         "c4' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
     );
-    assert_eq!(conflict_note.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+    assert_eq!(
+        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
+        "Test User"
+    );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
         if i != 3 {
             assert!(
                 parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry", i
+                "chain[{}] (pure AI commit) should have no humans entry",
+                i
             );
         }
     }
@@ -12032,7 +12088,6 @@ fn test_conflict_ai_resolves_timeout_constant_standard_human() {
     // C5': payments.py only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
     assert_note_files_exact(&repo, &chain[4], "c5_files", &["payments.py"]);
-
 }
 
 /// Test 3: processor.py — feature (C3) adds 5 AI lines to method2 body,
@@ -12237,7 +12292,6 @@ fn test_conflict_ai_resolves_preserving_human_context_lines_standard_human() {
     // C5': util_e.py only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
     assert_note_files_exact(&repo, &chain[4], "c5_files", &["util_e.py"]);
-
 }
 
 /// Test 4: version.py — conflict is on C1 (the VERY FIRST feature commit).
@@ -12412,7 +12466,6 @@ fn test_conflict_ai_resolves_on_first_commit_standard_human() {
     // C5': migration_guide.py only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
     assert_note_files_exact(&repo, &chain[4], "c5_files", &["migration_guide.py"]);
-
 }
 
 /// Test 5: schema.rs max_connections — conflict is on C5 (LAST feature commit).
@@ -12595,7 +12648,6 @@ fn test_conflict_ai_resolves_on_last_commit_standard_human() {
             ("SCHEMA_VERSION: u32 = 1", false),
         ],
     );
-
 }
 
 /// Test 6: config.py AND settings.py both conflict in C3.
@@ -12798,7 +12850,6 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit_standard_human() {
     // C5': serializers.py only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
     assert_note_files_exact(&repo, &chain[4], "c5_files", &["serializers.py"]);
-
 }
 
 /// Test 7: dispatcher.py — conflict on C2.  C3 and C4 also modify dispatcher.py
@@ -12976,7 +13027,6 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result_standard_human() {
     // C5': event_bus.py only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
     assert_note_files_exact(&repo, &chain[4], "c5_files", &["event_bus.py"]);
-
 }
 
 /// Test 8: models.rs struct fields — feature (C3) AI adds 4 new fields,
@@ -13176,7 +13226,6 @@ fn test_conflict_ai_resolves_rust_struct_fields_standard_human() {
     // C5': utils.rs only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
     assert_note_files_exact(&repo, &chain[4], "c5_files", &["src/utils.rs"]);
-
 }
 
 /// Test 9: service.py process_payment — feature (C4) AI implements a 20-line
@@ -13415,7 +13464,6 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling_standard_human
     // C5': utils.py only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
     assert_note_files_exact(&repo, &chain[4], "c5_files", &["utils.py"]);
-
 }
 
 crate::reuse_tests_in_worktree!(

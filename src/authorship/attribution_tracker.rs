@@ -2148,9 +2148,7 @@ fn find_dominant_author_for_line_candidates(
     let mut last_human_edit: Option<&Attribution> = None;
     for attr in &candidate_attrs {
         // Both legacy "human" and KnownHuman h_<hash> IDs are human edits.
-        if attr.author_id == CheckpointKind::Human.to_str()
-            || attr.author_id.starts_with("h_")
-        {
+        if attr.author_id == CheckpointKind::Human.to_str() || attr.author_id.starts_with("h_") {
             last_human_edit = Some(attr);
         } else {
             last_ai_edit = Some(attr);

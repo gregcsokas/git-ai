@@ -176,7 +176,10 @@ fn test_prepare_working_log_squash_multiple_sessions() {
         "2 AI lines from feature branch (both sessions)"
     );
     assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
-    assert_eq!(stats.human_additions, 2, "2 human lines from feature branch (Human addition + footer)");
+    assert_eq!(
+        stats.human_additions, 2,
+        "2 human lines from feature branch (Human addition + footer)"
+    );
     assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
@@ -498,7 +501,10 @@ fn test_prepare_working_log_squash_with_main_changes_standard_human() {
 
     // Re-initialize file after checkout to get current master state
     let mut file = repo.filename("document.txt");
-    file.insert_at(0, crate::lines!["// Master update at top".unattributed_human()]);
+    file.insert_at(
+        0,
+        crate::lines!["// Master update at top".unattributed_human()],
+    );
     repo.stage_all_and_commit("Out-of-band update on master")
         .unwrap();
 

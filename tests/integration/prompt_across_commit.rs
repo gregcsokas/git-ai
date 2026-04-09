@@ -91,7 +91,10 @@ fn test_change_across_commits_standard_human() {
         .unwrap();
 
     file.replace_at(4, "    print(f\"Hello, {name.upper()}!\")".ai());
-    file.insert_at(4, crate::lines!["    name = name.upper()".unattributed_human()]);
+    file.insert_at(
+        4,
+        crate::lines!["    name = name.upper()".unattributed_human()],
+    );
 
     let commit = repo.stage_all_and_commit("add more AI").unwrap();
 
@@ -112,4 +115,7 @@ fn test_change_across_commits_standard_human() {
     assert_ne!(second_ai_entry.hash, initial_ai_entry.hash);
 }
 
-crate::reuse_tests_in_worktree!(test_change_across_commits, test_change_across_commits_standard_human,);
+crate::reuse_tests_in_worktree!(
+    test_change_across_commits,
+    test_change_across_commits_standard_human,
+);

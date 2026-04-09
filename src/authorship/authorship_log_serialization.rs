@@ -1404,7 +1404,10 @@ mod tests {
             generate_human_short_hash("Alice Smith <alice@example.com>")
         );
         // Different identities → different hashes
-        assert_ne!(hash, generate_human_short_hash("Bob Jones <bob@example.com>"));
+        assert_ne!(
+            hash,
+            generate_human_short_hash("Bob Jones <bob@example.com>")
+        );
     }
 
     /// Test that `convert_to_checkpoints_for_squash` correctly skips h_ attestation entries

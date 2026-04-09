@@ -631,8 +631,7 @@ fn resolve_live_checkpoint_execution(
             .map(|files| files.is_empty())
             .unwrap_or(true);
         let has_initial_attributions = !working_log.read_initial_attributions().files.is_empty();
-        let has_explicit_ai_agent_context =
-            kind.is_ai() && agent_run_result.is_some();
+        let has_explicit_ai_agent_context = kind.is_ai() && agent_run_result.is_some();
 
         if has_no_ai_edits
             && !has_initial_attributions
@@ -803,12 +802,10 @@ fn execute_resolved_checkpoint(
                 && cp.entries.iter().any(|e| resolved.files.contains(&e.file))
         });
         if too_soon {
-            debug_log(
-                &format!(
-                    "[KnownHuman] Rejected: fired within {}s of an AI checkpoint on the same file",
-                    KNOWN_HUMAN_MIN_SECS_AFTER_AI
-                ),
-            );
+            debug_log(&format!(
+                "[KnownHuman] Rejected: fired within {}s of an AI checkpoint on the same file",
+                KNOWN_HUMAN_MIN_SECS_AFTER_AI
+            ));
             return Ok((0, 0, 0));
         }
     }
@@ -877,10 +874,11 @@ fn execute_resolved_checkpoint(
             if let Some(agent_run) = &agent_run_result {
                 if let Some(meta) = &agent_run.agent_metadata {
                     let editor = meta.get("kh_editor").cloned().unwrap_or_default();
-                    let editor_version =
-                        meta.get("kh_editor_version").cloned().unwrap_or_default();
-                    let extension_version =
-                        meta.get("kh_extension_version").cloned().unwrap_or_default();
+                    let editor_version = meta.get("kh_editor_version").cloned().unwrap_or_default();
+                    let extension_version = meta
+                        .get("kh_extension_version")
+                        .cloned()
+                        .unwrap_or_default();
                     if !editor.is_empty() {
                         use crate::authorship::working_log::KnownHumanMetadata;
                         checkpoint.known_human_metadata = Some(KnownHumanMetadata {
@@ -1600,9 +1598,7 @@ fn build_previous_file_state_maps(
                 },
             );
 
-            if checkpoint.kind.is_ai()
-                || working_log_entry_has_non_human_attribution(entry)
-            {
+            if checkpoint.kind.is_ai() || working_log_entry_has_non_human_attribution(entry) {
                 ai_touched_files.insert(entry.file.clone());
             }
         }
@@ -1643,11 +1639,7 @@ fn get_checkpoint_entry_for_file(
     // Pre-commit fast path:
     // If this file has no prior AI attribution and no INITIAL attribution,
     // we can skip it entirely. Human-only files do not affect AI authorship.
-    if is_pre_commit
-        && !kind.is_ai()
-        && !has_prior_ai_edits
-        && initial_attrs_for_file.is_empty()
-    {
+    if is_pre_commit && !kind.is_ai() && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
         return Ok(None);
     }
 

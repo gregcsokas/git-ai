@@ -329,7 +329,10 @@ mod tests {
     fn test_checkpoint_kind_known_human_roundtrip() {
         let kind = CheckpointKind::KnownHuman;
         assert_eq!(kind.to_str(), "known_human");
-        assert_eq!(CheckpointKind::from_str("known_human"), CheckpointKind::KnownHuman);
+        assert_eq!(
+            CheckpointKind::from_str("known_human"),
+            CheckpointKind::KnownHuman
+        );
         // Serde round-trip
         let json = serde_json::to_string(&kind).unwrap();
         let back: CheckpointKind = serde_json::from_str(&json).unwrap();

@@ -696,7 +696,10 @@ impl<'a> TestFile<'a> {
             .collect::<Vec<String>>()
             .join("\n");
 
-        let human_kind = if lines.iter().any(|l| l.author_type == AuthorType::UnattributedHuman) {
+        let human_kind = if lines
+            .iter()
+            .any(|l| l.author_type == AuthorType::UnattributedHuman)
+        {
             &AuthorType::UnattributedHuman
         } else {
             &AuthorType::Human
@@ -733,7 +736,10 @@ impl<'a> TestFile<'a> {
             .collect::<Vec<String>>()
             .join("\n");
 
-        let human_kind = if lines.iter().any(|l| l.author_type == AuthorType::UnattributedHuman) {
+        let human_kind = if lines
+            .iter()
+            .any(|l| l.author_type == AuthorType::UnattributedHuman)
+        {
             &AuthorType::UnattributedHuman
         } else {
             &AuthorType::Human
@@ -774,12 +780,14 @@ impl<'a> TestFile<'a> {
             AuthorType::Ai => self
                 .repo
                 .git_ai(&["checkpoint", "mock_ai", relative_path.as_str()]),
-            AuthorType::Human => self
-                .repo
-                .git_ai(&["checkpoint", "mock_known_human", relative_path.as_str()]),
-            AuthorType::UnattributedHuman => self
-                .repo
-                .git_ai(&["checkpoint", "--", relative_path.as_str()]),
+            AuthorType::Human => {
+                self.repo
+                    .git_ai(&["checkpoint", "mock_known_human", relative_path.as_str()])
+            }
+            AuthorType::UnattributedHuman => {
+                self.repo
+                    .git_ai(&["checkpoint", "--", relative_path.as_str()])
+            }
         };
         result.unwrap();
     }

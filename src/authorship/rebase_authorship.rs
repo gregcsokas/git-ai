@@ -1257,8 +1257,14 @@ pub fn rewrite_authorship_after_rebase_v2(
     // Only load file contents for files that actually change — skip unchanged files.
     let va_phase_start = std::time::Instant::now();
 
-    let (mut current_attributions, mut current_file_contents, initial_prompts, initial_humans, _rebase_ts) =
-        if let Some((attrs, contents, prompts, humans)) = try_reconstruct_attributions_from_notes_cached(
+    let (
+        mut current_attributions,
+        mut current_file_contents,
+        initial_prompts,
+        initial_humans,
+        _rebase_ts,
+    ) = if let Some((attrs, contents, prompts, humans)) =
+        try_reconstruct_attributions_from_notes_cached(
             repo,
             original_head,
             original_commits,
@@ -1267,58 +1273,58 @@ pub fn rewrite_authorship_after_rebase_v2(
             &note_cache,
             &original_hunks_by_commit,
         ) {
-            debug_log("Using fast note-based attribution reconstruction (skipping blame)");
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            (attrs, contents, prompts, humans, ts)
-        } else {
-            debug_log("Falling back to VirtualAttributions (blame-based reconstruction)");
-            let new_head = new_commits.last().unwrap();
-            let merge_base = repo
-                .merge_base(original_head.to_string(), new_head.to_string())
-                .ok();
+        debug_log("Using fast note-based attribution reconstruction (skipping blame)");
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        (attrs, contents, prompts, humans, ts)
+    } else {
+        debug_log("Falling back to VirtualAttributions (blame-based reconstruction)");
+        let new_head = new_commits.last().unwrap();
+        let merge_base = repo
+            .merge_base(original_head.to_string(), new_head.to_string())
+            .ok();
 
-            let repo_clone = repo.clone();
-            let original_head_clone = original_head.to_string();
-            let pathspecs_clone = pathspecs.clone();
+        let repo_clone = repo.clone();
+        let original_head_clone = original_head.to_string();
+        let pathspecs_clone = pathspecs.clone();
 
-            let current_va = smol::block_on(async {
-                crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
-                    repo_clone,
-                    original_head_clone,
-                    &pathspecs_clone,
-                    merge_base,
-                )
-                .await
-            })?;
+        let current_va = smol::block_on(async {
+            crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
+                repo_clone,
+                original_head_clone,
+                &pathspecs_clone,
+                merge_base,
+            )
+            .await
+        })?;
 
-            let mut attrs = HashMap::new();
-            let mut contents = HashMap::new();
-            for file in current_va.files() {
-                if let Some(char_attrs) = current_va.get_char_attributions(&file)
-                    && let Some(line_attrs) = current_va.get_line_attributions(&file)
-                {
-                    attrs.insert(file.clone(), (char_attrs.clone(), line_attrs.clone()));
-                }
-                if let Some(content) = current_va.get_file_content(&file) {
-                    contents.insert(file, content.clone());
-                }
+        let mut attrs = HashMap::new();
+        let mut contents = HashMap::new();
+        for file in current_va.files() {
+            if let Some(char_attrs) = current_va.get_char_attributions(&file)
+                && let Some(line_attrs) = current_va.get_line_attributions(&file)
+            {
+                attrs.insert(file.clone(), (char_attrs.clone(), line_attrs.clone()));
             }
-
-            let mut prompts: BTreeMap<
-                String,
-                BTreeMap<String, crate::authorship::authorship_log::PromptRecord>,
-            > = BTreeMap::new();
-            for (prompt_id, commit_map) in current_va.prompts() {
-                prompts.insert(prompt_id.clone(), commit_map.clone());
+            if let Some(content) = current_va.get_file_content(&file) {
+                contents.insert(file, content.clone());
             }
+        }
 
-            let humans = current_va.humans.clone();
-            let ts = current_va.timestamp();
-            (attrs, contents, prompts, humans, ts)
-        };
+        let mut prompts: BTreeMap<
+            String,
+            BTreeMap<String, crate::authorship::authorship_log::PromptRecord>,
+        > = BTreeMap::new();
+        for (prompt_id, commit_map) in current_va.prompts() {
+            prompts.insert(prompt_id.clone(), commit_map.clone());
+        }
+
+        let humans = current_va.humans.clone();
+        let ts = current_va.timestamp();
+        (attrs, contents, prompts, humans, ts)
+    };
 
     timing_phases.push((
         format!("attribution_reconstruction ({} pathspecs)", pathspecs.len()),
@@ -4064,10 +4070,9 @@ fn build_note_from_conflict_wl(
         // the attribution state is accumulated across checkpoints), so there is no need to
         // process the KnownHuman checkpoint's entries separately.
         if checkpoint.kind == CheckpointKind::KnownHuman {
-            let hash =
-                crate::authorship::authorship_log_serialization::generate_human_short_hash(
-                    &checkpoint.author,
-                );
+            let hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
+                &checkpoint.author,
+            );
             authorship_log
                 .metadata
                 .humans
