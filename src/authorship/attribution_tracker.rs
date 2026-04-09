@@ -433,26 +433,26 @@ impl AttributionTracker {
         let (new_start, new_end) =
             line_range_to_byte_range(new_lines, new_start_line, new_end_line, new_content.len());
 
-        // For AI checkpoints, skip token-aligned sub-hunk diffing when the old and
-        // new content have the same number of lines (a line-for-line replacement).
-        // This ensures byte-identical lines within a replaced region are attributed
-        // to AI. We don't force_split when line counts differ (e.g., inserting new
-        // lines) to avoid misattributing unchanged lines that are only in the hunk
-        // due to newline boundary changes.
+        // For AI checkpoints, always use force_split so that all new bytes are
+        // attributed to the AI author – including tokens that happen to match
+        // pre-existing content (e.g. a `)` or a variable name that appeared in
+        // the old file).  force_split emits Delete+Insert ops instead of Equal,
+        // so transform_attributions never inherits old (human) attribution for
+        // content rewritten by AI.
+        //
+        // For pure insertions (0→N) and pure deletions (N→0) force_split gives
+        // the same result as token-aligned diffing (all Insert or all Delete),
+        // so there is no regression for those cases.
         if is_ai_checkpoint {
-            let old_line_count = old_end_line - old_start_line;
-            let new_line_count = new_end_line - new_start_line;
-            if old_line_count == new_line_count && old_line_count > 1 {
-                append_range_diffs(
-                    &mut computation.diffs,
-                    old_content,
-                    new_content,
-                    (old_start, old_end),
-                    (new_start, new_end),
-                    true,
-                );
-                return Ok(());
-            }
+            append_range_diffs(
+                &mut computation.diffs,
+                old_content,
+                new_content,
+                (old_start, old_end),
+                (new_start, new_end),
+                true,
+            );
+            return Ok(());
         }
 
         if should_use_line_aligned_hunk_diff(

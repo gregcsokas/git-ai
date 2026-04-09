@@ -89,6 +89,14 @@ macro_rules! subdir_test_variants {
                             "GIT_CONFIG_GLOBAL",
                             self.inner.test_home_path().join(".gitconfig"),
                         );
+                        command.env(
+                            "XDG_CONFIG_HOME",
+                            self.inner.test_home_path().join(".config"),
+                        );
+                        // Suppress system-level git config (e.g. core.autocrlf=true on
+                        // Windows) that can cause CRLF modifications making files appear
+                        // uncommitted after a commit.
+                        command.env("GIT_CONFIG_NOSYSTEM", "1");
                         if mode.uses_wrapper() {
                             command.env("GIT_AI", "git");
                         }
@@ -207,6 +215,14 @@ macro_rules! subdir_test_variants {
                                 "GIT_CONFIG_GLOBAL",
                                 self.inner.test_home_path().join(".gitconfig"),
                             );
+                            command.env(
+                                "XDG_CONFIG_HOME",
+                                self.inner.test_home_path().join(".config"),
+                            );
+                            // Suppress system-level git config (e.g. core.autocrlf=true on
+                            // Windows) that can cause CRLF modifications making files appear
+                            // uncommitted after a commit.
+                            command.env("GIT_CONFIG_NOSYSTEM", "1");
                             if mode.uses_wrapper() {
                                 command.env("GIT_AI", "git");
                             }

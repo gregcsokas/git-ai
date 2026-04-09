@@ -4,7 +4,7 @@ updates:
     directory: "/"
     target-branch: "main"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     commit-message:
       prefix: "chore(deps)"
 
@@ -12,7 +12,7 @@ updates:
     directory: "/agent-support/vscode"
     target-branch: "main"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     commit-message:
       prefix: "chore(vscode-plugin)"
 
@@ -20,7 +20,7 @@ updates:
     directory: "/agent-support/opencode"
     target-branch: "main"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     commit-message:
       prefix: "chore(opencode-plugin)"
 
@@ -28,7 +28,7 @@ updates:
     directory: "/agent-support/intellij"
     target-branch: "main"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     commit-message:
       prefix: "chore(intellij-plugin)"
 

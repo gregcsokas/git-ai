@@ -9,6 +9,7 @@ use crate::git::repository::Repository;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use unicode_normalization::UnicodeNormalization;
 
 pub struct VirtualAttributions {
     repo: Repository,
@@ -924,8 +925,11 @@ impl VirtualAttributions {
                     line_ranges,
                 );
 
-                // Add to authorship log
-                let file_attestation = authorship_log.get_or_create_file(file_path);
+                // Add to authorship log.
+                // NFC-normalise the path so that attestation file_path is
+                // consistent with NFC paths emitted by git diff parsing.
+                let nfc_fp: String = file_path.nfc().collect();
+                let file_attestation = authorship_log.get_or_create_file(&nfc_fp);
                 file_attestation.add_entry(entry);
             }
         }
@@ -1249,9 +1253,13 @@ impl VirtualAttributions {
                 continue;
             }
 
-            // Get unstaged lines for this file (in working directory coordinates)
+            // Diff output keys are NFC-normalised, but working-log paths may be
+            // NFD.  Compute the NFC form once for all lookups in this iteration.
+            let nfc_file_path: String = file_path.nfc().collect();
+
+            // Get unstaged lines for this file (in working directory coordinates).
             let mut unstaged_lines: Vec<u32> = Vec::new();
-            if let Some(unstaged_ranges) = unstaged_hunks.get(file_path) {
+            if let Some(unstaged_ranges) = unstaged_hunks.get(&nfc_file_path) {
                 for range in unstaged_ranges {
                     unstaged_lines.extend(range.expand());
                 }
@@ -1264,8 +1272,8 @@ impl VirtualAttributions {
             let mut committed_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
             let mut uncommitted_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
 
-            // Get the committed hunks for this file (if any) - these are in commit coordinates
-            let file_committed_hunks = committed_hunks.get(file_path);
+            // Get the committed hunks for this file (if any) - these are in commit coordinates.
+            let file_committed_hunks = committed_hunks.get(&nfc_file_path);
 
             for line_attr in line_attrs {
                 // Check each line individually
@@ -1366,7 +1374,7 @@ impl VirtualAttributions {
                             author_id, ranges,
                         );
 
-                    let file_attestation = authorship_log.get_or_create_file(file_path);
+                    let file_attestation = authorship_log.get_or_create_file(&nfc_file_path);
                     file_attestation.add_entry(entry);
                 }
             }
@@ -1486,8 +1494,10 @@ impl VirtualAttributions {
                 continue;
             }
 
-            // Get the committed hunks for this file (if any)
-            let file_committed_hunks = match committed_hunks.get(file_path) {
+            // Get the committed hunks for this file (if any).
+            // NFC-normalise the key (see first loop's comment for rationale).
+            let nfc_file_path: String = file_path.nfc().collect();
+            let file_committed_hunks = match committed_hunks.get(&nfc_file_path) {
                 Some(hunks) => hunks,
                 None => continue, // No committed hunks for this file, skip
             };
@@ -1570,7 +1580,7 @@ impl VirtualAttributions {
                             author_id, ranges,
                         );
 
-                    let file_attestation = authorship_log.get_or_create_file(file_path);
+                    let file_attestation = authorship_log.get_or_create_file(&nfc_file_path);
                     file_attestation.add_entry(entry);
                 }
             }
@@ -1942,7 +1952,20 @@ pub fn restore_stashed_va(
             if abs_path.exists()
                 && let Ok(content) = std::fs::read_to_string(&abs_path)
             {
-                working_files.insert(file_path.clone(), content);
+                // Fix #957: Strip conflict markers from working files before merging
+                // attributions. When --merge checkout produces conflicts, the working
+                // file may contain conflict markers. We keep "ours" (stashed VA) lines
+                // so the attribution merge operates on clean content.
+                let clean_content = if content_has_conflict_markers(&content) {
+                    debug_log(&format!(
+                        "Conflict markers detected in {}, stripping for VA merge",
+                        file_path
+                    ));
+                    strip_conflict_markers_keep_ours(&content)
+                } else {
+                    content
+                };
+                working_files.insert(file_path.clone(), clean_content);
             }
         }
     }
@@ -1980,18 +2003,20 @@ pub fn restore_stashed_va(
         }
     };
 
-    // Convert merged VA to INITIAL attributions for the new HEAD
-    // Since these are uncommitted changes, we use the same SHA for parent and commit
-    // to get all attributions into the INITIAL file (not the authorship log)
-    let (_authorship_log, initial_attributions) = match merged_va
-        .to_authorship_log_and_initial_working_log(repository, new_head, new_head, None, None)
-    {
-        Ok(result) => result,
-        Err(e) => {
-            debug_log(&format!("Failed to convert VA to INITIAL: {}", e));
-            return;
-        }
-    };
+    // Extract INITIAL attributions directly from the merged VA.
+    //
+    // We intentionally avoid `to_authorship_log_and_initial_working_log` here because
+    // that function runs `git diff HEAD -- <file>` to categorise lines as "committed vs
+    // uncommitted".  After `checkout --merge`, the working-tree files may contain git
+    // conflict markers, so the diff line numbers are meaningless relative to the merged
+    // VA's line attributions (which were computed on the stripped, conflict-free content).
+    // Similarly, newly created files that are not yet tracked by git are invisible to
+    // `git diff HEAD` without explicit pathspecs, causing their attributions to be lost.
+    //
+    // `to_initial_working_log_only` simply promotes all AI line attributions in the
+    // merged VA into INITIAL form — exactly what we want since every attribution here
+    // is uncommitted work being preserved across the checkout operation.
+    let initial_attributions = merged_va.to_initial_working_log_only();
 
     // Write INITIAL attributions to working log for new HEAD
     if !initial_attributions.files.is_empty() || !initial_attributions.prompts.is_empty() {
@@ -2005,6 +2030,8 @@ pub fn restore_stashed_va(
                 return;
             }
         };
+        // Snapshot the file contents from the merged VA so the pre-commit hook can
+        // use them for attribution remapping if the files change before staging.
         let initial_file_contents =
             merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
         if let Err(e) = working_log.write_initial_attributions_with_contents(
@@ -2021,6 +2048,90 @@ pub fn restore_stashed_va(
             &new_head[..8.min(new_head.len())]
         ));
     }
+}
+
+/// Check whether a file's content contains git conflict markers.
+///
+/// Requires both an opening `<<<<<<<` and a closing `>>>>>>>` marker to avoid
+/// false positives on files that happen to contain `=======` (e.g. Markdown
+/// setext headings).
+pub fn content_has_conflict_markers(content: &str) -> bool {
+    let mut has_open = false;
+    let mut has_close = false;
+    for line in content.lines() {
+        if line.starts_with("<<<<<<<") {
+            has_open = true;
+        } else if line.starts_with(">>>>>>>") {
+            has_close = true;
+        }
+        if has_open && has_close {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strip conflict markers from content, keeping the "ours" (local) side.
+///
+/// For `git checkout --merge` and `git switch --merge`, conflicts are written
+/// with the **target branch** content first and the **local working tree** content
+/// second:
+///
+/// ```text
+/// <<<<<<< feature       ← theirs (target branch)
+/// THEIRS
+/// =======
+/// AI_CONTENT            ← ours (local working tree / stashed VA)
+/// >>>>>>> local
+/// ```
+///
+/// We therefore keep the section **between `=======` and `>>>>>>>`** — that is
+/// the local ("ours") content the stashed VA was built from.
+///
+/// Handles both the standard two-way conflict style and the diff3/zdiff3 style
+/// which inserts a `|||||||` base section between the target and `=======`:
+///
+/// ```text
+/// <<<<<<< feature
+/// THEIRS
+/// ||||||| original      ← base (diff3)
+/// SHARED
+/// =======
+/// AI_CONTENT            ← ours (kept)
+/// >>>>>>> local
+/// ```
+///
+/// Also preserves the trailing newline of the original content so byte-level
+/// attribution diffing sees the same length as the actual on-disk file.
+pub fn strip_conflict_markers_keep_ours(content: &str) -> String {
+    let mut result = Vec::new();
+    let mut in_conflict = false;
+    let mut in_ours = false; // true only while inside the ======= … >>>>>>> section
+
+    for line in content.lines() {
+        if line.starts_with("<<<<<<<") {
+            in_conflict = true;
+            in_ours = false; // theirs section starts — skip it
+        } else if in_conflict && line.starts_with("|||||||") {
+            // diff3: base section — skip
+            in_ours = false;
+        } else if in_conflict && line.starts_with("=======") {
+            // ours (local) section starts — keep from here
+            in_ours = true;
+        } else if in_conflict && line.starts_with(">>>>>>>") {
+            in_conflict = false;
+            in_ours = false; // back to normal content
+        } else if !in_conflict || in_ours {
+            result.push(line);
+        }
+    }
+    let mut out = result.join("\n");
+    // Preserve the trailing newline that std::fs::read_to_string typically returns,
+    // so the cleaned content has the same byte length as the actual file.
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// Transform attributions from old content to new content
@@ -2240,7 +2351,22 @@ fn file_exists_in_commit(
 ) -> Result<bool, GitAiError> {
     let commit = repo.find_commit(commit_sha.to_string())?;
     let tree = commit.tree()?;
-    Ok(tree.get_path(std::path::Path::new(file_path)).is_ok())
+    if tree.get_path(std::path::Path::new(file_path)).is_ok() {
+        return Ok(true);
+    }
+    // The caller's path may be NFC or NFD while the tree stores the opposite
+    // form.  Try both normalisations before giving up.
+    if !file_path.is_ascii() {
+        let nfc_path: String = file_path.nfc().collect();
+        if nfc_path != file_path && tree.get_path(std::path::Path::new(&nfc_path)).is_ok() {
+            return Ok(true);
+        }
+        let nfd_path: String = file_path.nfd().collect();
+        if nfd_path != file_path && tree.get_path(std::path::Path::new(&nfd_path)).is_ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

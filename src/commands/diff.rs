@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::IsTerminal;
+use unicode_normalization::UnicodeNormalization;
 
 // ============================================================================
 // Data Structures
@@ -571,12 +572,11 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
 fn normalize_diff_path_token(path: &str) -> String {
     let unescaped = crate::utils::unescape_git_path(path.trim_end());
     let prefixes = ["a/", "b/", "c/", "w/", "i/", "o/"];
-    for prefix in prefixes {
-        if let Some(stripped) = unescaped.strip_prefix(prefix) {
-            return stripped.to_string();
-        }
-    }
-    unescaped
+    let stripped = prefixes
+        .iter()
+        .find_map(|prefix| unescaped.strip_prefix(prefix))
+        .unwrap_or(&unescaped);
+    stripped.nfc().collect()
 }
 
 fn parse_new_file_path_from_plus_header_line(line: &str) -> Option<Option<String>> {
@@ -899,6 +899,9 @@ fn apply_blame_for_side(
         no_output: true,
         use_prompt_hashes_as_names: true,
         newest_commit: Some(newest_commit.unwrap_or(from_commit).to_string()),
+        detect_copies: 1, // -C: trace lines moved within the same commit (e.g. when a
+        // neighbouring comment is deleted in the same hunk, git blame without -C
+        // attributes the unchanged lines to the new commit instead of the originating one)
         ..GitAiBlameOptions::default()
     };
     if matches!(side, LineSide::New) {

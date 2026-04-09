@@ -8,7 +8,7 @@ use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -113,6 +113,81 @@ fn print_amp_plugins_note(installer_id: &str) {
     if installer_id == "amp" {
         println!("  Note: Amp plugins are experimental. Run amp with `PLUGINS=all amp`.");
     }
+}
+
+/// Find PIDs of running processes that match any of the given process names.
+/// Returns a list of (pid, process_name) tuples for each match found.
+fn find_running_pids(process_names: &[&str]) -> Vec<(u32, String)> {
+    if process_names.is_empty() {
+        return vec![];
+    }
+
+    let output = {
+        #[cfg(unix)]
+        {
+            Command::new("ps")
+                .args(["axo", "pid,comm"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+        }
+        #[cfg(windows)]
+        {
+            Command::new("tasklist")
+                .args(["/FO", "CSV", "/NH"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+        }
+    };
+
+    let Ok(output) = output else {
+        return vec![];
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut results: Vec<(u32, String)> = Vec::new();
+
+    for line in stdout.lines() {
+        #[cfg(unix)]
+        {
+            let trimmed = line.trim();
+            // ps output: "  PID COMM" — split on whitespace
+            let mut parts = trimmed.splitn(2, char::is_whitespace);
+            let pid_str = parts.next().unwrap_or("").trim();
+            let comm = parts.next().unwrap_or("").trim();
+            // comm may be a full path; extract the basename
+            let base = comm.rsplit('/').next().unwrap_or(comm);
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                for &name in process_names {
+                    if base.eq_ignore_ascii_case(name) {
+                        results.push((pid, base.to_string()));
+                        break;
+                    }
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            // tasklist CSV: "Image Name","PID",...
+            let fields: Vec<&str> = line.split(',').collect();
+            if fields.len() >= 2 {
+                let image = fields[0].trim_matches('"');
+                let pid_str = fields[1].trim_matches('"');
+                let base = image.strip_suffix(".exe").unwrap_or(image);
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    for &name in process_names {
+                        if base.eq_ignore_ascii_case(name) {
+                            results.push((pid, base.to_string()));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    results
 }
 
 fn set_global_git_config_value(git_cmd: &str, key: &str, value: &str) -> Result<(), GitAiError> {
@@ -273,7 +348,10 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
 
     // In async mode, daemon trace2 config must be in place before any install work starts.
     // If async mode was disabled, tear down any leftover daemon and trace2 config.
-    maybe_configure_async_mode_daemon_trace2(dry_run)?;
+    // Non-fatal: the global git config may be read-only (e.g. Nix store symlink).
+    if let Err(e) = maybe_configure_async_mode_daemon_trace2(dry_run) {
+        eprintln!("Warning: could not configure trace2 (non-fatal): {e}");
+    }
     maybe_teardown_async_mode(dry_run);
     maybe_ensure_daemon(dry_run);
 
@@ -400,14 +478,6 @@ async fn async_run_install(
     // Track detailed results for metrics (tool_id, result)
     let mut detailed_results: Vec<(String, InstallResult)> = Vec::new();
 
-    // Install skills first (these are global, not per-agent)
-    // Skills are always nuked and reinstalled fresh (silently)
-    if let Ok(result) = skills_installer::install_skills(dry_run, verbose)
-        && result.changed
-    {
-        has_changes = true;
-    }
-
     // Ensure git symlinks for Fork compatibility
     if let Err(e) = crate::mdm::ensure_git_symlinks() {
         eprintln!("Warning: Failed to create git symlinks: {}", e);
@@ -417,8 +487,11 @@ async fn async_run_install(
     println!("\n\x1b[1mCoding Agents\x1b[0m");
 
     let installers = get_all_installers();
+    let mut installed_tools: HashSet<String> = HashSet::new();
+    // Track agents whose hooks were updated (name, process_names) for restart warnings
+    let mut updated_agents: Vec<(String, Vec<String>)> = Vec::new();
 
-    for installer in installers {
+    for installer in &installers {
         let name = installer.name();
         let id = installer.id();
 
@@ -431,6 +504,7 @@ async fn async_run_install(
                     continue;
                 }
 
+                installed_tools.insert(id.to_string());
                 any_checked = true;
 
                 // Install/update hooks (only for tools that use config file hooks)
@@ -453,6 +527,18 @@ async fn async_run_install(
                             has_changes = true;
                             statuses.insert(id.to_string(), InstallStatus::Installed);
                             detailed_results.push((id.to_string(), InstallResult::installed()));
+
+                            // Track this agent for restart detection (skip in dry-run)
+                            if !dry_run {
+                                let pnames: Vec<String> = installer
+                                    .process_names()
+                                    .iter()
+                                    .map(|s| s.to_string())
+                                    .collect();
+                                if !pnames.is_empty() {
+                                    updated_agents.push((name.to_string(), pnames));
+                                }
+                            }
                         }
                         Ok(None) => {
                             spinner.success(&format!("{}: Hooks already up to date", name));
@@ -475,9 +561,11 @@ async fn async_run_install(
                 // Install extras (extensions, git.path, etc.)
                 match installer.install_extras(params, dry_run) {
                     Ok(results) => {
+                        let mut extras_changed = false;
                         for result in results {
                             if result.changed {
                                 has_changes = true;
+                                extras_changed = true;
                             }
                             if result.changed && !dry_run {
                                 let extra_spinner = Spinner::new(&result.message);
@@ -514,6 +602,21 @@ async fn async_run_install(
                                 detail.warnings.push(result.message.clone());
                             }
                         }
+
+                        // Track restart detection for extras-only agents (e.g. JetBrains, VS Code)
+                        if extras_changed
+                            && !dry_run
+                            && !updated_agents.iter().any(|(n, _)| n == name)
+                        {
+                            let pnames: Vec<String> = installer
+                                .process_names()
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect();
+                            if !pnames.is_empty() {
+                                updated_agents.push((name.to_string(), pnames));
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("  Error installing extras for {}: {}", name, e);
@@ -539,6 +642,13 @@ async fn async_run_install(
                 detailed_results.push((id.to_string(), InstallResult::failed(error_msg)));
             }
         }
+    }
+
+    // Install skills for detected agents only
+    if let Ok(result) = skills_installer::install_skills(dry_run, verbose, &installed_tools)
+        && result.changed
+    {
+        has_changes = true;
     }
 
     if !any_checked {
@@ -622,6 +732,46 @@ async fn async_run_install(
         println!("\n\x1b[33m⚠ Dry-run mode (default). No changes were made.\x1b[0m");
         println!("To apply these changes, run:");
         println!("\x1b[1m  git-ai install-hooks --dry-run=false\x1b[0m");
+    }
+
+    // Check for running agents that had hooks updated and warn about restart
+    if !dry_run && !updated_agents.is_empty() {
+        let mut any_running = false;
+
+        for (agent_name, pnames) in &updated_agents {
+            let refs: Vec<&str> = pnames.iter().map(|s| s.as_str()).collect();
+            let pids = find_running_pids(&refs);
+            if !pids.is_empty() {
+                if !any_running {
+                    println!(
+                        "\n\x1b[33m⚠ The following agents are currently running and must be restarted:\x1b[0m"
+                    );
+                    any_running = true;
+                }
+                let pid_list: Vec<String> = pids.iter().map(|(pid, _)| pid.to_string()).collect();
+                println!(
+                    "  \x1b[1m{}\x1b[0m (PID: {})",
+                    agent_name,
+                    pid_list.join(", ")
+                );
+            }
+        }
+
+        if any_running {
+            println!();
+            println!(
+                "\x1b[33mRestart the agents listed above for git-ai attribution to take effect.\x1b[0m"
+            );
+            println!(
+                "Any work done before installing git-ai (or before restarting) will be attributed as human."
+            );
+            println!(
+                "This is expected — once you commit and start a fresh session, attribution will work correctly."
+            );
+            println!(
+                "If the issue persists, please open an issue at https://github.com/git-ai-project/git-ai/issues"
+            );
+        }
     }
 
     // Emit metrics for each agent/git_client result (only if not dry-run)

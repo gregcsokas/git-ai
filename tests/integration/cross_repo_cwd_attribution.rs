@@ -9,10 +9,13 @@
 //! 3. CWD != repo root, edits in several repos + CWD repo itself
 //! 4. CWD is a parent directory above all repos (e.g. ~/projects)
 //! 5. CWD is a parent directory above all repos, edits in several repo subpaths
+//! 6. Agent preset (e.g. Claude) with CWD in repo A editing files in repo B (issue #871)
 
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use crate::test_utils::fixture_path;
 
+use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -659,4 +662,761 @@ fn test_parent_cwd_blame_correct_across_repos() {
     blamed_b.assert_lines_and_blame(vec!["Human B1".ai(), "AI B2".ai(), "AI B3".ai()]);
 
     let _ = fs::remove_dir_all(&workspace);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 6: Agent preset (Claude) with CWD in repo A, editing files in repo B
+// Regression test for issue #871
+// ---------------------------------------------------------------------------
+
+/// When Claude Code is started in repo A but edits a file in repo B,
+/// the checkpoint should record data in repo B so that committing in repo B
+/// produces non-empty prompts in the git note.
+#[test]
+fn test_claude_preset_cross_repo_cwd_records_prompts_in_target_repo() {
+    // repo_cwd is where the agent session runs (repo A)
+    let repo_cwd = TestRepo::new();
+    // repo_target is where the file is actually edited (repo B)
+    let mut repo_target = TestRepo::new();
+
+    // Enable prompt sharing for the target repo
+    repo_target.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+    });
+
+    let cwd_root = repo_cwd.canonical_path();
+    let target_root = repo_target.canonical_path();
+
+    // Set up initial commits in both repos
+    fs::write(cwd_root.join("README.md"), "# Repo A\n").unwrap();
+    repo_cwd.stage_all_and_commit("initial commit A").unwrap();
+
+    let src_dir = target_root.join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+    let target_file = src_dir.join("main.ts");
+    fs::write(&target_file, "console.log('hello');\n").unwrap();
+    repo_target
+        .stage_all_and_commit("initial commit B")
+        .unwrap();
+
+    // Create a transcript file that the Claude preset can parse
+    let transcript_path = target_root.join("claude-session.jsonl");
+    let fixture = fixture_path("example-claude-code.jsonl");
+    fs::copy(&fixture, &transcript_path).unwrap();
+
+    // Build hook input JSON simulating Claude Code running from repo A
+    // but editing a file in repo B (absolute path)
+    let hook_input = json!({
+        "cwd": cwd_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "transcript_path": transcript_path.to_string_lossy().to_string(),
+        "tool_input": {
+            "file_path": target_file.to_string_lossy().to_string()
+        }
+    })
+    .to_string();
+
+    // Simulate AI edit in repo B
+    fs::write(
+        &target_file,
+        "console.log('hello');\nconsole.log('AI was here');\n",
+    )
+    .unwrap();
+
+    // Run checkpoint from repo A's CWD, with Claude preset hook input
+    // pointing to a file in repo B
+    repo_target
+        .git_ai_from_working_dir(
+            &cwd_root,
+            &["checkpoint", "claude", "--hook-input", &hook_input],
+        )
+        .expect("checkpoint from cross-repo CWD should succeed");
+
+    // Verify the working log was written in the target repo
+    let working_log = repo_target.current_working_logs();
+    let ai_files = working_log.all_ai_touched_files().unwrap_or_default();
+    assert!(
+        !ai_files.is_empty(),
+        "Issue #871 regression: Working log entries should exist in repo B \
+         when Claude checkpoint is run from repo A's CWD."
+    );
+
+    // Commit in repo B
+    let commit = repo_target.stage_all_and_commit("add AI changes").unwrap();
+
+    // The core assertion: prompts must NOT be empty
+    assert!(
+        !commit.authorship_log.metadata.prompts.is_empty(),
+        "Issue #871 regression: Prompts should not be empty in repo B's git note \
+         when Claude Code is started in repo A but edits files in repo B."
+    );
+
+    // Verify attestations are present too
+    assert!(
+        !commit.authorship_log.attestations.is_empty(),
+        "Issue #871 regression: AI attestations should be present in repo B \
+         when checkpoint is run from repo A's CWD with Claude preset."
+    );
+}
+
+/// Same as above but tests the PreToolUse (human checkpoint) path.
+/// The human checkpoint should also correctly record in repo B when CWD is repo A.
+#[test]
+fn test_claude_preset_cross_repo_cwd_pre_tool_use_records_in_target_repo() {
+    let repo_cwd = TestRepo::new();
+    let repo_target = TestRepo::new();
+
+    let cwd_root = repo_cwd.canonical_path();
+    let target_root = repo_target.canonical_path();
+
+    // Set up initial commits
+    fs::write(cwd_root.join("README.md"), "# Repo A\n").unwrap();
+    repo_cwd.stage_all_and_commit("initial commit A").unwrap();
+
+    let target_file = target_root.join("feature.txt");
+    fs::write(&target_file, "line 1\nline 2\n").unwrap();
+    repo_target
+        .stage_all_and_commit("initial commit B")
+        .unwrap();
+
+    // Create a transcript file
+    let transcript_path = target_root.join("claude-session.jsonl");
+    let fixture = fixture_path("example-claude-code.jsonl");
+    fs::copy(&fixture, &transcript_path).unwrap();
+
+    // PreToolUse hook input (human checkpoint before AI edit)
+    let pre_hook_input = json!({
+        "cwd": cwd_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "transcript_path": transcript_path.to_string_lossy().to_string(),
+        "tool_input": {
+            "file_path": target_file.to_string_lossy().to_string()
+        }
+    })
+    .to_string();
+
+    // Run PreToolUse checkpoint from repo A's CWD
+    repo_target
+        .git_ai_from_working_dir(
+            &cwd_root,
+            &["checkpoint", "claude", "--hook-input", &pre_hook_input],
+        )
+        .expect("PreToolUse checkpoint from cross-repo CWD should succeed");
+
+    // Simulate AI edit in repo B
+    fs::write(&target_file, "line 1\nline 2\nAI line 3\n").unwrap();
+
+    // PostToolUse hook input
+    let post_hook_input = json!({
+        "cwd": cwd_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "transcript_path": transcript_path.to_string_lossy().to_string(),
+        "tool_input": {
+            "file_path": target_file.to_string_lossy().to_string()
+        }
+    })
+    .to_string();
+
+    // Run PostToolUse checkpoint from repo A's CWD
+    repo_target
+        .git_ai_from_working_dir(
+            &cwd_root,
+            &["checkpoint", "claude", "--hook-input", &post_hook_input],
+        )
+        .expect("PostToolUse checkpoint from cross-repo CWD should succeed");
+
+    // Commit in repo B
+    let commit = repo_target.stage_all_and_commit("add AI changes").unwrap();
+
+    // Verify attestations are present
+    assert!(
+        !commit.authorship_log.attestations.is_empty(),
+        "Issue #871 regression: AI attestations should be present in repo B \
+         when PreToolUse + PostToolUse checkpoints run from repo A's CWD."
+    );
+}
+
+// ===========================================================================
+// Scenario 7: Nested subrepo inside parent repo (mock_ai)
+//
+// Unlike scenarios 1-6 where repos are siblings or in unrelated directories,
+// here the subrepo is a subdirectory of the parent repo. Both have their own
+// .git/ directory. This tests that path_is_in_workdir correctly detects the
+// nested .git boundary and routes checkpoints to the subrepo.
+// ===========================================================================
+
+/// When CWD is a parent git repo and the edited file is inside a nested
+/// subrepo (subdirectory with its own .git/), the checkpoint must be written
+/// to the subrepo, not the parent.
+#[test]
+fn test_nested_subrepo_single_file_mock_ai() {
+    let workspace = create_unique_workspace("git-ai-nested-subrepo-test");
+
+    // Create parent repo
+    let parent_path = workspace.join("parent-repo");
+    let parent = TestRepo::new_at_path(&parent_path);
+    let mut parent_readme = parent.filename("README.md");
+    parent_readme.set_contents(crate::lines!["# Parent Repo"]);
+    parent.stage_all_and_commit("initial parent").unwrap();
+
+    // Create nested subrepo inside parent repo
+    let subrepo_path = parent_path.join("subrepo");
+    let subrepo = TestRepo::new_at_path(&subrepo_path);
+    let mut subrepo_readme = subrepo.filename("README.md");
+    subrepo_readme.set_contents(crate::lines!["# Subrepo"]);
+    subrepo.stage_all_and_commit("initial subrepo").unwrap();
+
+    // Write AI content in the subrepo
+    fs::write(subrepo_path.join("feature.txt"), "AI line 1\nAI line 2\n").unwrap();
+
+    let subrepo_file = subrepo.canonical_path().join("feature.txt");
+
+    // Checkpoint from parent repo's CWD, targeting file in nested subrepo
+    parent
+        .git_ai_from_working_dir(
+            &parent.canonical_path(),
+            &["checkpoint", "mock_ai", subrepo_file.to_str().unwrap()],
+        )
+        .expect("checkpoint from parent repo CWD for nested subrepo file should succeed");
+
+    // Verify working log was written in the subrepo, not the parent
+    let working_log = subrepo.current_working_logs();
+    let ai_files = working_log.all_ai_touched_files().unwrap_or_default();
+    assert!(
+        !ai_files.is_empty(),
+        "Scenario 7: Working log entries should exist in the nested subrepo \
+         when checkpoint is run from the parent repo's CWD."
+    );
+
+    // Commit in the subrepo and verify AI attribution
+    let commit = subrepo.stage_all_and_commit("add AI feature").unwrap();
+    assert!(
+        !commit.authorship_log.attestations.is_empty(),
+        "Scenario 7: AI attestations should be present in the nested subrepo \
+         when checkpoint was run from the parent repo's CWD."
+    );
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+/// Mixed edits: some files in parent repo, some in nested subrepo.
+/// Both repos should get their respective checkpoints.
+#[test]
+fn test_nested_subrepo_mixed_edits_mock_ai() {
+    let workspace = create_unique_workspace("git-ai-nested-mixed-test");
+
+    let parent_path = workspace.join("parent-repo");
+    let parent = TestRepo::new_at_path(&parent_path);
+    let mut parent_readme = parent.filename("README.md");
+    parent_readme.set_contents(crate::lines!["# Parent"]);
+    parent.stage_all_and_commit("initial parent").unwrap();
+
+    let subrepo_path = parent_path.join("subrepo");
+    let subrepo = TestRepo::new_at_path(&subrepo_path);
+    let mut subrepo_readme = subrepo.filename("README.md");
+    subrepo_readme.set_contents(crate::lines!["# Subrepo"]);
+    subrepo.stage_all_and_commit("initial subrepo").unwrap();
+
+    // Write AI content in both repos
+    fs::write(parent_path.join("parent_feature.txt"), "Parent AI\n").unwrap();
+    fs::write(subrepo_path.join("subrepo_feature.txt"), "Subrepo AI\n").unwrap();
+
+    let parent_file = parent.canonical_path().join("parent_feature.txt");
+    let subrepo_file = subrepo.canonical_path().join("subrepo_feature.txt");
+
+    // Checkpoint from parent CWD with files in both repos
+    parent
+        .git_ai_from_working_dir(
+            &parent.canonical_path(),
+            &[
+                "checkpoint",
+                "mock_ai",
+                parent_file.to_str().unwrap(),
+                subrepo_file.to_str().unwrap(),
+            ],
+        )
+        .expect("mixed checkpoint (parent + nested subrepo) should succeed");
+
+    // Verify parent repo has attestation
+    let parent_commit = parent.stage_all_and_commit("AI edits in parent").unwrap();
+    assert!(
+        !parent_commit.authorship_log.attestations.is_empty(),
+        "Scenario 7 (mixed): Parent repo should have AI attestations for its own files."
+    );
+
+    // Verify subrepo has attestation
+    let subrepo_commit = subrepo.stage_all_and_commit("AI edits in subrepo").unwrap();
+    assert!(
+        !subrepo_commit.authorship_log.attestations.is_empty(),
+        "Scenario 7 (mixed): Nested subrepo should have AI attestations for its own files."
+    );
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+/// Multiple nested subrepos inside the same parent repo.
+#[test]
+fn test_nested_multiple_subrepos_mock_ai() {
+    let workspace = create_unique_workspace("git-ai-nested-multi-sub-test");
+
+    let parent_path = workspace.join("parent-repo");
+    let parent = TestRepo::new_at_path(&parent_path);
+    let mut parent_readme = parent.filename("README.md");
+    parent_readme.set_contents(crate::lines!["# Parent"]);
+    parent.stage_all_and_commit("initial parent").unwrap();
+
+    let sub1_path = parent_path.join("sub1");
+    let sub1 = TestRepo::new_at_path(&sub1_path);
+    let mut sub1_readme = sub1.filename("README.md");
+    sub1_readme.set_contents(crate::lines!["# Sub1"]);
+    sub1.stage_all_and_commit("initial sub1").unwrap();
+
+    let sub2_path = parent_path.join("sub2");
+    let sub2 = TestRepo::new_at_path(&sub2_path);
+    let mut sub2_readme = sub2.filename("README.md");
+    sub2_readme.set_contents(crate::lines!["# Sub2"]);
+    sub2.stage_all_and_commit("initial sub2").unwrap();
+
+    fs::write(sub1_path.join("s1.txt"), "AI sub1\n").unwrap();
+    fs::write(sub2_path.join("s2.txt"), "AI sub2\n").unwrap();
+
+    let file_s1 = sub1.canonical_path().join("s1.txt");
+    let file_s2 = sub2.canonical_path().join("s2.txt");
+
+    parent
+        .git_ai_from_working_dir(
+            &parent.canonical_path(),
+            &[
+                "checkpoint",
+                "mock_ai",
+                file_s1.to_str().unwrap(),
+                file_s2.to_str().unwrap(),
+            ],
+        )
+        .expect("checkpoint across multiple nested subrepos should succeed");
+
+    let commit_s1 = sub1.stage_all_and_commit("AI in sub1").unwrap();
+    assert!(
+        !commit_s1.authorship_log.attestations.is_empty(),
+        "Scenario 7 (multi-sub): sub1 should have AI attestations."
+    );
+
+    let commit_s2 = sub2.stage_all_and_commit("AI in sub2").unwrap();
+    assert!(
+        !commit_s2.authorship_log.attestations.is_empty(),
+        "Scenario 7 (multi-sub): sub2 should have AI attestations."
+    );
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+/// Blame verification for nested subrepo: human lines stay human,
+/// AI-appended lines show as AI.
+#[test]
+fn test_nested_subrepo_blame_attribution_mock_ai() {
+    let workspace = create_unique_workspace("git-ai-nested-blame-test");
+
+    let parent_path = workspace.join("parent-repo");
+    let parent = TestRepo::new_at_path(&parent_path);
+    let mut parent_readme = parent.filename("README.md");
+    parent_readme.set_contents(crate::lines!["# Parent"]);
+    parent.stage_all_and_commit("initial parent").unwrap();
+
+    let subrepo_path = parent_path.join("subrepo");
+    let subrepo = TestRepo::new_at_path(&subrepo_path);
+
+    // Initial human content in subrepo
+    let mut existing = subrepo.filename("code.txt");
+    existing.set_contents(crate::lines!["Human line 1", "Human line 2"]);
+    subrepo.stage_all_and_commit("initial subrepo").unwrap();
+
+    // Append AI lines
+    fs::write(
+        subrepo_path.join("code.txt"),
+        "Human line 1\nHuman line 2\nAI appended 1\nAI appended 2\n",
+    )
+    .unwrap();
+
+    let target_file = subrepo.canonical_path().join("code.txt");
+
+    parent
+        .git_ai_from_working_dir(
+            &parent.canonical_path(),
+            &["checkpoint", "mock_ai", target_file.to_str().unwrap()],
+        )
+        .expect("nested subrepo blame checkpoint should succeed");
+
+    subrepo
+        .stage_all_and_commit("add AI lines from parent CWD")
+        .unwrap();
+
+    let mut file = subrepo.filename("code.txt");
+    file.assert_lines_and_blame(vec![
+        "Human line 1".human(),
+        "Human line 2".ai(),
+        "AI appended 1".ai(),
+        "AI appended 2".ai(),
+    ]);
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+// ===========================================================================
+// Scenario 8: Nested subrepo with Claude preset
+//
+// Mirrors scenario 6 (issue #871) but with the subrepo nested inside the
+// parent repo instead of being a sibling repo.
+// ===========================================================================
+
+/// Claude Code running in parent repo, editing a file in nested subrepo.
+/// Checkpoint should record data in subrepo so commit produces non-empty prompts.
+#[test]
+fn test_claude_preset_nested_subrepo_records_prompts() {
+    let workspace = create_unique_workspace("git-ai-claude-nested-test");
+
+    let parent_path = workspace.join("parent-repo");
+    let parent = TestRepo::new_at_path(&parent_path);
+    fs::write(parent_path.join("README.md"), "# Parent Repo\n").unwrap();
+    parent.stage_all_and_commit("initial parent").unwrap();
+
+    let subrepo_path = parent_path.join("subrepo");
+    let mut subrepo = TestRepo::new_at_path(&subrepo_path);
+
+    // Enable prompt sharing for the subrepo
+    subrepo.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+    });
+
+    let parent_root = parent.canonical_path();
+    let subrepo_root = subrepo.canonical_path();
+
+    let src_dir = subrepo_root.join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+    let target_file = src_dir.join("main.ts");
+    fs::write(&target_file, "console.log('hello');\n").unwrap();
+    subrepo.stage_all_and_commit("initial subrepo").unwrap();
+
+    // Create transcript file
+    let transcript_path = subrepo_root.join("claude-session.jsonl");
+    let fixture = fixture_path("example-claude-code.jsonl");
+    fs::copy(&fixture, &transcript_path).unwrap();
+
+    // Build Claude PostToolUse hook input with CWD = parent repo
+    let hook_input = json!({
+        "cwd": parent_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "transcript_path": transcript_path.to_string_lossy().to_string(),
+        "tool_input": {
+            "file_path": target_file.to_string_lossy().to_string()
+        }
+    })
+    .to_string();
+
+    // Simulate AI edit in subrepo
+    fs::write(
+        &target_file,
+        "console.log('hello');\nconsole.log('AI was here');\n",
+    )
+    .unwrap();
+
+    // Run checkpoint from parent repo's CWD with Claude preset
+    subrepo
+        .git_ai_from_working_dir(
+            &parent_root,
+            &["checkpoint", "claude", "--hook-input", &hook_input],
+        )
+        .expect("Claude checkpoint from parent CWD for nested subrepo should succeed");
+
+    // Verify working log in subrepo
+    let working_log = subrepo.current_working_logs();
+    let ai_files = working_log.all_ai_touched_files().unwrap_or_default();
+    assert!(
+        !ai_files.is_empty(),
+        "Scenario 8: Working log entries should exist in the nested subrepo \
+         when Claude checkpoint is run from the parent repo's CWD."
+    );
+
+    // Commit in subrepo
+    let commit = subrepo.stage_all_and_commit("add AI changes").unwrap();
+
+    // Prompts must NOT be empty
+    assert!(
+        !commit.authorship_log.metadata.prompts.is_empty(),
+        "Scenario 8: Prompts should not be empty in nested subrepo's git note \
+         when Claude Code is started in parent repo but edits files in subrepo."
+    );
+
+    // Attestations must be present
+    assert!(
+        !commit.authorship_log.attestations.is_empty(),
+        "Scenario 8: AI attestations should be present in the nested subrepo."
+    );
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+/// Claude PreToolUse + PostToolUse cycle for nested subrepo.
+#[test]
+fn test_claude_preset_nested_subrepo_pre_post_cycle() {
+    let workspace = create_unique_workspace("git-ai-claude-nested-cycle-test");
+
+    let parent_path = workspace.join("parent-repo");
+    let parent = TestRepo::new_at_path(&parent_path);
+    fs::write(parent_path.join("README.md"), "# Parent\n").unwrap();
+    parent.stage_all_and_commit("initial parent").unwrap();
+
+    let subrepo_path = parent_path.join("subrepo");
+    let subrepo = TestRepo::new_at_path(&subrepo_path);
+
+    let parent_root = parent.canonical_path();
+    let subrepo_root = subrepo.canonical_path();
+
+    let target_file = subrepo_root.join("feature.txt");
+    fs::write(&target_file, "line 1\nline 2\n").unwrap();
+    subrepo.stage_all_and_commit("initial subrepo").unwrap();
+
+    let transcript_path = subrepo_root.join("claude-session.jsonl");
+    let fixture = fixture_path("example-claude-code.jsonl");
+    fs::copy(&fixture, &transcript_path).unwrap();
+
+    // PreToolUse (human checkpoint before AI edit)
+    let pre_hook_input = json!({
+        "cwd": parent_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "transcript_path": transcript_path.to_string_lossy().to_string(),
+        "tool_input": {
+            "file_path": target_file.to_string_lossy().to_string()
+        }
+    })
+    .to_string();
+
+    subrepo
+        .git_ai_from_working_dir(
+            &parent_root,
+            &["checkpoint", "claude", "--hook-input", &pre_hook_input],
+        )
+        .expect("PreToolUse checkpoint for nested subrepo should succeed");
+
+    // Simulate AI edit
+    fs::write(&target_file, "line 1\nline 2\nAI line 3\n").unwrap();
+
+    // PostToolUse (AI checkpoint after edit)
+    let post_hook_input = json!({
+        "cwd": parent_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "transcript_path": transcript_path.to_string_lossy().to_string(),
+        "tool_input": {
+            "file_path": target_file.to_string_lossy().to_string()
+        }
+    })
+    .to_string();
+
+    subrepo
+        .git_ai_from_working_dir(
+            &parent_root,
+            &["checkpoint", "claude", "--hook-input", &post_hook_input],
+        )
+        .expect("PostToolUse checkpoint for nested subrepo should succeed");
+
+    // Commit and verify
+    let commit = subrepo.stage_all_and_commit("add AI changes").unwrap();
+    assert!(
+        !commit.authorship_log.attestations.is_empty(),
+        "Scenario 8 (cycle): AI attestations should be present in nested subrepo \
+         after PreToolUse + PostToolUse cycle from parent repo's CWD."
+    );
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+// ===========================================================================
+// Issue #954 regression: CWD is a completely unrelated non-git directory
+//
+// When Claude (or any agent) is launched from a directory that is not inside
+// any git repository (e.g. /tmp, ~/), all AI attribution was dropped because
+// the workspace boundary check in find_repository_for_file rejected files
+// that were not children of the CWD directory.
+// ===========================================================================
+
+/// Regression test for issue #954:
+/// When CWD is a non-git directory completely unrelated to the target repo
+/// (not a parent/ancestor of the target), checkpoint must still write to the
+/// target repo's working logs so that the commit carries AI attribution.
+#[test]
+fn test_issue_954_non_git_cwd_unrelated_to_target_repo_mock_ai() {
+    // Create a non-git workspace directory (simulates launching from /tmp or ~/)
+    // This directory is a SIBLING of the target repo, not its parent.
+    let cwd_workspace = create_unique_workspace("git-ai-954-non-git-cwd");
+
+    // Target repo lives in a completely separate location (also under /tmp but as a sibling)
+    let repo_target = TestRepo::new();
+
+    // Set up initial commit in target repo
+    let mut readme = repo_target.filename("README.md");
+    readme.set_contents(crate::lines!["# Target Repo"]);
+    repo_target.stage_all_and_commit("initial commit").unwrap();
+
+    // Write AI content to the target repo
+    fs::write(
+        repo_target.path().join("auth.ts"),
+        "export function verifyJwt(token: string): boolean {\n  return true;\n}\n",
+    )
+    .unwrap();
+
+    let target_file = repo_target.canonical_path().join("auth.ts");
+
+    // Checkpoint from the unrelated non-git CWD with an absolute path to the file.
+    // Before the fix, this failed because the workspace boundary was set to cwd_workspace,
+    // and find_repository_for_file refused to search outside that boundary.
+    repo_target
+        .git_ai_from_working_dir(
+            &cwd_workspace,
+            &["checkpoint", "mock_ai", target_file.to_str().unwrap()],
+        )
+        .expect("checkpoint from non-git CWD unrelated to target repo should succeed");
+
+    // Verify the working log was written in the target repo before committing
+    let working_log = repo_target.current_working_logs();
+    let ai_files = working_log.all_ai_touched_files().unwrap_or_default();
+    assert!(
+        !ai_files.is_empty(),
+        "Issue #954: Working log entries should exist in the target repo \
+         when checkpoint is run from a non-git CWD that is unrelated to the target repo. \
+         Found no AI-touched files in working log."
+    );
+
+    // Commit in the target repo and verify AI attribution
+    let commit = repo_target.stage_all_and_commit("add AI jwt auth").unwrap();
+    assert!(
+        !commit.authorship_log.attestations.is_empty(),
+        "Issue #954: AI attribution should be present when Claude is launched from \
+         a non-git directory (e.g. /tmp) and writes files to a separate git repo. \
+         Expected non-empty attestations but got none."
+    );
+
+    let _ = fs::remove_dir_all(&cwd_workspace);
+}
+
+/// Issue #954 variant: non-git CWD, multiple files in multiple separate repos.
+/// Verifies that all target repos receive correct attribution.
+#[test]
+fn test_issue_954_non_git_cwd_multiple_target_repos() {
+    let cwd_workspace = create_unique_workspace("git-ai-954-multi-target-cwd");
+
+    let repo_a = TestRepo::new();
+    let repo_b = TestRepo::new();
+
+    for (repo, name) in [(&repo_a, "A"), (&repo_b, "B")] {
+        let mut readme = repo.filename("README.md");
+        readme.set_contents(crate::lines![format!("# Repo {}", name)]);
+        repo.stage_all_and_commit("initial commit").unwrap();
+    }
+
+    fs::write(repo_a.path().join("feature_a.ts"), "AI code A\n").unwrap();
+    fs::write(repo_b.path().join("feature_b.ts"), "AI code B\n").unwrap();
+
+    let file_a = repo_a.canonical_path().join("feature_a.ts");
+    let file_b = repo_b.canonical_path().join("feature_b.ts");
+
+    repo_a
+        .git_ai_from_working_dir(
+            &cwd_workspace,
+            &[
+                "checkpoint",
+                "mock_ai",
+                file_a.to_str().unwrap(),
+                file_b.to_str().unwrap(),
+            ],
+        )
+        .expect("multi-repo checkpoint from non-git CWD should succeed");
+
+    let commit_a = repo_a.stage_all_and_commit("AI edits in A").unwrap();
+    assert!(
+        !commit_a.authorship_log.attestations.is_empty(),
+        "Issue #954 (multi): repo_a should have AI attestations when checkpoint \
+         runs from a non-git CWD."
+    );
+
+    let commit_b = repo_b.stage_all_and_commit("AI edits in B").unwrap();
+    assert!(
+        !commit_b.authorship_log.attestations.is_empty(),
+        "Issue #954 (multi): repo_b should have AI attestations when checkpoint \
+         runs from a non-git CWD."
+    );
+
+    let _ = fs::remove_dir_all(&cwd_workspace);
+}
+
+/// Issue #954 variant: Claude preset with non-git CWD and file in a separate repo.
+/// Verifies that the Claude PostToolUse checkpoint records prompts correctly.
+#[test]
+fn test_issue_954_claude_preset_non_git_cwd() {
+    let cwd_workspace = create_unique_workspace("git-ai-954-claude-cwd");
+    let mut repo_target = TestRepo::new();
+
+    // Enable prompt sharing so we can assert prompts are non-empty
+    repo_target.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+    });
+
+    let target_root = repo_target.canonical_path();
+
+    // Set up initial commit
+    let target_file_path = target_root.join("auth.ts");
+    fs::write(&target_file_path, "// initial\n").unwrap();
+    repo_target.stage_all_and_commit("initial commit").unwrap();
+
+    // Copy transcript fixture
+    let transcript_path = target_root.join("claude-session.jsonl");
+    let fixture = fixture_path("example-claude-code.jsonl");
+    fs::copy(&fixture, &transcript_path).unwrap();
+
+    // Build hook input: cwd is the non-git workspace, file is in repo_target
+    let hook_input = json!({
+        "cwd": cwd_workspace.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "transcript_path": transcript_path.to_string_lossy().to_string(),
+        "tool_input": {
+            "file_path": target_file_path.to_string_lossy().to_string()
+        }
+    })
+    .to_string();
+
+    // Simulate AI edit
+    fs::write(
+        &target_file_path,
+        "// initial\nexport function verifyJwt(): boolean { return true; }\n",
+    )
+    .unwrap();
+
+    // Run checkpoint from non-git CWD with Claude preset
+    repo_target
+        .git_ai_from_working_dir(
+            &cwd_workspace,
+            &["checkpoint", "claude", "--hook-input", &hook_input],
+        )
+        .expect("Claude checkpoint from non-git CWD should succeed");
+
+    // Verify the working log was written in the target repo
+    let working_log = repo_target.current_working_logs();
+    let ai_files = working_log.all_ai_touched_files().unwrap_or_default();
+    assert!(
+        !ai_files.is_empty(),
+        "Issue #954 (claude): Working log entries should exist in target repo \
+         when Claude PostToolUse fires from a non-git CWD."
+    );
+
+    let commit = repo_target.stage_all_and_commit("AI auth changes").unwrap();
+    assert!(
+        !commit.authorship_log.metadata.prompts.is_empty(),
+        "Issue #954 (claude): Prompts should not be empty in target repo's git note \
+         when Claude is launched from a non-git CWD."
+    );
+    assert!(
+        !commit.authorship_log.attestations.is_empty(),
+        "Issue #954 (claude): AI attestations should be present when Claude is launched \
+         from a non-git CWD."
+    );
+
+    let _ = fs::remove_dir_all(&cwd_workspace);
 }

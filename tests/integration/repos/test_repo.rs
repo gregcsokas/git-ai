@@ -369,6 +369,47 @@ impl DaemonProcess {
 fn configure_test_home_env(command: &mut Command, test_home: &Path) {
     command.env("HOME", test_home);
     command.env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"));
+    // Redirect XDG_CONFIG_HOME so git does not read the real user's
+    // $XDG_CONFIG_HOME/git/config (which may contain filter drivers,
+    // aliases, or other settings that break test isolation).
+    command.env("XDG_CONFIG_HOME", test_home.join(".config"));
+    // Suppress system-level git config that could interfere with test isolation.
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    // Sanitize PATH: remove any directories that contain a git-ai wrapper.
+    // Without this, git internals (which call `git` sub-processes via PATH) will
+    // hit the installed release git-ai binary, which has async_mode=true and
+    // spawns a background daemon for every invocation — causing a process storm.
+    #[cfg(not(windows))]
+    if let Ok(path) = std::env::var("PATH") {
+        let sanitized: Vec<&str> = path
+            .split(':')
+            .filter(|dir| {
+                let git_path = std::path::Path::new(dir).join("git");
+                if git_path.is_file() || git_path.is_symlink() {
+                    // Shell-script wrapper containing "git-ai"
+                    if let Ok(contents) = fs::read_to_string(&git_path)
+                        && contents.contains("git-ai")
+                    {
+                        return false;
+                    }
+                    // Symlink whose target contains "git-ai"
+                    if let Ok(target) = std::fs::read_link(&git_path)
+                        && target.to_string_lossy().contains("git-ai")
+                    {
+                        return false;
+                    }
+                    // Canonical path contains "git-ai"
+                    if let Ok(canonical) = git_path.canonicalize()
+                        && canonical.to_string_lossy().contains("git-ai")
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+        command.env("PATH", sanitized.join(":"));
+    }
     #[cfg(windows)]
     {
         command.env("USERPROFILE", test_home);
@@ -644,6 +685,7 @@ fn is_known_checkpoint_preset(arg: &str) -> bool {
             | "opencode"
             | "pi"
             | "ai_tab"
+            | "firebender"
             | "mock_ai"
             | "droid"
             | "agent-v1"
@@ -667,10 +709,6 @@ fn normalize_test_git_ai_checkpoint_args(args: &[&str]) -> Vec<String> {
     let mut i = 1usize;
     while i < args.len() {
         match args[i] {
-            "--reset" => {
-                normalized.push(args[i].to_string());
-                i += 1;
-            }
             "--hook-input" => {
                 normalized.push(args[i].to_string());
                 if let Some(value) = args.get(i + 1) {
@@ -1030,6 +1068,9 @@ impl TestRepo {
         git_mode: GitTestMode,
         daemon_scope: DaemonTestScope,
     ) -> Self {
+        // Isolate this test binary's HOME before any git or git-ai subprocess is spawned.
+        ensure_isolated_process_home();
+
         let mut rng = rand::thread_rng();
         let n: u64 = rng.gen_range(0..10000000000);
         let base = std::env::temp_dir();
@@ -1712,9 +1753,6 @@ impl TestRepo {
                 "--hook-input" => {
                     i += 2;
                 }
-                "--reset" => {
-                    i += 1;
-                }
                 _ if arg.starts_with("--hook-input=") || arg.starts_with('-') => {
                     i += 1;
                 }
@@ -2311,7 +2349,14 @@ impl TestRepo {
             };
             Ok(combined)
         } else {
-            Err(stderr)
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stderr, stdout)
+            };
+            Err(combined)
         }
     }
 
@@ -2361,7 +2406,17 @@ impl TestRepo {
             };
             Ok(combined)
         } else {
-            Err(stderr)
+            // Combine stdout and stderr so callers can find structured
+            // output (e.g. JSON errors) that the command wrote to stdout
+            // before exiting with a non-zero status.
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stderr, stdout)
+            };
+            Err(combined)
         }
     }
 
@@ -2422,7 +2477,14 @@ impl TestRepo {
             };
             Ok(combined)
         } else {
-            Err(stderr)
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stderr, stdout)
+            };
+            Err(combined)
         }
     }
 
@@ -2550,13 +2612,25 @@ impl TestRepo {
 
                 self.sync_daemon_force();
 
-                let content = git_ai::git::refs::show_authorship_note(&repo, &head_commit)
-                    .ok_or_else(|| {
-                        format!(
-                            "No authorship log found for new commit {} after daemon sync",
-                            head_commit
-                        )
-                    })?;
+                // In daemon mode, the authorship note may not be immediately
+                // visible after the session completes due to filesystem flush
+                // timing. Retry briefly before failing.
+                let mut content = git_ai::git::refs::show_authorship_note(&repo, &head_commit);
+                if content.is_none() && self.git_mode.uses_daemon() {
+                    for _ in 0..10 {
+                        thread::sleep(Duration::from_millis(50));
+                        content = git_ai::git::refs::show_authorship_note(&repo, &head_commit);
+                        if content.is_some() {
+                            break;
+                        }
+                    }
+                }
+                let content = content.ok_or_else(|| {
+                    format!(
+                        "No authorship log found for new commit {} after daemon sync",
+                        head_commit
+                    )
+                })?;
                 let authorship_log = AuthorshipLog::deserialize_from_string(&content)
                     .map_err(|e| format!("Failed to parse authorship log: {}", e))?;
 
@@ -2726,7 +2800,126 @@ static TEMPLATE_REPO: OnceLock<PathBuf> = OnceLock::new();
 static TEMPLATE_BARE_REPO: OnceLock<PathBuf> = OnceLock::new();
 static COMPILED_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
+/// Find the real git binary by directly probing candidate paths — without reading
+/// any HOME-derived config. Called once during process HOME isolation setup.
+fn find_real_git_by_probe() -> String {
+    // Read HOME *before* we replace it with the isolated dir.
+    let local_git = std::env::var("HOME")
+        .map(|h| format!("{h}/.local/bin/git"))
+        .unwrap_or_default();
+
+    // Check ~/.local/bin/git first (Linux XDG user binary dir)
+    if !local_git.is_empty() {
+        let p = Path::new(&local_git);
+        if git_ai::config::is_real_git_candidate(p) {
+            return local_git;
+        }
+    }
+
+    let candidates: &[&str] = &[
+        "/opt/homebrew/bin/git", // macOS Homebrew ARM
+        "/usr/local/bin/git",    // macOS Homebrew Intel / manual
+        "/usr/bin/git",
+        "/bin/git",
+    ];
+    for c in candidates {
+        let p = Path::new(c);
+        if git_ai::config::is_real_git_candidate(p) {
+            return c.to_string();
+        }
+    }
+
+    // Last resort: rely on PATH (will fail if only git-ai is on PATH, but
+    // that scenario is caught by other guards).
+    "git".to_string()
+}
+
+/// Redirect this test binary's own HOME to an isolated temp directory.
+///
+/// This must run before any code reads HOME, which is why it is called at the
+/// top of both `real_git_executable()` and `new_with_mode_and_daemon_scope()`.
+/// The `OnceLock` guarantees the init runs exactly once even under parallel tests.
+///
+/// After this call:
+/// - `~/.git-ai/config.json` in the isolated HOME has `git_path` → real git and
+///   `async_mode: false`, so no daemon auto-spawn from in-process Config::get() calls.
+/// - `~/.gitconfig` is a minimal stub so plain git subprocesses don't fail.
+/// - Developer's real `~/.git-ai/`, `~/.claude/`, `~/.gitconfig` are unreachable.
+fn ensure_isolated_process_home() {
+    static PROCESS_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
+    PROCESS_HOME.get_or_init(|| {
+        let home = std::env::temp_dir().join(format!("git-ai-test-home-{}", std::process::id()));
+
+        fs::create_dir_all(&home).expect("create isolated process HOME");
+
+        // Minimal ~/.gitconfig so plain git subprocesses work
+        fs::write(
+            home.join(".gitconfig"),
+            "[user]\n\tname = Test User\n\temail = test@example.com\n",
+        )
+        .expect("write test .gitconfig");
+
+        // Probe for real git before we overwrite HOME
+        let real_git = find_real_git_by_probe();
+
+        // Minimal ~/.git-ai/config.json: real git_path + async_mode=false
+        let git_ai_dir = home.join(".git-ai");
+        fs::create_dir_all(&git_ai_dir).expect("create .git-ai dir");
+        // Escape backslashes for JSON (relevant on Windows)
+        let real_git_json = real_git.replace('\\', "\\\\");
+        fs::write(
+            git_ai_dir.join("config.json"),
+            format!(r#"{{"git_path":"{real_git_json}","feature_flags":{{"async_mode":false}}}}"#),
+        )
+        .expect("write test git-ai config");
+
+        // SAFETY: called once via OnceLock before any parallel test thread reads
+        // HOME or PATH. The OnceLock ensures no concurrent env var writes.
+        unsafe {
+            std::env::set_var("HOME", &home);
+
+            // Sanitize the process-level PATH to remove git-ai wrapper directories.
+            // This covers subprocess calls that don't go through configure_test_home_env
+            // (e.g., template repo init, bare repo init, worktree setup), preventing
+            // git internals from resolving `git` via PATH to the installed git-ai
+            // release binary (which has async_mode=true and would spawn daemons).
+            #[cfg(not(windows))]
+            if let Ok(path) = std::env::var("PATH") {
+                let sanitized = path
+                    .split(':')
+                    .filter(|dir| {
+                        let git_path = std::path::Path::new(dir).join("git");
+                        if git_path.is_file() || git_path.is_symlink() {
+                            if let Ok(contents) = fs::read_to_string(&git_path)
+                                && contents.contains("git-ai")
+                            {
+                                return false;
+                            }
+                            if let Ok(target) = std::fs::read_link(&git_path)
+                                && target.to_string_lossy().contains("git-ai")
+                            {
+                                return false;
+                            }
+                            if let Ok(canonical) = git_path.canonicalize()
+                                && canonical.to_string_lossy().contains("git-ai")
+                            {
+                                return false;
+                            }
+                        }
+                        true
+                    })
+                    .collect::<Vec<_>>()
+                    .join(":");
+                std::env::set_var("PATH", sanitized);
+            }
+        }
+        home
+    });
+}
+
 pub(crate) fn real_git_executable() -> &'static str {
+    // Ensure HOME is isolated before Config::get() caches HOME-derived paths.
+    ensure_isolated_process_home();
     git_ai::config::Config::get().git_cmd()
 }
 
@@ -2906,10 +3099,6 @@ mod tests {
         assert_eq!(
             normalize_test_git_ai_checkpoint_args(&["checkpoint", "src/lib.rs"]),
             vec!["checkpoint", "--", "src/lib.rs"]
-        );
-        assert_eq!(
-            normalize_test_git_ai_checkpoint_args(&["checkpoint", "--reset", "src/lib.rs"]),
-            vec!["checkpoint", "--reset", "--", "src/lib.rs"]
         );
     }
 

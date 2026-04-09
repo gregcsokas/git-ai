@@ -2,6 +2,7 @@ use crate::git::repository::Repository;
 use glob::Pattern;
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
 
 const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
     "*.lock",
@@ -92,7 +93,10 @@ pub fn load_linguist_generated_patterns_from_root_gitattributes(repo: &Repositor
     let Some(contents) = load_root_gitattributes_contents(repo) else {
         return Vec::new();
     };
+    parse_linguist_generated_patterns(&contents)
+}
 
+fn parse_linguist_generated_patterns(contents: &str) -> Vec<String> {
     let mut patterns = Vec::new();
 
     for raw_line in contents.lines() {
@@ -183,6 +187,34 @@ fn load_root_git_ai_ignore_contents(repo: &Repository) -> Option<String> {
     let workdir = repo.workdir().ok()?;
     let ignore_path = workdir.join(".git-ai-ignore");
     fs::read_to_string(ignore_path).ok()
+}
+
+/// Load `.git-ai-ignore` patterns from a repo root path directly (no Repository object needed).
+/// Use this when you have a `&Path` but not a `Repository` (e.g. in snapshot capture code).
+pub fn load_git_ai_ignore_patterns_from_path(repo_root: &Path) -> Vec<String> {
+    let contents = match fs::read_to_string(repo_root.join(".git-ai-ignore")) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut patterns = Vec::new();
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        patterns.push(line.to_string());
+    }
+    dedupe_patterns(patterns)
+}
+
+/// Load linguist-generated patterns from `.gitattributes` at a repo root path directly.
+/// Use this when you have a `&Path` but not a `Repository` (e.g. in snapshot capture code).
+/// Uses the same parser as `load_linguist_generated_patterns_from_root_gitattributes`.
+pub fn load_linguist_generated_patterns_from_path(repo_root: &Path) -> Vec<String> {
+    match fs::read_to_string(repo_root.join(".gitattributes")) {
+        Ok(contents) => parse_linguist_generated_patterns(&contents),
+        Err(_) => Vec::new(),
+    }
 }
 
 pub fn effective_ignore_patterns(

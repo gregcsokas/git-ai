@@ -836,6 +836,12 @@ fn proxy_to_git(
             }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
+            // Strip git-ai control vars so they don't leak into git subprocesses
+            // (e.g. alias scripts).  git-ai already consumed them; real git
+            // should not see them.  Notably, GIT_AI_ASYNC_MODE is read by the
+            // wrapper's FeatureFlags but must not appear inside alias scripts
+            // where tests like t0001-init.sh check for "no extra GIT_*" vars.
+            cmd.env_remove("GIT_AI_ASYNC_MODE");
             if suppress_trace2 {
                 cmd.env("GIT_TRACE2_EVENT", "0");
             }
@@ -869,6 +875,7 @@ fn proxy_to_git(
             }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
+            cmd.env_remove("GIT_AI_ASYNC_MODE");
             if suppress_trace2 {
                 cmd.env("GIT_TRACE2_EVENT", "0");
             }

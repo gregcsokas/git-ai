@@ -55,6 +55,8 @@ use std::fs::{self, File, OpenOptions};
 #[cfg(windows)]
 use std::io;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -90,7 +92,16 @@ const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 const WINDOWS_TRACE_PIPE_WORKERS: usize = 16;
 #[cfg(windows)]
 const WINDOWS_CONTROL_PIPE_WORKERS: usize = 8;
+#[cfg(windows)]
+const WINDOWS_STDOUT_HANDLE: u32 = (-11i32) as u32;
+#[cfg(windows)]
+const WINDOWS_STDERR_HANDLE: u32 = (-12i32) as u32;
 static DAEMON_PROCESS_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn SetStdHandle(nstdhandle: u32, hhandle: *mut std::ffi::c_void) -> i32;
+}
 
 #[cfg(not(windows))]
 pub type DaemonClientStream = LocalSocketStream;
@@ -966,7 +977,7 @@ fn inferred_top_stash_sha_from_rewrite_history(
                     stack.push(stash_sha);
                 }
             }
-            StashOperation::Pop | StashOperation::Drop => {
+            StashOperation::Pop | StashOperation::Drop | StashOperation::Branch => {
                 if let Some(stash_sha) = stash.stash_sha
                     && let Some(position) =
                         stack.iter().rposition(|existing| existing == &stash_sha)
@@ -1008,7 +1019,7 @@ fn resolve_stash_target_oid_for_terminal_payload(
                 ))
             })
             .map(Some),
-        "pop" | "drop" => {
+        "pop" | "drop" | "branch" => {
             if let Some(target_oid) = ref_changes
                 .iter()
                 .rfind(|change| change.reference == "refs/stash")
@@ -1263,7 +1274,6 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
                 &repo,
                 &author,
                 kind,
-                request.reset.unwrap_or(false),
                 request.quiet.unwrap_or(true),
                 request.agent_run_result,
                 request.is_pre_commit.unwrap_or(false),
@@ -1279,6 +1289,34 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
             Ok(())
         }
     }
+}
+
+fn compute_watermarks_from_stat(
+    repo_working_dir: &str,
+    file_paths: &[String],
+) -> std::collections::HashMap<String, u128> {
+    let repo_root = std::path::Path::new(repo_working_dir);
+    let mut watermarks = std::collections::HashMap::new();
+    for path in file_paths {
+        let full_path = repo_root.join(path);
+        if let Ok(metadata) = std::fs::symlink_metadata(&full_path)
+            && let Ok(mtime) = metadata.modified()
+        {
+            let nanos = mtime
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            // Normalize watermark keys the same way bash_tool::normalize_path does
+            // so that case-folded snapshot lookups on macOS/Windows find a match.
+            let key = crate::commands::checkpoint_agent::bash_tool::normalize_path(
+                std::path::Path::new(path),
+            )
+            .to_string_lossy()
+            .to_string();
+            watermarks.insert(key, nanos);
+        }
+    }
+    watermarks
 }
 
 fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
@@ -1478,22 +1516,47 @@ fn apply_checkout_switch_working_log_side_effect(
     if is_merge {
         let tracked_files = tracked_working_log_files(&repo, &old_head)?;
         if !tracked_files.is_empty() && carryover_snapshot.is_none() {
-            return Err(GitAiError::Generic(format!(
-                "{} --merge missing captured carryover snapshot",
+            // Carryover snapshot was not captured (e.g. the trace arrived before
+            // the worktree reflog was fully populated, or the wrapper already
+            // handled the migration).  Fall through to the rename path so the
+            // working log is migrated rather than lost.  Attribution may be
+            // slightly misaligned but is preserved.
+            debug_log(&format!(
+                "{} --merge missing carryover snapshot, falling back to rename",
                 cmd.primary_command.as_deref().unwrap_or("checkout")
-            )));
+            ));
+        } else {
+            if let Some(snapshot) = carryover_snapshot {
+                // Fix #957: When --merge produced conflict markers (exit_code != 0),
+                // the snapshot files contain conflict markers.  Strip them before
+                // restoring working-log carryover so byte-level attributions align
+                // with the clean content that restore_stashed_va would see.
+                let clean_snapshot: HashMap<String, String> = if cmd.exit_code != 0 {
+                    snapshot
+                        .iter()
+                        .map(|(k, v)| {
+                            let clean = if crate::authorship::virtual_attribution::content_has_conflict_markers(v) {
+                                crate::authorship::virtual_attribution::strip_conflict_markers_keep_ours(v)
+                            } else {
+                                v.clone()
+                            };
+                            (k.clone(), clean)
+                        })
+                        .collect()
+                } else {
+                    snapshot.clone()
+                };
+                restore_working_log_carryover(
+                    &repo,
+                    &old_head,
+                    &new_head,
+                    clean_snapshot,
+                    Some(repo.git_author_identity().name_or_unknown()),
+                )?;
+            }
+            repo.storage.delete_working_log_for_base_commit(&old_head)?;
+            return Ok(());
         }
-        if let Some(snapshot) = carryover_snapshot {
-            restore_working_log_carryover(
-                &repo,
-                &old_head,
-                &new_head,
-                snapshot.clone(),
-                Some(repo.git_author_identity().name_or_unknown()),
-            )?;
-        }
-        repo.storage.delete_working_log_for_base_commit(&old_head)?;
-        return Ok(());
     }
 
     repo.storage.rename_working_log(&old_head, &new_head)?;
@@ -1542,10 +1605,31 @@ fn recent_checkout_switch_prerequisite_from_command(
     let is_merge = parsed.has_command_flag("--merge") || parsed.has_command_flag("-m");
     if is_merge {
         return carryover_snapshot.and_then(|snapshot| {
-            (!snapshot.is_empty()).then(|| RecentReplayPrerequisite::CheckoutSwitchMerge {
-                target_head: new_head,
-                old_head,
-                final_state: snapshot.clone(),
+            (!snapshot.is_empty()).then(|| {
+                // Strip conflict markers before storing so the replay path receives
+                // clean content.  Mirrors the stripping done in the direct side-effect
+                // path (apply_checkout_switch_working_log_side_effect) for the same
+                // reason: --merge with exit_code != 0 leaves conflict markers on disk.
+                let clean_state: HashMap<String, String> = if cmd.exit_code != 0 {
+                    snapshot
+                        .iter()
+                        .map(|(k, v)| {
+                            let clean = if crate::authorship::virtual_attribution::content_has_conflict_markers(v) {
+                                crate::authorship::virtual_attribution::strip_conflict_markers_keep_ours(v)
+                            } else {
+                                v.clone()
+                            };
+                            (k.clone(), clean)
+                        })
+                        .collect()
+                } else {
+                    snapshot.clone()
+                };
+                RecentReplayPrerequisite::CheckoutSwitchMerge {
+                    target_head: new_head,
+                    old_head,
+                    final_state: clean_state,
+                }
             })
         });
     }
@@ -1631,6 +1715,7 @@ fn build_human_replay_agent_result(
         edited_filepaths: None,
         will_edit_filepaths: Some(files),
         dirty_files: Some(dirty_files),
+        captured_checkpoint_id: None,
     }
 }
 
@@ -2308,19 +2393,40 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     if base_commit.trim().is_empty() || target_commit.trim().is_empty() {
         return Ok(());
     }
-    let dirty_files = if let Some(snapshot) = carryover_snapshot {
-        snapshot.clone()
+
+    // Resolve the repo working directory once — needed for bash snapshot checks below.
+    let repo_workdir = repo
+        .workdir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let repo_root = std::path::Path::new(&repo_workdir);
+
+    let committed_diff_base = if base_commit == "initial" {
+        None
     } else {
-        committed_file_snapshot_between_commits(
-            repo,
-            if base_commit == "initial" {
-                None
-            } else {
-                Some(base_commit.as_str())
-            },
-            &target_commit,
-        )?
+        Some(base_commit.as_str())
     };
+
+    let dirty_files = if let Some(snapshot) = carryover_snapshot {
+        let mut dirty = snapshot.clone();
+        // The carryover snapshot only tracks files already in the working log at
+        // checkpoint time.  When a bash tool is in-flight at commit time, files
+        // edited *after* the last checkpoint (e.g. modified between PostToolUse A
+        // and the final commit) are absent from the snapshot.  Supplement with the
+        // full committed diff so those files also receive attribution.
+        if crate::commands::checkpoint_agent::bash_tool::has_active_bash_inflight(repo_root)
+            && let Ok(full_diff) =
+                committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)
+        {
+            for (path, content) in full_diff {
+                dirty.entry(path).or_insert(content);
+            }
+        }
+        dirty
+    } else {
+        committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)?
+    };
+
     let changed_files = commit_replay_files_from_snapshot(&dirty_files);
     if changed_files.is_empty() {
         return Ok(());
@@ -2331,13 +2437,50 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     if changed_files.is_empty() {
         return Ok(());
     }
-    let replay_agent_result = build_human_replay_agent_result(changed_files, dirty_files);
+
+    // Mirror the wrapper-mode pre-commit hook: if a bash tool is in-flight when
+    // the commit lands, attribute the committed files to that AI agent rather than
+    // writing a synthetic Human checkpoint.  Bash snapshot files are written at
+    // PreToolUse time and live for 300 s, so they are always present on disk when
+    // the daemon processes the trace2 commit event (typically < 1 s later).
+    let (checkpoint_kind, replay_agent_result) =
+        match crate::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash(
+            repo_root,
+            &repo_workdir,
+        ) {
+            Some((kind, Some(ai_result))) => {
+                // Bash in flight with full context — attribute committed files to the AI agent.
+                // AiAgent checkpoints use `edited_filepaths` (not `will_edit_filepaths`) for the
+                // explicit path list, matching how `explicit_capture_target_paths` dispatches.
+                let result = AgentRunResult {
+                    edited_filepaths: Some(changed_files),
+                    dirty_files: Some(dirty_files),
+                    will_edit_filepaths: None,
+                    ..ai_result
+                };
+                (kind, result)
+            }
+            Some((kind, None)) => {
+                // Bash in flight but no context details — use AI kind with daemon agent_id.
+                let result = AgentRunResult {
+                    edited_filepaths: Some(changed_files),
+                    dirty_files: Some(dirty_files),
+                    will_edit_filepaths: None,
+                    checkpoint_kind: kind,
+                    ..build_human_replay_agent_result(vec![], HashMap::new())
+                };
+                (kind, result)
+            }
+            None => {
+                let result = build_human_replay_agent_result(changed_files, dirty_files);
+                (CheckpointKind::Human, result)
+            }
+        };
 
     crate::commands::checkpoint::run_with_base_commit_override_with_policy(
         repo,
         author,
-        CheckpointKind::Human,
-        false,
+        checkpoint_kind,
         true,
         Some(replay_agent_result),
         base_commit != "initial",
@@ -2400,7 +2543,10 @@ fn apply_rewrite_side_effect(
     }
     match &rewrite_event {
         RewriteLogEvent::Stash { stash }
-            if matches!(stash.operation, StashOperation::Apply | StashOperation::Pop) =>
+            if matches!(
+                stash.operation,
+                StashOperation::Apply | StashOperation::Pop | StashOperation::Branch
+            ) =>
         {
             if let (Some(head_sha), Some(stash_sha)) =
                 (stash.head_sha.as_ref(), stash.stash_sha.as_ref())
@@ -2583,15 +2729,15 @@ fn apply_stash_rewrite_side_effect(
                 &stash_event.pathspecs,
             )?;
         }
-        StashOperation::Apply | StashOperation::Pop => {
+        StashOperation::Apply | StashOperation::Pop | StashOperation::Branch => {
             let Some(head_sha) = stash_event.head_sha.as_deref() else {
                 return Err(GitAiError::Generic(
-                    "stash apply/pop missing destination head".to_string(),
+                    "stash apply/pop/branch missing destination head".to_string(),
                 ));
             };
             let Some(stash_sha) = stash_event.stash_sha.as_deref() else {
                 return Err(GitAiError::Generic(
-                    "stash apply/pop missing stash oid".to_string(),
+                    "stash apply/pop/branch missing stash oid".to_string(),
                 ));
             };
             stash_hooks::restore_stash_attributions(repo, head_sha, stash_sha)?;
@@ -2705,22 +2851,105 @@ fn strict_cherry_pick_mappings_from_command(
             context
         )));
     }
-    let (original_head, new_commits) = resolve_linear_head_commit_chain_for_worktree(
-        worktree,
+    // Try to reconstruct the cherry-pick chain.  When `--skip` is used, one or
+    // more source commits produce no new commit (they were empty / already applied),
+    // so the actual number of new commits may be less than source_commits.len().
+    // We iterate from the largest plausible count downward, taking the first
+    // (largest) match.  When count < source_commits.len(), we use commit-message
+    // matching to identify which source commits correspond to which new commits,
+    // since skipped commits can appear anywhere in the sequence (not only at the front).
+    let has_skip = cmd.invoked_args.iter().any(|arg| arg == "--skip");
+    let min_count = if has_skip { 1 } else { source_commits.len() };
+    let mut last_err = String::new();
+    for count in (min_count..=source_commits.len()).rev() {
+        match resolve_linear_head_commit_chain_for_worktree(
+            worktree,
+            new_head,
+            count,
+            Some("cherry-pick"),
+        ) {
+            Ok((original_head, new_commits)) => {
+                let matched_source = if count < source_commits.len() {
+                    // Some commits were skipped: use commit-message matching to find
+                    // which source commits were actually applied, since skips can occur
+                    // anywhere in the sequence (not just at the front).
+                    match_source_to_new_commits_by_message(worktree, &source_commits, &new_commits)
+                        .unwrap_or_else(|| source_commits[source_commits.len() - count..].to_vec())
+                } else {
+                    source_commits
+                };
+                return Ok((original_head, matched_source, new_commits));
+            }
+            Err(err) => last_err = err.to_string(),
+        }
+    }
+    Err(GitAiError::Generic(format!(
+        "{} failed to reconstruct cherry-pick commits new={} expected_count={}: {}",
+        context,
         new_head,
         source_commits.len(),
-        Some("cherry-pick"),
-    )
-    .map_err(|err| {
-        GitAiError::Generic(format!(
-            "{} failed to reconstruct cherry-pick commits new={} expected_count={}: {}",
-            context,
-            new_head,
-            source_commits.len(),
-            err
-        ))
-    })?;
-    Ok((original_head, source_commits, new_commits))
+        last_err
+    )))
+}
+
+/// Match source commits to new commits by commit subject (first line of message).
+///
+/// Cherry-pick preserves commit messages, so we can align source commits with new commits
+/// by matching their subjects in order.  This correctly handles `--skip` when the skipped
+/// commit is not the first in the sequence.  Returns `None` if matching is ambiguous or
+/// fails so the caller can fall back to the simpler front-trim heuristic.
+fn match_source_to_new_commits_by_message(
+    worktree: &Path,
+    source_commits: &[String],
+    new_commits: &[String],
+) -> Option<Vec<String>> {
+    if new_commits.is_empty() || source_commits.len() <= new_commits.len() {
+        return None;
+    }
+
+    let get_subject = |sha: &str| -> Option<String> {
+        let args = vec![
+            "-C".to_string(),
+            worktree.to_string_lossy().to_string(),
+            "log".to_string(),
+            "--format=%s".to_string(),
+            "-1".to_string(),
+            sha.to_string(),
+        ];
+        exec_git(&args)
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    let new_subjects: Vec<String> = new_commits.iter().filter_map(|s| get_subject(s)).collect();
+    if new_subjects.len() != new_commits.len() {
+        return None; // Could not get all subjects
+    }
+
+    // For each new_subject, find the first source commit (after the last match) with the same subject.
+    let mut matched = Vec::with_capacity(new_commits.len());
+    let mut search_from = 0usize;
+    for new_subj in &new_subjects {
+        let found = source_commits[search_from..]
+            .iter()
+            .enumerate()
+            .find(|(_, src)| get_subject(src).as_deref() == Some(new_subj.as_str()));
+        match found {
+            Some((rel_idx, src)) => {
+                matched.push(src.clone());
+                search_from += rel_idx + 1;
+            }
+            None => return None, // Could not match — fall back
+        }
+    }
+
+    if matched.len() == new_commits.len() {
+        Some(matched)
+    } else {
+        None
+    }
 }
 
 /// Collect positional arguments from a cherry-pick command as potential commit
@@ -3076,13 +3305,12 @@ fn remove_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 fn daemon_is_test_mode() -> bool {
     std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
         || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
 }
 
-#[cfg(unix)]
 fn daemon_log_dir(config: &DaemonConfig) -> PathBuf {
     config.internal_dir.join("daemon").join("logs")
 }
@@ -3105,8 +3333,14 @@ fn maybe_setup_daemon_log_file(config: &DaemonConfig) -> Option<DaemonLogGuard> 
 }
 
 #[cfg(windows)]
-fn maybe_setup_daemon_log_file(_config: &DaemonConfig) -> Option<DaemonLogGuard> {
-    None
+fn maybe_setup_daemon_log_file(config: &DaemonConfig) -> Option<DaemonLogGuard> {
+    match setup_daemon_log_file(config) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            debug_log(&format!("daemon log file setup failed: {}", e));
+            None
+        }
+    }
 }
 
 struct DaemonLogGuard {
@@ -3144,10 +3378,89 @@ fn setup_daemon_log_file(config: &DaemonConfig) -> Result<DaemonLogGuard, GitAiE
     Ok(DaemonLogGuard { _file: file })
 }
 
+#[cfg(windows)]
+fn setup_daemon_log_file(config: &DaemonConfig) -> Result<DaemonLogGuard, GitAiError> {
+    let log_dir = daemon_log_dir(config);
+    fs::create_dir_all(&log_dir)?;
+
+    let prune_dir = log_dir.clone();
+    std::thread::spawn(move || prune_stale_daemon_logs(&prune_dir));
+
+    let log_path = log_dir.join(format!("{}.log", std::process::id()));
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    redirect_windows_stdio_to_log_file(&file)?;
+    eprintln!("[git-ai] daemon log initialized at {}", log_path.display());
+
+    Ok(DaemonLogGuard { _file: file })
+}
+
+#[cfg(windows)]
+fn redirect_windows_stdio_to_log_file(file: &File) -> Result<(), GitAiError> {
+    redirect_windows_stdio_stream(file, 1, WINDOWS_STDOUT_HANDLE)?;
+    redirect_windows_stdio_stream(file, 2, WINDOWS_STDERR_HANDLE)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn redirect_windows_stdio_stream(
+    file: &File,
+    std_fd: libc::c_int,
+    std_handle: u32,
+) -> Result<(), GitAiError> {
+    let clone = file.try_clone()?;
+    let raw_handle = clone.into_raw_handle();
+    let fd = unsafe {
+        libc::open_osfhandle(
+            raw_handle as libc::intptr_t,
+            libc::O_APPEND | libc::O_BINARY,
+        )
+    };
+    if fd == -1 {
+        unsafe {
+            drop(File::from_raw_handle(raw_handle));
+        }
+        return Err(GitAiError::Generic(format!(
+            "open_osfhandle failed for daemon log stream {}: {}",
+            std_fd,
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let dup_result = unsafe { libc::dup2(fd, std_fd) };
+    if dup_result == -1 {
+        let err = std::io::Error::last_os_error();
+        let _ = unsafe { libc::close(fd) };
+        return Err(GitAiError::Generic(format!(
+            "dup2 failed for daemon log stream {}: {}",
+            std_fd, err
+        )));
+    }
+    if unsafe { libc::close(fd) } == -1 {
+        debug_log(&format!(
+            "close failed for daemon log stream {} after successful redirect: {}",
+            std_fd,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let set_handle_result = unsafe { SetStdHandle(std_handle, file.as_raw_handle()) };
+    if set_handle_result == 0 {
+        return Err(GitAiError::Generic(format!(
+            "SetStdHandle failed for daemon log stream {}: {}",
+            std_fd,
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Remove log files from previous daemon runs that are older than one week and
 /// whose PID is no longer alive, to avoid unbounded growth while keeping recent
 /// logs available for debugging.
-#[cfg(unix)]
 fn prune_stale_daemon_logs(log_dir: &Path) {
     let one_week = std::time::Duration::from_secs(7 * 24 * 60 * 60);
     let entries = match fs::read_dir(log_dir) {
@@ -3160,22 +3473,26 @@ fn prune_stale_daemon_logs(log_dir: &Path) {
             Some(s) => s,
             None => continue,
         };
-        let pid: u32 = match stem.parse() {
+        let _pid: u32 = match stem.parse() {
             Ok(p) => p,
             Err(_) => continue,
         };
-        if process_alive(pid) {
-            continue;
-        }
         let dominated = path
             .metadata()
             .ok()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age > one_week);
-        if dominated {
-            let _ = fs::remove_file(&path);
+        if !dominated {
+            continue;
         }
+        #[cfg(unix)]
+        {
+            if process_alive(_pid) {
+                continue;
+            }
+        }
+        let _ = fs::remove_file(&path);
     }
 }
 
@@ -4076,15 +4393,22 @@ impl ActorDaemonCoordinator {
         &self,
         input: CarryoverCaptureInput<'_>,
     ) -> Result<Option<String>, GitAiError> {
-        if input.exit_code != 0 {
-            return Ok(None);
-        }
-
         let parsed = parse_git_cli_args(trace_invocation_args(input.argv));
         let command = parsed.command.as_deref().or(input.primary_command);
         let Some(command) = command else {
             return Ok(None);
         };
+
+        // `checkout/switch --merge` exits with code 1 when it produces conflict
+        // markers, but HEAD still moves to the new branch.  The daemon requires a
+        // carryover snapshot for such commands, so we must not bail out early on
+        // non-zero exit here.  All other commands with non-zero exit produce no
+        // meaningful state transition and need no snapshot.
+        let is_merge_checkout = (command == "checkout" || command == "switch")
+            && (parsed.has_command_flag("--merge") || parsed.has_command_flag("-m"));
+        if input.exit_code != 0 && !is_merge_checkout {
+            return Ok(None);
+        }
 
         // Repo-creating commands (clone, init) have no meaningful carryover
         // state — the target repo doesn't exist before the command runs, and the
@@ -5091,36 +5415,82 @@ impl ActorDaemonCoordinator {
         for (order, ready_entry) in ready {
             match ready_entry {
                 FamilySequencerEntry::ReadyCommand(command) => {
-                    let result = self.coordinator.route_command(*command).await;
-                    let applied = match result {
-                        Ok(applied) => applied,
-                        Err(error) => {
+                    // Wrap the entire command + side-effect pipeline in catch_unwind
+                    // so that a panic (e.g. from UTF-8 boundary issues in diff parsing)
+                    // does not kill the daemon process.
+                    let side_effect_result = {
+                        let future = async {
+                            let applied = self.coordinator.route_command(*command).await?;
+                            let side_effect = self
+                                .maybe_apply_side_effects_for_applied_command(
+                                    Some(family),
+                                    &applied,
+                                )
+                                .await;
+                            Ok::<_, GitAiError>((applied, side_effect))
+                        };
+                        let caught = std::panic::AssertUnwindSafe(future);
+                        futures::FutureExt::catch_unwind(caught).await
+                    };
+                    match side_effect_result {
+                        Ok(Ok((applied, side_effect_result))) => {
+                            if let Err(error) = &side_effect_result {
+                                let _ = self.record_side_effect_error(family, order, error);
+                                debug_log(&format!(
+                                    "daemon command side effect failed for family {} seq {}: {}",
+                                    family, applied.seq, error
+                                ));
+                            }
+                            if let Err(error) = self.append_command_completion_log(
+                                family,
+                                &applied,
+                                &side_effect_result,
+                                order,
+                            ) {
+                                let _ = self.record_side_effect_error(family, order, &error);
+                                debug_log(&format!(
+                                    "daemon command completion log write failed for family {} order {}: {}",
+                                    family, order, error
+                                ));
+                            }
+                        }
+                        Ok(Err(error)) => {
                             let _ = self.record_side_effect_error(family, order, &error);
                             debug_log(&format!(
                                 "daemon command apply failed for family {} order {}: {}",
                                 family, order, error
                             ));
-                            continue;
                         }
-                    };
-                    let result = self
-                        .maybe_apply_side_effects_for_applied_command(Some(family), &applied)
-                        .await;
-                    if let Err(error) = &result {
-                        let _ = self.record_side_effect_error(family, order, error);
-                        debug_log(&format!(
-                            "daemon command side effect failed for family {} seq {}: {}",
-                            family, applied.seq, error
-                        ));
-                    }
-                    if let Err(error) =
-                        self.append_command_completion_log(family, &applied, &result, order)
-                    {
-                        let _ = self.record_side_effect_error(family, order, &error);
-                        debug_log(&format!(
-                            "daemon command completion log write failed for family {} order {}: {}",
-                            family, order, error
-                        ));
+                        Err(panic_payload) => {
+                            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
+                            {
+                                s.clone()
+                            } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                s.to_string()
+                            } else {
+                                "unknown panic".to_string()
+                            };
+                            let error = GitAiError::Generic(format!(
+                                "daemon command side effect panic: {}",
+                                panic_msg
+                            ));
+                            let _ = self.record_side_effect_error(family, order, &error);
+                            debug_log(&format!(
+                                "daemon command side effect panic for family {} order {}: {}",
+                                family, order, panic_msg
+                            ));
+                            observability::log_error(
+                                &error,
+                                Some(serde_json::json!({
+                                    "component": "daemon",
+                                    "phase": "command_side_effect",
+                                    "reason": "panic_in_side_effect",
+                                    "panic_message": panic_msg,
+                                    "family": family,
+                                    "order": order,
+                                })),
+                            );
+                        }
                     }
                 }
                 FamilySequencerEntry::Checkpoint {
@@ -5131,16 +5501,129 @@ impl ActorDaemonCoordinator {
                         CheckpointRunRequest::Captured(request) => Some(request.capture_id.clone()),
                         CheckpointRunRequest::Live(_) => None,
                     };
-                    let ack = self
-                        .coordinator
-                        .apply_checkpoint(Path::new(request.repo_working_dir()))
-                        .await;
+                    // Compute before the future consumes `request`.
+                    let repo_wd = request.repo_working_dir().to_string();
+                    let checkpoint_file_paths: Vec<String> = match request.as_ref() {
+                        CheckpointRunRequest::Live(req) => req
+                            .agent_run_result
+                            .as_ref()
+                            .and_then(|r| {
+                                r.edited_filepaths
+                                    .clone()
+                                    .or_else(|| r.will_edit_filepaths.clone())
+                            })
+                            .unwrap_or_default(),
+                        CheckpointRunRequest::Captured(req) => {
+                            crate::commands::checkpoint::load_captured_checkpoint_manifest(
+                                &req.capture_id,
+                            )
+                            .ok()
+                            .map(|m| m.files.iter().map(|f| f.path.clone()).collect())
+                            .unwrap_or_default()
+                        }
+                    };
+                    // Extract kind before request is consumed by apply_checkpoint_side_effect.
+                    let is_live_human_checkpoint = matches!(
+                        request.as_ref(),
+                        CheckpointRunRequest::Live(req) if req.kind.as_deref() == Some("human")
+                    );
                     let should_log_completion =
                         crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
-                    let mut result = match ack {
-                        Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
-                        Err(error) => Err(error),
+                    // Wrap checkpoint processing in catch_unwind to recover from panics.
+                    let checkpoint_result = {
+                        let future = async {
+                            let ack = self
+                                .coordinator
+                                .apply_checkpoint(Path::new(request.repo_working_dir()))
+                                .await;
+                            match ack {
+                                Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
+                                Err(error) => Err(error),
+                            }
+                        };
+                        let caught = std::panic::AssertUnwindSafe(future);
+                        futures::FutureExt::catch_unwind(caught).await
                     };
+                    let mut result = match checkpoint_result {
+                        Ok(inner) => inner,
+                        Err(panic_payload) => {
+                            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
+                            {
+                                s.clone()
+                            } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                s.to_string()
+                            } else {
+                                "unknown panic".to_string()
+                            };
+                            debug_log(&format!(
+                                "daemon checkpoint side effect panic for family {} order {}: {}",
+                                family, order, panic_msg
+                            ));
+                            observability::log_error(
+                                &GitAiError::Generic(format!(
+                                    "daemon checkpoint side effect panic: {}",
+                                    panic_msg
+                                )),
+                                Some(serde_json::json!({
+                                    "component": "daemon",
+                                    "phase": "checkpoint_side_effect",
+                                    "reason": "panic_in_side_effect",
+                                    "panic_message": panic_msg,
+                                    "family": family,
+                                    "order": order,
+                                })),
+                            );
+                            Err(GitAiError::Generic(format!(
+                                "daemon checkpoint panic: {}",
+                                panic_msg
+                            )))
+                        }
+                    };
+                    if result.is_ok() {
+                        let per_file = if !checkpoint_file_paths.is_empty() {
+                            compute_watermarks_from_stat(&repo_wd, &checkpoint_file_paths)
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        // Advance the worktree watermark for every live Human checkpoint so
+                        // the bash tool pre-hook always has a baseline for files not covered
+                        // by a per-file (scoped) watermark.
+                        //
+                        // Previously this was restricted to `checkpoint_file_paths.is_empty()`,
+                        // but bare-CLI `git-ai checkpoint` always populates file paths via
+                        // `get_all_files_for_mock_ai`, so the condition was never true and the
+                        // Tier-2 worktree watermark was never set. Removing that restriction
+                        // means the worktree baseline is always updated on Human checkpoints.
+                        //
+                        // Per-file (Tier 1) watermarks set above take precedence in
+                        // `find_stale_files`, so this does not cause false positives for
+                        // files already covered by a scoped checkpoint.
+                        // AiAgent checkpoints must NOT set the baseline (no guarantee all
+                        // human-edited files were captured). Captured checkpoints are always
+                        // scoped and never reach this branch.
+                        let is_full_human_checkpoint = is_live_human_checkpoint;
+                        let per_worktree = if is_full_human_checkpoint {
+                            let now_ns = std::time::SystemTime::now()
+                                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos();
+                            std::collections::HashMap::from([(repo_wd.clone(), now_ns)])
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        if !per_file.is_empty() || !per_worktree.is_empty() {
+                            let _ = self
+                                .coordinator
+                                .update_watermarks_family(
+                                    Path::new(&repo_wd),
+                                    crate::daemon::domain::WatermarkState {
+                                        per_file,
+                                        per_worktree,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
                     if let Some(capture_id) = captured_checkpoint_id
                         && let Err(cleanup_error) =
                             crate::commands::checkpoint::delete_captured_checkpoint(&capture_id)
@@ -5369,7 +5852,7 @@ impl ActorDaemonCoordinator {
                         .flatten()
                 })
             }),
-            StashOperation::Pop | StashOperation::Drop => {
+            StashOperation::Pop | StashOperation::Drop | StashOperation::Branch => {
                 cmd.stash_target_oid.clone().or_else(|| {
                     cmd.ref_changes
                         .iter()
@@ -5380,7 +5863,12 @@ impl ActorDaemonCoordinator {
             }
             StashOperation::List => None,
         };
-        if resolved.is_some() || !matches!(operation, StashOperation::Pop | StashOperation::Drop) {
+        if resolved.is_some()
+            || !matches!(
+                operation,
+                StashOperation::Pop | StashOperation::Drop | StashOperation::Branch
+            )
+        {
             return Ok(resolved);
         }
         if !stash_target_spec_is_top_of_stack(stash_ref) {
@@ -5852,6 +6340,7 @@ impl ActorDaemonCoordinator {
                         crate::daemon::domain::StashOpKind::Pop => StashOperation::Pop,
                         crate::daemon::domain::StashOpKind::Drop => StashOperation::Drop,
                         crate::daemon::domain::StashOpKind::List => StashOperation::List,
+                        crate::daemon::domain::StashOpKind::Branch => StashOperation::Branch,
                         _ => StashOperation::Create,
                     };
                     let stash_sha =
@@ -5862,7 +6351,7 @@ impl ActorDaemonCoordinator {
                             stash_sha.as_deref(),
                             head.as_ref(),
                         )?,
-                        StashOperation::Apply | StashOperation::Pop => {
+                        StashOperation::Apply | StashOperation::Pop | StashOperation::Branch => {
                             Self::resolve_stash_restore_head_for_event(head.as_ref(), cmd)
                         }
                         StashOperation::Drop | StashOperation::List => None,
@@ -5874,7 +6363,10 @@ impl ActorDaemonCoordinator {
                     };
                     if matches!(
                         operation,
-                        StashOperation::Apply | StashOperation::Pop | StashOperation::Drop
+                        StashOperation::Apply
+                            | StashOperation::Pop
+                            | StashOperation::Branch
+                            | StashOperation::Drop
                     ) && stash_sha.is_none()
                     {
                         return Err(GitAiError::Generic(format!(
@@ -5884,7 +6376,10 @@ impl ActorDaemonCoordinator {
                     }
                     if matches!(
                         operation,
-                        StashOperation::Create | StashOperation::Apply | StashOperation::Pop
+                        StashOperation::Create
+                            | StashOperation::Apply
+                            | StashOperation::Pop
+                            | StashOperation::Branch
                     ) && head_sha.is_none()
                     {
                         return Err(GitAiError::Generic(format!(
@@ -5898,7 +6393,7 @@ impl ActorDaemonCoordinator {
                         stash_sha,
                         head_sha,
                         pathspecs,
-                        true,
+                        cmd.exit_code == 0,
                         Vec::new(),
                     )));
                 }
@@ -6002,6 +6497,16 @@ impl ActorDaemonCoordinator {
         family: Option<&str>,
         applied: &crate::daemon::domain::AppliedCommand,
     ) -> Result<(), GitAiError> {
+        // Test-only: allow inducing a panic in the side-effect pipeline to verify
+        // that the daemon's catch_unwind recovery keeps the process alive.
+        // Uses a file-based flag so the test can remove the file between commands.
+        #[cfg(feature = "test-support")]
+        if let Ok(path) = std::env::var("GIT_AI_TEST_PANIC_IN_SIDE_EFFECT_FLAG")
+            && std::path::Path::new(&path).exists()
+        {
+            panic!("test-induced panic in side-effect pipeline");
+        }
+
         let cmd = &applied.command;
         let events = &applied.analysis.events;
         let parsed_invocation = parsed_invocation_for_normalized_command(cmd);
@@ -6148,7 +6653,43 @@ impl ActorDaemonCoordinator {
                     self.set_pending_cherry_pick_sources_for_worktree(worktree, source_refs)?;
                 }
             }
-            return Ok(());
+            // Fix #957: `checkout/switch --merge` exits with code 1 when it produces
+            // conflict markers but HEAD still moves to the target branch.  We must not
+            // return early here — fall through so apply_checkout_switch_working_log_side_effect
+            // and recent_checkout_switch_prerequisite_from_command can migrate the working log.
+            let is_merge_checkout =
+                matches!(cmd.primary_command.as_deref(), Some("checkout" | "switch")) && {
+                    let p = parsed_invocation_for_normalized_command(cmd);
+                    p.has_command_flag("--merge") || p.has_command_flag("-m")
+                };
+            // For stash pop/apply/branch with non-zero exit (typically conflict), don't
+            // skip processing. The stash may have been partially applied and attribution
+            // should still be restored. We cannot rely on `has_stash_conflict_for_repo`
+            // because in daemon mode the conflict check runs lazily at sync time -- by
+            // which point the user may already have resolved the conflict with `git add`.
+            // Instead, always attempt restoration for stash restore operations; if the
+            // stash was never applied the restore is a harmless no-op.
+            let is_stash_restore = cmd.primary_command.as_deref() == Some("stash")
+                && events.iter().any(|event| {
+                    matches!(
+                        event,
+                        crate::daemon::domain::SemanticEvent::StashOperation {
+                            kind: crate::daemon::domain::StashOpKind::Pop
+                                | crate::daemon::domain::StashOpKind::Apply
+                                | crate::daemon::domain::StashOpKind::Branch,
+                            ..
+                        }
+                    )
+                });
+            if !is_merge_checkout && !is_stash_restore {
+                return Ok(());
+            }
+            if is_stash_restore {
+                debug_log(&format!(
+                    "Stash restore with non-zero exit for sid={}, continuing to restore attribution",
+                    cmd.root_sid
+                ));
+            }
         }
 
         if let Some(worktree) = cmd.worktree.as_ref() {
@@ -6394,6 +6935,15 @@ impl ActorDaemonCoordinator {
         Ok(ControlResponse::ok(None, None))
     }
 
+    async fn watermarks_for_family(
+        &self,
+        repo_working_dir: String,
+    ) -> Result<crate::daemon::domain::WatermarkState, GitAiError> {
+        self.coordinator
+            .watermarks_family(Path::new(&repo_working_dir))
+            .await
+    }
+
     async fn status_for_family(
         &self,
         repo_working_dir: String,
@@ -6427,6 +6977,18 @@ impl ActorDaemonCoordinator {
                     serde_json::to_value(status)
                         .map(|v| ControlResponse::ok(None, Some(v)))
                         .map_err(GitAiError::from)
+                }),
+            ControlRequest::SnapshotWatermarks { repo_working_dir } => self
+                .watermarks_for_family(repo_working_dir.clone())
+                .await
+                .and_then(|ws| {
+                    let worktree_wm = ws.per_worktree.get(&repo_working_dir).copied();
+                    serde_json::to_value(json!({
+                        "watermarks": ws.per_file,
+                        "worktree_watermark": worktree_wm,
+                    }))
+                    .map(|v| ControlResponse::ok(None, Some(v)))
+                    .map_err(GitAiError::from)
                 }),
             ControlRequest::SubmitTelemetry { envelopes } => {
                 if let Some(worker) = &self.telemetry_worker {
@@ -6945,6 +7507,44 @@ fn handle_trace_connection_actor_reader<R: Read>(
     Ok(())
 }
 
+/// Git environment variables that must not leak into the daemon process.
+///
+/// The daemon is a long-lived, repository-agnostic process that serves requests
+/// for many different repositories. Environment variables like `GIT_DIR` and
+/// `GIT_WORK_TREE` pin git operations to a single repository and override the
+/// `-C <path>` flag that the daemon uses to target each repository individually.
+///
+/// When a daemon is spawned by a git wrapper invocation (e.g. `git add`), the
+/// parent process may have these variables set by git itself (hook context) or
+/// by test harnesses. Clearing them at daemon startup prevents incorrect
+/// repository resolution that manifests as `fatal: not a git repository: '/dev/null'`.
+///
+/// This list is used in two places:
+/// - `spawn_daemon_run_detached` strips them from the child process via `env_remove`.
+/// - `sanitize_git_env_for_daemon` clears them from the current process at daemon startup
+///   as a belt-and-suspenders defence (the daemon may be launched by another mechanism).
+pub const GIT_ENV_VARS_TO_SANITIZE: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_NAMESPACE",
+];
+
+fn sanitize_git_env_for_daemon() {
+    for var in GIT_ENV_VARS_TO_SANITIZE {
+        // SAFETY: daemon startup is single-threaded at this point -- the tokio
+        // runtime is not yet running and no other threads exist.
+        unsafe {
+            std::env::remove_var(var);
+        }
+    }
+}
+
 fn disable_trace2_for_daemon_process() {
     // The daemon executes internal git commands while processing events and control requests.
     // If trace2.eventTarget points at this daemon socket globally, those internal git
@@ -7057,6 +7657,7 @@ pub(crate) fn daemon_run_pending_self_update() {
 }
 
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
+    sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
     if let Err(error) = crate::commands::checkpoint::prune_stale_captured_checkpoints(
@@ -7177,6 +7778,7 @@ fn checkpoint_control_response_timeout(
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         }
         ControlRequest::CheckpointRun { .. } => DAEMON_CONTROL_RESPONSE_TIMEOUT,
+        ControlRequest::SnapshotWatermarks { .. } => Duration::from_millis(500),
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
 }
@@ -7491,7 +8093,6 @@ mod tests {
                     repo_working_dir: "/tmp/repo".to_string(),
                     kind: Some("human".to_string()),
                     author: Some("test".to_string()),
-                    reset: Some(false),
                     quiet: Some(true),
                     is_pre_commit: Some(false),
                     agent_run_result: None,
@@ -7557,6 +8158,55 @@ mod tests {
             normalize_commit_carryover_snapshot(Some(&carryover), Some(&committed)).unwrap();
 
         assert_eq!(normalized.get("example.txt"), committed.get("example.txt"));
+    }
+
+    #[test]
+    fn compute_watermarks_uses_symlink_metadata_not_target_mtime() {
+        // Verify that compute_watermarks_from_stat uses lstat (symlink's own mtime)
+        // not stat (target file's mtime), consistent with snapshot's symlink_metadata.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        // Create a target file
+        let target = dir.join("target.txt");
+        std::fs::write(&target, b"hello").unwrap();
+
+        // Create a symlink pointing to the target
+        let link = dir.join("link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+
+        // Watermark the symlink
+        let wm = compute_watermarks_from_stat(dir.to_str().unwrap(), &["link.txt".to_string()]);
+
+        // The watermark should match symlink_metadata mtime, not target metadata mtime.
+        let symlink_meta = std::fs::symlink_metadata(&link).unwrap();
+        let target_meta = std::fs::metadata(&link).unwrap(); // follows symlink
+
+        let symlink_mtime = symlink_meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target_mtime = target_meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        let recorded = *wm.get("link.txt").unwrap();
+
+        assert_eq!(
+            recorded, symlink_mtime,
+            "watermark should match lstat mtime of the symlink itself"
+        );
+        // This assertion documents the intent: if symlink and target mtimes differ,
+        // the watermark must track the symlink, not the target.
+        let _ = target_mtime; // used only as documentation; may equal symlink_mtime on some FS
     }
 
     #[test]

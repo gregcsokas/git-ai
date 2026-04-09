@@ -361,6 +361,7 @@ impl TmpRepo {
             edited_filepaths: None,
             will_edit_filepaths: Some(will_edit_filepaths),
             dirty_files: None,
+            captured_checkpoint_id: None,
         }))
     }
 
@@ -504,7 +505,6 @@ impl TmpRepo {
             &self.repo_gitai,
             author,
             CheckpointKind::Human,
-            false, // reset
             true,
             agent_run_result,
             false,
@@ -553,13 +553,13 @@ impl TmpRepo {
             edited_filepaths: self.current_checkpoint_scope_paths()?,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         checkpoint(
             &self.repo_gitai,
             agent_name,
             CheckpointKind::AiAgent,
-            false, // reset
             true,
             Some(agent_run_result),
             false,
@@ -582,8 +582,7 @@ impl TmpRepo {
             &self.repo_gitai,
             author,
             checkpoint_kind,
-            false, // reset
-            true,  // quiet
+            true, // quiet
             agent_run_result,
             false,
         )
@@ -1615,6 +1614,7 @@ mod tests {
                     .collect::<Vec<_>>()
             }),
             dirty_files: None,
+            captured_checkpoint_id: None,
         }
     }
 

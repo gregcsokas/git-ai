@@ -25,6 +25,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
+use unicode_normalization::UnicodeNormalization;
 
 /// Per-file line statistics (in-memory only, not persisted)
 #[derive(Debug, Clone, Default)]
@@ -76,7 +77,6 @@ pub struct PreparedCheckpointManifest {
     pub captured_at_ms: u128,
     pub kind: CheckpointKind,
     pub author: String,
-    pub reset: bool,
     pub is_pre_commit: bool,
     pub explicit_path_role: PreparedPathRole,
     pub explicit_paths: Vec<String>,
@@ -126,8 +126,8 @@ fn build_checkpoint_attrs(
             .external_prompt_id(&agent_id.id);
     }
 
-    // Attach custom attributes
-    attrs = attrs.custom_attributes_map(crate::config::Config::get().custom_attributes());
+    // Attach custom attributes using Config::fresh() to support runtime config updates
+    attrs = attrs.custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
     // Add repo URL
     if let Ok(Some(remote_name)) = repo.get_default_remote()
@@ -310,7 +310,6 @@ pub fn run(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     quiet: bool,
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
@@ -319,7 +318,6 @@ pub fn run(
         repo,
         author,
         kind,
-        reset,
         quiet,
         agent_run_result,
         is_pre_commit,
@@ -332,7 +330,6 @@ pub fn run_with_base_commit_override(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     quiet: bool,
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
@@ -342,7 +339,6 @@ pub fn run_with_base_commit_override(
         repo,
         author,
         kind,
-        reset,
         quiet,
         agent_run_result,
         is_pre_commit,
@@ -356,7 +352,6 @@ pub(crate) fn run_with_base_commit_override_with_policy(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     quiet: bool,
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
@@ -385,7 +380,6 @@ pub(crate) fn run_with_base_commit_override_with_policy(
         repo,
         author,
         kind,
-        reset,
         quiet,
         agent_run_result,
         is_pre_commit,
@@ -485,6 +479,118 @@ fn resolve_base_override_dirty_file_execution(
     }
 }
 
+fn explicit_dirty_file_content_if_text(
+    working_log: &PersistedWorkingLog,
+    file_path: &str,
+) -> Option<String> {
+    working_log
+        .dirty_files
+        .as_ref()
+        .and_then(|files| files.get(file_path))
+        .filter(|content| !content.chars().any(|c| c == '\0'))
+        .cloned()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_explicit_path_execution(
+    repo: &Repository,
+    working_log: &PersistedWorkingLog,
+    base_commit: &str,
+    ts: u128,
+    explicit_paths: &[String],
+    ignore_matcher: &IgnoreMatcher,
+    kind: CheckpointKind,
+    is_pre_commit: bool,
+) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
+    let repo_workdir = repo.workdir()?;
+    let mut candidate_paths = Vec::new();
+    let mut seen = HashSet::new();
+
+    for path in explicit_paths {
+        let normalized_path = normalize_to_posix(path);
+        if !seen.insert(normalized_path.clone()) {
+            continue;
+        }
+        if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+            continue;
+        }
+
+        let path_buf = if std::path::Path::new(&normalized_path).is_absolute() {
+            PathBuf::from(&normalized_path)
+        } else {
+            repo_workdir.join(&normalized_path)
+        };
+        if !repo.path_is_in_workdir(&path_buf) {
+            continue;
+        }
+
+        candidate_paths.push(normalized_path);
+    }
+
+    if candidate_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let status_pathspecs = candidate_paths.iter().cloned().collect::<HashSet<_>>();
+    let explicit_statuses = repo
+        .status(Some(&status_pathspecs), false)?
+        .into_iter()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect::<HashMap<_, _>>();
+    let preserve_unchanged_explicit_paths = kind == CheckpointKind::Human && is_pre_commit;
+
+    let mut files = Vec::new();
+    let mut resolved_dirty_files = HashMap::new();
+
+    for normalized_path in candidate_paths {
+        // Status output uses NFC paths; the normalized_path may be NFD on some
+        // filesystems, so look up with NFC to handle the mismatch.
+        let nfc_key: String = normalized_path.nfc().collect();
+        let status_entry = explicit_statuses.get(&nfc_key);
+        if matches!(status_entry, Some(entry) if entry.kind == EntryKind::Unmerged) {
+            continue;
+        }
+
+        let explicit_dirty_content =
+            explicit_dirty_file_content_if_text(working_log, &normalized_path);
+        if status_entry.is_none()
+            && explicit_dirty_content.is_none()
+            && !preserve_unchanged_explicit_paths
+        {
+            continue;
+        }
+
+        if let Some(content) = explicit_dirty_content {
+            resolved_dirty_files.insert(normalized_path.clone(), content);
+            files.push(normalized_path);
+            continue;
+        }
+
+        let is_deleted = matches!(
+            status_entry,
+            Some(entry)
+                if entry.staged == StatusCode::Deleted || entry.unstaged == StatusCode::Deleted
+        );
+
+        if is_text_file(working_log, &normalized_path)
+            || (is_deleted && is_text_file_in_head(repo, &normalized_path))
+        {
+            files.push(normalized_path);
+        }
+    }
+
+    if files.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(ResolvedCheckpointExecution {
+            base_commit: base_commit.to_string(),
+            ts,
+            files,
+            dirty_files: resolved_dirty_files,
+        }))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_live_checkpoint_execution(
     repo: &Repository,
@@ -520,10 +626,13 @@ fn resolve_live_checkpoint_execution(
             .map(|files| files.is_empty())
             .unwrap_or(true);
         let has_initial_attributions = !working_log.read_initial_attributions().files.is_empty();
+        let has_explicit_ai_agent_context =
+            kind != CheckpointKind::Human && agent_run_result.is_some();
 
         if has_no_ai_edits
             && !has_initial_attributions
             && !Config::get().get_feature_flags().inter_commit_move
+            && !has_explicit_ai_agent_context
         {
             debug_log("No AI edits in pre-commit checkpoint, skipping");
             return Ok(None);
@@ -539,6 +648,7 @@ fn resolve_live_checkpoint_execution(
         .unwrap_or_default()
         .as_millis();
 
+    let has_explicit_target_paths = explicit_capture_target_paths(kind, agent_run_result).is_some();
     let pathspec_start = Instant::now();
     let filtered_pathspec = filtered_pathspecs_for_agent_run_result(repo, kind, agent_run_result);
     debug_log(&format!(
@@ -596,6 +706,23 @@ fn resolve_live_checkpoint_execution(
         }
     }
 
+    if has_explicit_target_paths {
+        return if let Some(explicit_paths) = filtered_pathspec.as_ref() {
+            resolve_explicit_path_execution(
+                repo,
+                &working_log,
+                &base_commit,
+                ts,
+                explicit_paths,
+                &ignore_matcher,
+                kind,
+                is_pre_commit,
+            )
+        } else {
+            Ok(None)
+        };
+    }
+
     let files_start = Instant::now();
     let files = get_all_tracked_files(
         repo,
@@ -636,7 +763,6 @@ fn execute_resolved_checkpoint(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     quiet: bool,
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
@@ -651,12 +777,7 @@ fn execute_resolved_checkpoint(
     }
 
     let read_checkpoints_start = Instant::now();
-    let mut checkpoints = if reset {
-        working_log.reset_working_log()?;
-        Vec::new()
-    } else {
-        working_log.read_all_checkpoints()?
-    };
+    let mut checkpoints = working_log.read_all_checkpoints()?;
     debug_log(&format!(
         "[BENCHMARK] Reading {} checkpoints took {:?}",
         checkpoints.len(),
@@ -791,10 +912,6 @@ fn execute_resolved_checkpoint(
         None
     };
 
-    if reset {
-        debug_log("Working log reset. Starting fresh checkpoint.");
-    }
-
     let label = if entries.len() > 1 {
         "checkpoint"
     } else {
@@ -839,7 +956,6 @@ pub fn prepare_captured_checkpoint(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     agent_run_result: Option<&AgentRunResult>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
@@ -864,7 +980,7 @@ pub fn prepare_captured_checkpoint(
         return Ok(None);
     };
 
-    if resolved.files.is_empty() && !reset {
+    if resolved.files.is_empty() {
         return Ok(None);
     }
 
@@ -916,7 +1032,6 @@ pub fn prepare_captured_checkpoint(
             captured_at_ms: resolved.ts,
             kind,
             author: author.to_string(),
-            reset,
             is_pre_commit,
             explicit_path_role,
             explicit_paths,
@@ -945,7 +1060,45 @@ pub fn prepare_captured_checkpoint(
     }))
 }
 
-fn load_captured_checkpoint_manifest(
+/// Patch the `agent_run_result` stored in a captured checkpoint manifest so that
+/// it carries the real agent identity, transcript, and metadata instead of the
+/// synthetic placeholder written at bash-tool capture time.
+pub(crate) fn update_captured_checkpoint_agent_context(
+    capture_id: &str,
+    author: &str,
+    agent_run_result: Option<&AgentRunResult>,
+) -> Result<(), GitAiError> {
+    let manifest_path = async_checkpoint_manifest_path(capture_id)?;
+    let mut manifest: PreparedCheckpointManifest =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).map_err(|error| {
+            GitAiError::Generic(format!(
+                "failed reading captured checkpoint manifest {}: {}",
+                manifest_path.display(),
+                error
+            ))
+        })?)?;
+
+    // Replace the synthetic "bash-tool" author with the real git user name.
+    manifest.author = author.to_string();
+
+    // Merge real agent context while preserving capture-specific fields
+    // (edited_filepaths, will_edit_filepaths, dirty_files) from the original.
+    if let Some(real) = agent_run_result {
+        let mut updated = real.clone();
+        if let Some(existing) = &manifest.agent_run_result {
+            updated.edited_filepaths = existing.edited_filepaths.clone();
+            updated.will_edit_filepaths = existing.will_edit_filepaths.clone();
+        }
+        updated.dirty_files = None;
+        updated.captured_checkpoint_id = None;
+        manifest.agent_run_result = Some(updated);
+    }
+
+    fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
+    Ok(())
+}
+
+pub(crate) fn load_captured_checkpoint_manifest(
     capture_id: &str,
 ) -> Result<PreparedCheckpointManifest, GitAiError> {
     let manifest_path = async_checkpoint_manifest_path(capture_id)?;
@@ -1026,7 +1179,6 @@ pub fn execute_captured_checkpoint(
         repo,
         &manifest.author,
         manifest.kind,
-        manifest.reset,
         true,
         manifest.agent_run_result,
         manifest.is_pre_commit,
@@ -2078,6 +2230,7 @@ mod tests {
                     .map(|(path, content)| (path.to_string(), content.to_string()))
                     .collect()
             }),
+            captured_checkpoint_id: None,
         }
     }
 
@@ -2318,13 +2471,13 @@ mod tests {
             edited_filepaths: Some(vec![filename]),
             will_edit_filepaths: None,
             dirty_files: Some(dirty_files),
+            captured_checkpoint_id: None,
         };
 
         let (entries_len, files_len, _) = run_with_base_commit_override_with_policy(
             tmp_repo.gitai_repo(),
             "mock-ai",
             CheckpointKind::AiAgent,
-            false,
             true,
             Some(agent_run_result),
             false,
@@ -2376,13 +2529,13 @@ mod tests {
             edited_filepaths: Some(vec![filename.clone()]),
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         let error = run_with_base_commit_override_with_policy(
             tmp_repo.gitai_repo(),
             "mock-ai",
             CheckpointKind::AiAgent,
-            false,
             true,
             Some(agent_run_result),
             false,
@@ -2433,13 +2586,13 @@ mod tests {
             edited_filepaths: Some(vec![filename]),
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         let (entries_len, files_len, _) = run_with_base_commit_override(
             tmp_repo.gitai_repo(),
             "mock-ai",
             CheckpointKind::AiAgent,
-            false,
             true,
             Some(agent_run_result),
             false,
@@ -2529,6 +2682,7 @@ mod tests {
             ]),
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         // Run checkpoint - should not crash even with paths outside repo

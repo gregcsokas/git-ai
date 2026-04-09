@@ -30,6 +30,8 @@ pub enum ControlRequest {
         repo_working_dir: String,
         repo_context: RepoContext,
     },
+    #[serde(rename = "snapshot.watermarks")]
+    SnapshotWatermarks { repo_working_dir: String },
     #[serde(rename = "shutdown")]
     Shutdown,
 }
@@ -65,8 +67,6 @@ pub struct LiveCheckpointRunRequest {
     pub kind: Option<String>,
     #[serde(default)]
     pub author: Option<String>,
-    #[serde(default)]
-    pub reset: Option<bool>,
     #[serde(default)]
     pub quiet: Option<bool>,
     #[serde(default)]

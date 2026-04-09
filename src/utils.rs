@@ -99,6 +99,26 @@ pub fn normalize_to_posix(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+/// Returns true when async/daemon checkpoint delegation is enabled.
+///
+/// Checks the `async_mode` feature flag first, then falls back to the
+/// `GIT_AI_DAEMON_CHECKPOINT_DELEGATE` environment variable.  Used by both
+/// the main hook handler and the bash tool to skip capture work when the
+/// daemon will not be available to consume captured checkpoint files.
+pub fn checkpoint_delegation_enabled() -> bool {
+    if crate::config::Config::get().feature_flags().async_mode {
+        return true;
+    }
+    matches!(
+        std::env::var("GIT_AI_DAEMON_CHECKPOINT_DELEGATE")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
 fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
     let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
 
@@ -210,6 +230,50 @@ pub fn is_in_background_agent() -> bool {
             // Explicit opt-in for cloud/background agent environments
             || std::env::var("GIT_AI_CLOUD_AGENT").map(|v| v == "1").unwrap_or(false)
     })
+}
+
+/// Detect the current shell and its version.
+/// Aidan touched this line
+/// Returns a tuple of `(shell_name, version)`. On Unix, the shell is read from
+/// the `SHELL` environment variable; on Windows, PowerShell is preferred and
+/// `ComSpec` is used as a fallback. The version is obtained by invoking the
+/// shell with `--version` and taking the first line of output. Either field
+/// falls back to `"unknown"` if detection fails.
+pub fn detect_shell() -> (String, String) {
+    let shell_path = if cfg!(windows) {
+        std::env::var("PSModulePath")
+            .ok()
+            .map(|_| "pwsh".to_string())
+            .or_else(|| std::env::var("ComSpec").ok())
+            .unwrap_or_else(|| "cmd".to_string())
+    } else {
+        std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
+    };
+
+    let shell_name = std::path::Path::new(&shell_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let version = Command::new(&shell_path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .next()
+                    .map(|l| l.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    (shell_name, version)
 }
 
 /// A cross-platform exclusive file lock.

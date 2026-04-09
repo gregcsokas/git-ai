@@ -37,7 +37,7 @@ fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let fro
 
 ### Supported Agents
 
-<img src="assets/docs/badges/claude_code.svg" alt="Claude Code" height="30" />  <img src="assets/docs/badges/codex-black.svg" alt="Codex" height="30" />  <img src="assets/docs/badges/cursor.svg" alt="Cursor" height="30" />  <img src="assets/docs/badges/opencode.svg" alt="OpenCode" height="30" />  <img src="assets/docs/badges/windsurf.svg" alt="Windsurf" height="30" /> <img src="assets/docs/badges/amp.svg" alt="Amp" height="30" />   <img src="assets/docs/badges/gemini.svg" alt="Gemini" height="30" />  <img src="assets/docs/badges/copilot.svg" alt="GitHub Copilot" height="30" />  <img src="assets/docs/badges/continue.svg" alt="Continue" height="30" />  <img src="assets/docs/badges/droid.svg" alt="Droid" height="30" />  <img src="assets/docs/badges/pi.svg" alt="Pi" height="30" />  <img src="assets/docs/badges/junie_white.svg" alt="Junie" height="30" />  <img src="assets/docs/badges/rovodev.svg" alt="Rovo Dev" height="30" />
+<img src="assets/docs/badges/claude_code.svg" alt="Claude Code" height="30" />  <img src="assets/docs/badges/codex-black.svg" alt="Codex" height="30" />  <img src="assets/docs/badges/cursor.svg" alt="Cursor" height="30" />  <img src="assets/docs/badges/opencode.svg" alt="OpenCode" height="30" />  <img src="assets/docs/badges/windsurf.svg" alt="Windsurf" height="30" /> <img src="assets/docs/badges/amp.svg" alt="Amp" height="30" />   <img src="assets/docs/badges/gemini.svg" alt="Gemini" height="30" />  <img src="assets/docs/badges/copilot.svg" alt="GitHub Copilot" height="30" />  <img src="assets/docs/badges/continue.svg" alt="Continue" height="30" />  <img src="assets/docs/badges/droid.svg" alt="Droid" height="30" />  <img src="assets/docs/badges/pi.svg" alt="Pi" height="30" />  <img src="assets/docs/badges/junie_white.svg" alt="Junie" height="30" />  <img src="assets/docs/badges/rovodev.svg" alt="Rovo Dev" height="30" />  <img src="assets/docs/badges/firebender.svg" alt="Firebender" height="30" />
 
 > [+ Add support for another agent](https://usegitai.com/docs/cli/add-your-agent)
 
@@ -73,8 +73,8 @@ That's it — **no per-repo setup required.** Prompt and commit as normal. Git A
 <th align="center" width="50%">For Teams</th>
 </tr>
 <tr>
-<td align="center"><img src="https://github.com/git-ai-project/git-ai/raw/new-readme/assets/docs/solo-player.svg" alt="Solo — everything stays on your machine" width="400"></td>
-<td align="center"><img src="https://github.com/git-ai-project/git-ai/raw/new-readme/assets/docs/for-teams.svg" alt="For teams — shared context across your team" width="400"></td>
+<td align="center"><img src="https://github.com/git-ai-project/git-ai/blob/main/assets/docs/solo-player.svg" alt="Solo — everything stays on your machine" width="400"></td>
+<td align="center"><img src="https://github.com/git-ai-project/git-ai/blob/main/assets/docs/for-teams.svg" alt="For teams — shared context across your team" width="400"></td>
 </tr>
 <tr>
 <td valign="top">

@@ -64,7 +64,12 @@ pub fn post_switch_hook(
     exit_status: std::process::ExitStatus,
     command_hooks_context: &mut CommandHooksContext,
 ) {
-    if !exit_status.success() {
+    let is_merge = is_merge_switch(parsed_args);
+
+    // Fix #957 equivalent: `switch --merge` exits with code 1 when it produces conflict
+    // markers, but we must still restore the stashed VA so attribution is not lost.
+    // All other failed switches are skipped as before.
+    if !exit_status.success() && !is_merge {
         debug_log("Switch failed, skipping working log handling");
         return;
     }
@@ -79,6 +84,7 @@ pub fn post_switch_hook(
         None => return,
     };
 
+    // HEAD unchanged is always a no-op: no branch switch occurred.
     if old_head == new_head {
         debug_log("HEAD unchanged after switch, no working log handling needed");
         return;
@@ -96,14 +102,39 @@ pub fn post_switch_hook(
         return;
     }
 
-    // --merge switch - restore VirtualAttributions (lines may have shifted)
-    if let Some(stashed_va) = command_hooks_context.stashed_va.take() {
-        debug_log("Restoring VA after switch --merge");
-        let _ = repository
-            .storage
-            .delete_working_log_for_base_commit(&old_head);
-        restore_stashed_va(repository, &old_head, &new_head, stashed_va);
-        return;
+    // --merge switch - restore VirtualAttributions (lines may have shifted).
+    // In wrapper mode the VA is captured by pre_switch_hook into stashed_va.
+    // In daemon mode (where hooks run as separate processes), stashed_va is None, so
+    // we rebuild the pre-switch VA directly from the working log for old_head, which
+    // is still intact at this point.
+    //
+    // If switch --merge produced conflict markers (exit code 1), skip the fallback
+    // since those files contain conflict markers which would corrupt byte-level offsets.
+    if is_merge {
+        let human_author = get_commit_default_author(repository, &parsed_args.command_args);
+        let stashed_va = command_hooks_context.stashed_va.take().or_else(|| {
+            if !exit_status.success() {
+                return None;
+            }
+            VirtualAttributions::from_just_working_log(
+                repository.clone(),
+                old_head.clone(),
+                Some(human_author),
+            )
+            .ok()
+            .filter(|va| !va.attributions.is_empty())
+        });
+
+        if let Some(stashed_va) = stashed_va {
+            debug_log("Restoring VA after switch --merge");
+            let _ = repository
+                .storage
+                .delete_working_log_for_base_commit(&old_head);
+            restore_stashed_va(repository, &old_head, &new_head, stashed_va);
+            return;
+        }
+        debug_log("switch --merge: no VA to restore, falling through to working log migration");
+        // Fall through to rename
     }
 
     // Normal branch switch - migrate working log

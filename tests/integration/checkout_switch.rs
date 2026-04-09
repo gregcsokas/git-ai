@@ -417,6 +417,69 @@ fn test_checkout_pathspec_multiple_files() {
     file_c.assert_lines_and_blame(vec!["Modified C by AI".ai()]);
 }
 
+/// Regression test for #957: `checkout --merge` that produces conflict markers in the
+/// working tree must not corrupt AI attribution for lines that came from an AI session.
+///
+/// Bug: `restore_stashed_va` reads working-tree files to merge VA snapshots, but
+/// when a file contains conflict markers the byte-level diff algorithm mismapped
+/// attribution onto the wrong content.  The fix strips conflict markers (keeping
+/// "ours") before the VA merge so byte offsets are computed on clean content.
+#[test]
+fn test_checkout_merge_conflict_preserves_ai_attribution() {
+    let repo = TestRepo::new();
+
+    // Initial commit: single line that both branches will modify, guaranteeing a
+    // conflict when we later do `checkout --merge`.
+    let mut file = repo.filename("file.txt");
+    file.set_contents(crate::lines!["shared"]);
+    repo.stage_all_and_commit("initial").unwrap();
+    let main_branch = repo.current_branch();
+
+    // Feature branch: replace "shared" with "THEIRS".
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.replace_at(0, "THEIRS");
+    repo.stage_all_and_commit("feature: change shared").unwrap();
+
+    // Back on main: AI replaces "shared" with "AI_CONTENT" (different from "THEIRS"),
+    // leaving the change in the working tree (not yet committed), then checkpoint.
+    repo.git(&["checkout", &main_branch]).unwrap();
+    let mut main_file = repo.filename("file.txt");
+    main_file.replace_at(0, "AI_CONTENT".ai());
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+
+    // `checkout --merge feature`: base="shared", ours (working)="AI_CONTENT",
+    // theirs (feature)="THEIRS" — all three differ → git produces conflict markers.
+    let checkout_result = repo.git(&["checkout", "--merge", "feature"]);
+
+    // Depending on the git version and config the exit code may be 0 or 1 even with
+    // conflict markers present.  Handle both: if it failed we know there are markers;
+    // if it succeeded git resolved without markers (uncommon but possible).
+    let file_on_disk = std::fs::read_to_string(repo.path().join("file.txt"))
+        .expect("file.txt must exist after checkout");
+
+    if file_on_disk.contains("<<<<<<<") {
+        // Conflict markers are present — this is the path that exercises the fix.
+        // Resolve by keeping the AI content and discarding "THEIRS".
+        std::fs::write(repo.path().join("file.txt"), "AI_CONTENT\n")
+            .expect("write resolved content");
+        repo.git(&["add", "file.txt"]).unwrap();
+        repo.stage_all_and_commit("resolved: keep AI_CONTENT")
+            .unwrap();
+
+        // After fix: restore_stashed_va correctly stripped conflict markers before
+        // computing the VA merge, so "AI_CONTENT" retains AI attribution.
+        file.assert_lines_and_blame(crate::lines!["AI_CONTENT".ai()]);
+    } else {
+        // git resolved without markers; if the AI content survived, it should be AI.
+        if file_on_disk.trim() == "AI_CONTENT" {
+            let _ = repo.stage_all_and_commit("after clean checkout");
+            file.assert_lines_and_blame(crate::lines!["AI_CONTENT".ai()]);
+        }
+        // If git took "THEIRS" without asking, there is nothing AI to assert.
+    }
+    let _ = checkout_result;
+}
+
 crate::reuse_tests_in_worktree!(
     test_checkout_branch_migrates_working_log,
     test_checkout_force_deletes_working_log,
@@ -429,4 +492,5 @@ crate::reuse_tests_in_worktree!(
     test_checkout_same_branch_no_op,
     test_checkout_with_mixed_attribution,
     test_checkout_pathspec_multiple_files,
+    test_checkout_merge_conflict_preserves_ai_attribution,
 );

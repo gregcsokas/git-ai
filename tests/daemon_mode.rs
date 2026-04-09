@@ -6,7 +6,7 @@ use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::authorship::{transcript::AiTranscript, working_log::AgentId};
 use git_ai::commands::checkpoint::{
     PreparedCheckpointFile, PreparedCheckpointFileSource, PreparedCheckpointManifest,
-    PreparedPathRole,
+    PreparedPathRole, prepare_captured_checkpoint,
 };
 use git_ai::commands::checkpoint_agent::agent_presets::AgentRunResult;
 use git_ai::daemon::{
@@ -314,6 +314,47 @@ fn write_http_response(stream: &mut TcpStream, body: &[u8]) {
 fn configure_test_home_env(command: &mut Command, test_home: &Path) {
     command.env("HOME", test_home);
     command.env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"));
+    // Redirect XDG_CONFIG_HOME so git does not read the real user's
+    // $XDG_CONFIG_HOME/git/config (which may contain filter drivers,
+    // aliases, or other settings that break test isolation).
+    command.env("XDG_CONFIG_HOME", test_home.join(".config"));
+    // Suppress system-level git config (e.g., Xcode credential helpers)
+    // that could interfere with test isolation.
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    // Sanitize PATH to remove directories containing the Nix git-ai
+    // wrapper.  When the wrapper (a release build with async_mode=true)
+    // runs with HOME pointing to the test home it starts a background
+    // daemon at the test socket path, poisoning the test environment.
+    if let Ok(path) = std::env::var("PATH") {
+        let sanitized: Vec<&str> = path
+            .split(':')
+            .filter(|dir| {
+                // Keep only dirs that do NOT contain a git-ai wrapper
+                // (heuristic: skip dirs where the `git` binary is a
+                //  shell-script wrapper for git-ai, or a symlink to git-ai).
+                let git_path = std::path::Path::new(dir).join("git");
+                if git_path.is_file() || git_path.is_symlink() {
+                    if let Ok(contents) = std::fs::read_to_string(&git_path)
+                        && contents.contains("git-ai")
+                    {
+                        return false;
+                    }
+                    if let Ok(target) = std::fs::read_link(&git_path)
+                        && target.to_string_lossy().contains("git-ai")
+                    {
+                        return false;
+                    }
+                    if let Ok(canonical) = git_path.canonicalize()
+                        && canonical.to_string_lossy().contains("git-ai")
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+        command.env("PATH", sanitized.join(":"));
+    }
     #[cfg(windows)]
     {
         command.env("USERPROFILE", test_home);
@@ -342,6 +383,10 @@ struct DaemonGuard {
 
 impl DaemonGuard {
     fn start(repo: &TestRepo) -> Self {
+        Self::start_with_env(repo, &[])
+    }
+
+    fn start_with_env(repo: &TestRepo, extra_env: &[(&str, &str)]) -> Self {
         let daemon_home = repo.daemon_home_path();
         let control_socket_path = daemon_control_socket_path(repo);
         let trace_socket_path = daemon_trace_socket_path(repo);
@@ -354,6 +399,9 @@ impl DaemonGuard {
             .env("GITAI_TEST_DB_PATH", repo.test_db_path())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
         configure_test_home_env(&mut command, repo.test_home_path());
         configure_test_daemon_env(
             &mut command,
@@ -522,6 +570,16 @@ fn latest_checkpoint_blob_content_for_file(repo: &TestRepo, file_path: &str) -> 
         .expect("checkpoint blob should be readable")
 }
 
+fn write_base_files(repo: &TestRepo) {
+    fs::write(repo.path().join("lines.md"), "base lines\n").expect("failed to write lines.md");
+    fs::write(repo.path().join("alphabet.md"), "base alphabet\n")
+        .expect("failed to write alphabet.md");
+    repo.git_og(&["add", "lines.md", "alphabet.md"])
+        .expect("add should succeed");
+    repo.git_og(&["commit", "-m", "initial commit"])
+        .expect("initial commit should succeed");
+}
+
 fn ai_agent_run_result(
     repo: &TestRepo,
     edited_filepaths: Vec<String>,
@@ -546,7 +604,68 @@ fn ai_agent_run_result(
         edited_filepaths: Some(edited_filepaths),
         will_edit_filepaths: None,
         dirty_files,
+        captured_checkpoint_id: None,
     }
+}
+
+#[test]
+#[serial]
+fn prepare_captured_checkpoint_only_captures_explicit_files_when_other_ai_touched_files_are_dirty()
+{
+    let repo = TestRepo::new();
+    write_base_files(&repo);
+
+    fs::write(
+        repo.path().join("lines.md"),
+        "line touched by first checkpoint\n",
+    )
+    .expect("failed to update lines.md");
+    repo.git_ai(&["checkpoint", "mock_ai", "lines.md"])
+        .expect("first explicit checkpoint should succeed");
+
+    fs::write(
+        repo.path().join("alphabet.md"),
+        "line touched by second checkpoint\n",
+    )
+    .expect("failed to update alphabet.md");
+
+    let _daemon_home = ScopedEnvVar::set(
+        "GIT_AI_DAEMON_HOME",
+        repo.daemon_home_path()
+            .to_str()
+            .expect("daemon home should be utf-8"),
+    );
+    let prepared = prepare_captured_checkpoint(
+        &repo_storage(&repo),
+        "Test User",
+        CheckpointKind::AiAgent,
+        Some(&ai_agent_run_result(
+            &repo,
+            vec!["alphabet.md".to_string()],
+            None,
+        )),
+        false,
+        None,
+    )
+    .expect("captured checkpoint prepare should succeed")
+    .expect("captured checkpoint should be created");
+
+    let manifest_path =
+        async_checkpoint_capture_dir(&repo, &prepared.capture_id).join("manifest.json");
+    let manifest: PreparedCheckpointManifest =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest should be readable"))
+            .expect("manifest should deserialize");
+    let captured_paths = manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        captured_paths,
+        vec!["alphabet.md"],
+        "captured checkpoint preparation must only persist the explicitly targeted file"
+    );
 }
 
 #[derive(Clone)]
@@ -950,6 +1069,18 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     )
     .expect("failed to write updated file");
 
+    // Shut down any stale daemon that may have been spawned by a
+    // previous wrapper invocation (e.g., the Nix-installed release
+    // binary triggered via PATH during the `git add` / `git commit`
+    // wrapper steps).  The test must start with no daemon so that the
+    // checkpoint delegation path actually auto-starts a fresh one.
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
+    // Wait briefly for the daemon to release the sockets.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", "delegate-fallback.txt"],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
@@ -965,7 +1096,12 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     .expect("daemon status request should succeed after auto-start");
     assert!(
         status.ok,
-        "daemon should be running after delegated checkpoint auto-start"
+        "daemon should be running after delegated checkpoint auto-start; ok={}, error={:?}, data={:?}, socket={}, workdir={}",
+        status.ok,
+        status.error,
+        status.data,
+        daemon_control_socket_path(&repo).display(),
+        repo_workdir_string(&repo)
     );
     let _ = send_control_request(
         &daemon_control_socket_path(&repo),
@@ -1001,6 +1137,14 @@ fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
         "base\nchanged while startup blocked\n",
     )
     .expect("failed to write updated file");
+
+    // Shut down any stale daemon that may have been spawned by a
+    // previous wrapper invocation so we can acquire the lock ourselves.
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     fs::create_dir_all(
         daemon_lock_path(&repo)
@@ -1270,7 +1414,6 @@ fn daemon_captured_checkpoint_replay_uses_blob_snapshot_after_worktree_changes()
             captured_at_ms: 1_700_000_000_000,
             kind: CheckpointKind::AiAgent,
             author: "Test User".to_string(),
-            reset: false,
             is_pre_commit: false,
             explicit_path_role: PreparedPathRole::Edited,
             explicit_paths: vec!["captured-race.txt".to_string()],
@@ -1358,7 +1501,6 @@ fn daemon_captured_checkpoint_replay_supports_mixed_dirty_and_blob_sources() {
             captured_at_ms: 1_700_000_000_001,
             kind: CheckpointKind::AiAgent,
             author: "Test User".to_string(),
-            reset: false,
             is_pre_commit: false,
             explicit_path_role: PreparedPathRole::Edited,
             explicit_paths: vec![
@@ -1449,7 +1591,6 @@ fn daemon_captured_checkpoint_failure_cleans_up_capture_dir() {
             captured_at_ms: 1_700_000_000_002,
             kind: CheckpointKind::AiAgent,
             author: "Test User".to_string(),
-            reset: false,
             is_pre_commit: false,
             explicit_path_role: PreparedPathRole::Edited,
             explicit_paths: vec!["broken-capture.txt".to_string()],
@@ -1514,7 +1655,6 @@ fn daemon_captured_checkpoint_rejects_manifest_for_different_repo() {
             captured_at_ms: 1_700_000_000_003,
             kind: CheckpointKind::AiAgent,
             author: "Test User".to_string(),
-            reset: false,
             is_pre_commit: false,
             explicit_path_role: PreparedPathRole::Edited,
             explicit_paths: vec!["wrong-repo-capture.txt".to_string()],
@@ -4352,4 +4492,133 @@ fn process_exists(pid: u32) -> bool {
             .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
             .unwrap_or(false)
     }
+}
+
+/// Regression test for issue #919: daemon must recover from panics in the
+/// side-effect pipeline and continue processing subsequent commands.
+///
+/// This test:
+/// 1. Starts a dedicated daemon with a file-based panic flag.
+/// 2. Sends a git commit that triggers side-effect processing → panic.
+/// 3. Verifies the daemon process is still alive (not a zombie).
+/// 4. Removes the panic flag file.
+/// 5. Sends another git commit and verifies the daemon processes it normally.
+/// 6. Cleanly shuts down the daemon.
+#[test]
+#[serial]
+fn daemon_recovers_from_panic_in_side_effect_pipeline() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    // Create a flag file that will trigger a panic in the side-effect pipeline.
+    let panic_flag_path = repo.path().join(".panic_flag");
+    fs::write(&panic_flag_path, "1").expect("failed to write panic flag");
+
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[(
+            "GIT_AI_TEST_PANIC_IN_SIDE_EFFECT_FLAG",
+            panic_flag_path
+                .to_str()
+                .expect("panic flag path should be utf-8"),
+        )],
+    );
+    let daemon_pid = daemon.child.id();
+
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+
+    // Phase 1 — Send a commit while the panic flag is active.
+    // The daemon will panic inside the side-effect pipeline, but catch_unwind
+    // should keep it alive.  Because panicked commands do NOT emit completion
+    // log entries, we cannot use wait_for_expected_top_level_completions here.
+    // Instead we track these commands in a throwaway counter and poll the
+    // daemon's control socket to confirm it is still responsive.
+    let mut _throwaway = 0u64;
+
+    fs::write(repo.path().join("file.txt"), "initial\n").expect("failed to write initial file");
+    traced_git_with_env(&repo, &["add", "file.txt"], &env_refs, &mut _throwaway)
+        .expect("add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "initial"],
+        &env_refs,
+        &mut _throwaway,
+    )
+    .expect("initial commit should succeed");
+
+    // Give the daemon enough time to ingest the trace events and attempt
+    // (and panic in) side-effect processing.  Poll the control socket to
+    // confirm the daemon is still responsive.
+    let mut daemon_responded = false;
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if send_control_request(
+            &daemon.control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: daemon.repo_working_dir.clone(),
+            },
+        )
+        .is_ok()
+        {
+            daemon_responded = true;
+            break;
+        }
+    }
+    assert!(
+        daemon_responded,
+        "daemon control socket should respond after panic in side-effect pipeline"
+    );
+
+    // Verify the daemon process is still alive after the panic.
+    assert!(
+        process_exists(daemon_pid),
+        "daemon process should still be alive after a panic in side-effect pipeline"
+    );
+    assert!(
+        daemon
+            .child
+            .try_wait()
+            .expect("failed to poll daemon")
+            .is_none(),
+        "daemon should not have exited after panic"
+    );
+
+    // Phase 2 — Remove the panic flag and verify the daemon processes a new
+    // commit end-to-end (completion log entry recorded).
+    fs::remove_file(&panic_flag_path).expect("failed to remove panic flag");
+
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
+
+    fs::write(repo.path().join("file.txt"), "updated\n").expect("failed to write updated file");
+    traced_git_with_env(
+        &repo,
+        &["add", "file.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("second add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "second commit"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("second commit should succeed");
+
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    // Verify the daemon is still alive after recovering and processing normal commands.
+    assert!(
+        process_exists(daemon_pid),
+        "daemon should still be alive after recovering and processing normal commands"
+    );
+
+    // Clean shutdown.
+    daemon.shutdown();
 }

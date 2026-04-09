@@ -195,6 +195,12 @@ pub fn rewrite_authorship_if_needed(
         RewriteLogEvent::CherryPickComplete {
             cherry_pick_complete,
         } => {
+            // Fix #955: fetch missing notes before attribution rewriting so that
+            // daemon mode has the same remote-note resolution as wrapper mode.
+            crate::git::sync_authorship::fetch_missing_notes_for_commits(
+                repo,
+                &cherry_pick_complete.source_commits,
+            );
             rewrite_authorship_after_cherry_pick(
                 repo,
                 &cherry_pick_complete.source_commits,
@@ -541,7 +547,14 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     // Step 1: Get target branch head (first parent on merge_ref)
     // This is more correct than just parent(0) in cases with complex back-and-forth merge history
     let merge_commit = repo.find_commit(merge_commit_sha.to_string())?;
-    let target_branch_head = merge_commit.parent_on_refname(merge_ref)?;
+    let target_branch_head = if merge_commit.parent_count()? == 1 {
+        // For single-parent commits (squash merges), there's no ambiguity - use the only parent
+        // This avoids issues in partial clones where parent_on_refname might fail
+        merge_commit.parent(0)?
+    } else {
+        // For multi-parent commits, find the parent that's on the target branch
+        merge_commit.parent_on_refname(merge_ref)?
+    };
     let target_branch_head_sha = target_branch_head.id().to_string();
 
     debug_log(&format!(
@@ -946,6 +959,84 @@ fn batch_read_file_contents_at_commit(
     Ok(results)
 }
 
+/// Pair original commits with new (rebased) commits for authorship rewriting.
+///
+/// When the counts are equal we use positional pairing (the common case for a
+/// normal rebase where every original commit becomes exactly one new commit).
+///
+/// When counts differ — which happens when an interactive rebase *drops* one or
+/// more commits — positional pairing is wrong: e.g. with originals [A, B, C] and
+/// new commits [A′, C′] (B was dropped), a positional zip gives [(A,A′),(B,C′)]
+/// so C′ is incorrectly attributed using B's note instead of C's.
+///
+/// We fix this by matching each new commit to the first unused original commit
+/// that has the same subject line (first line of the commit message).  If no
+/// subject match is found we fall back to the next positionally-available original
+/// so that the pairing is never shorter than `new_commits`.
+fn pair_commits_for_rewrite(
+    repo: &Repository,
+    original_commits: &[String],
+    new_commits: &[String],
+) -> Vec<(String, String)> {
+    if original_commits.len() == new_commits.len() {
+        // Equal length: positional pairing is correct and avoids extra git calls.
+        return original_commits
+            .iter()
+            .zip(new_commits.iter())
+            .map(|(a, b)| (a.clone(), b.clone()))
+            .collect();
+    }
+
+    // Unequal length (dropped or squashed commits): match by commit subject.
+    let original_subjects: Vec<(String, String)> = original_commits
+        .iter()
+        .map(|sha| {
+            let subject = repo
+                .find_commit(sha.clone())
+                .and_then(|c| c.summary())
+                .unwrap_or_default();
+            (sha.clone(), subject)
+        })
+        .collect();
+
+    let mut used: HashSet<String> = HashSet::new();
+    let mut pairs: Vec<(String, String)> = Vec::with_capacity(new_commits.len());
+
+    for new_sha in new_commits {
+        let new_subject = repo
+            .find_commit(new_sha.clone())
+            .and_then(|c| c.summary())
+            .unwrap_or_default();
+
+        // Prefer an unused original with the same subject.
+        let matched = original_subjects.iter().find(|(orig_sha, orig_subject)| {
+            !used.contains(orig_sha) && *orig_subject == new_subject
+        });
+
+        let orig_sha = if let Some((orig_sha, _)) = matched {
+            orig_sha.clone()
+        } else {
+            // No subject match — fall back to the next positionally-available
+            // unused original so every new commit gets a pairing.
+            match original_subjects
+                .iter()
+                .find(|(orig_sha, _)| !used.contains(orig_sha))
+            {
+                Some((orig_sha, _)) => orig_sha.clone(),
+                None => {
+                    // All originals consumed (shouldn't happen in practice).
+                    continue;
+                }
+            }
+        };
+
+        used.insert(orig_sha.clone());
+        pairs.push((orig_sha, new_sha.clone()));
+    }
+
+    pairs
+}
+
 pub fn rewrite_authorship_after_rebase_v2(
     repo: &Repository,
     original_head: &str,
@@ -1004,13 +1095,12 @@ pub fn rewrite_authorship_after_rebase_v2(
     ));
     let commits_to_process_lookup: HashSet<&str> =
         commits_to_process.iter().map(String::as_str).collect();
-    let commit_pairs_to_process: Vec<(String, String)> = original_commits
-        .iter()
-        .zip(new_commits.iter())
+    let all_commit_pairs = pair_commits_for_rewrite(repo, original_commits, new_commits);
+    let commit_pairs_to_process: Vec<(String, String)> = all_commit_pairs
+        .into_iter()
         .filter(|(_original_commit, new_commit)| {
             commits_to_process_lookup.contains(new_commit.as_str())
         })
-        .map(|(original_commit, new_commit)| (original_commit.clone(), new_commit.clone()))
         .collect();
     let original_commits_for_processing: Vec<String> = commit_pairs_to_process
         .iter()
@@ -1272,18 +1362,16 @@ pub fn rewrite_authorship_after_rebase_v2(
     let prompt_line_metrics = build_prompt_line_metrics_from_attributions(&current_attributions);
     apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
 
-    // Track which files actually exist in each rebased commit.
-    let mut existing_files: HashSet<String> = current_file_contents
-        .iter()
-        .filter_map(|(file, content)| {
-            if content.is_empty() {
-                None
-            } else {
-                Some(file.clone())
-            }
-        })
-        .collect();
+    // Bug fix: start existing_files EMPTY and build it up per-commit as files are
+    // introduced by new commits.  Previously this was pre-seeded from the final
+    // pre-rebase HEAD state, which caused every intermediate commit's note to include
+    // files from future commits (future-file leak).
+    let mut existing_files: HashSet<String> = HashSet::new();
 
+    // Build current_authorship_log solely for its metadata (used for the initial
+    // metadata_json_template_parts below).  Attestations will be empty because
+    // existing_files is empty, but that's fine — cached_file_attestation_text is also
+    // empty and gets rebuilt per-commit.
     let current_authorship_log = build_authorship_log_from_state(
         original_head,
         &current_prompts,
@@ -1295,13 +1383,11 @@ pub fn rewrite_authorship_after_rebase_v2(
     // Instead of calling serialize_to_string() per commit (which rebuilds the entire JSON),
     // we cache each file's attestation text and only update changed files. Assembly is
     // pure string concatenation.
+    //
+    // Bug fix: start EMPTY rather than pre-seeding from current_authorship_log.attestations.
+    // The per-commit loop populates this map as each file is first processed via content-diff.
     let mut cached_file_attestation_text: HashMap<String, String> = HashMap::new();
-    for file_attestation in &current_authorship_log.attestations {
-        cached_file_attestation_text.insert(
-            file_attestation.file_path.clone(),
-            serialize_file_attestation(file_attestation),
-        );
-    }
+
     // Pre-split metadata JSON template at a placeholder so we only swap the commit SHA per commit.
     // This is rebuilt per-commit when metrics change (attributions updated by hunk/diff transfer).
     let mut metadata_json_template_parts: Option<(String, String)> =
@@ -1399,7 +1485,31 @@ pub fn rewrite_authorship_after_rebase_v2(
                         .get(file_path)
                         .map(|(_, la)| la.as_slice())
                         .unwrap_or(&[]);
-                    let result = apply_hunks_to_line_attributions(old_attrs, hunks);
+                    let mut result = apply_hunks_to_line_attributions(old_attrs, hunks);
+                    // Bug fix: stamp AI attribution for inserted/replaced lines by
+                    // content-matching against the original-HEAD line→author map.
+                    // apply_hunks_to_line_attributions only shifts existing attributions;
+                    // lines in Replace or Insert hunk regions get no attribution from it.
+                    // We recover those by looking up each added line's content.
+                    if let Some(file_author_map) = original_head_line_to_author.get(file_path) {
+                        for hunk in hunks.iter() {
+                            if hunk.new_count > 0 {
+                                for (i, added_line) in hunk.added_lines.iter().enumerate() {
+                                    if let Some(author_id) =
+                                        file_author_map.get(added_line.as_str())
+                                    {
+                                        let line_num = hunk.new_start + i as u32;
+                                        overlay_attribution(
+                                            &mut result,
+                                            line_num,
+                                            line_num,
+                                            author_id.clone(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     total_files_hunk_transferred += 1;
                     loop_hunk_ms += thunk.elapsed().as_micros();
                     result
@@ -2102,9 +2212,12 @@ impl DiffTreeResult {
 struct DiffHunk {
     old_start: u32,
     old_count: u32,
-    #[allow(dead_code)]
     new_start: u32,
     new_count: u32,
+    /// Content of `+` lines from the unified diff output for this hunk.
+    /// Used by the hunk-based attribution path to stamp AI attribution on
+    /// newly-inserted/replaced lines via content-matching.
+    added_lines: Vec<String>,
 }
 
 /// Per-commit, per-file hunk information extracted from `git diff-tree -p -U0`.
@@ -2131,6 +2244,7 @@ fn parse_hunk_header(line: &str) -> Option<DiffHunk> {
         old_count,
         new_start,
         new_count,
+        added_lines: Vec::new(),
     })
 }
 
@@ -2278,15 +2392,17 @@ fn run_diff_tree_with_hunks(
 
     for line in text.lines() {
         // Commit header line (hex SHA)
-        if line.len() >= 40
-            && commit_set.contains(&line[..40])
-            && line[..40].chars().all(|c| c.is_ascii_hexdigit())
+        // Use .get(..40) instead of &line[..40] to safely handle lines containing
+        // multi-byte UTF-8 characters where byte index 40 may not be a char boundary.
+        if let Some(prefix) = line.get(..40)
+            && commit_set.contains(prefix)
+            && prefix.chars().all(|c| c.is_ascii_hexdigit())
         {
             // Save previous commit's delta
             if let Some(ref prev_commit) = current_commit {
                 commit_deltas.push((prev_commit.clone(), std::mem::take(&mut current_delta)));
             }
-            current_commit = Some(line[..40].to_string());
+            current_commit = Some(prefix.to_string());
             current_diff_file = None;
             continue;
         }
@@ -2361,7 +2477,22 @@ fn run_diff_tree_with_hunks(
             continue;
         }
 
-        // Skip other lines (index, ---, +++, content lines)
+        // Capture `+` lines (added content) into the most-recent hunk for this file.
+        // The `+++` file-header line is excluded. With -U0 there are no context lines,
+        // so every `+` line is a genuine addition — exactly what we need for the
+        // content-match attribution pass in the hunk-based transfer path.
+        if line.starts_with('+') && !line.starts_with("+++ ") {
+            if let (Some(commit), Some(file)) = (&current_commit, &current_diff_file)
+                && let Some(file_hunks) = hunks_by_commit.get_mut(commit)
+                && let Some(hunks) = file_hunks.get_mut(file.as_str())
+                && let Some(last_hunk) = hunks.last_mut()
+            {
+                last_hunk.added_lines.push(line[1..].to_string());
+            }
+            continue;
+        }
+
+        // Skip other lines (index, ---, context lines)
     }
 
     // Save last commit's delta
@@ -2575,12 +2706,9 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
     // Inject custom attributes into all PromptRecords (same behavior as post_commit).
-    // In daemon mode we need a fresh config snapshot because the daemon is long-lived.
-    let custom_attrs = if crate::daemon::daemon_process_active() {
-        crate::config::Config::fresh().custom_attributes().clone()
-    } else {
-        crate::config::Config::get().custom_attributes().clone()
-    };
+    // Always use Config::fresh() to support runtime config updates
+    // (especially important for daemon mode, but also good for consistency)
+    let custom_attrs = crate::config::Config::fresh().custom_attributes().clone();
     if !custom_attrs.is_empty() {
         for pr in authorship_log.metadata.prompts.values_mut() {
             pr.custom_attributes = Some(custom_attrs.clone());
@@ -3494,46 +3622,6 @@ fn build_file_attestation_from_line_attributions(
     } else {
         Some(file_attestation)
     }
-}
-
-/// Serialize a FileAttestation into the text format used in authorship notes.
-fn serialize_file_attestation(
-    file_attestation: &crate::authorship::authorship_log_serialization::FileAttestation,
-) -> String {
-    use std::fmt::Write;
-    let mut output = String::with_capacity(256);
-    let file_path = if file_attestation.file_path.contains(' ')
-        || file_attestation.file_path.contains('\t')
-        || file_attestation.file_path.contains('\n')
-    {
-        format!("\"{}\"", &file_attestation.file_path)
-    } else {
-        file_attestation.file_path.clone()
-    };
-    output.push_str(&file_path);
-    output.push('\n');
-    for entry in &file_attestation.entries {
-        output.push_str("  ");
-        output.push_str(&entry.hash);
-        output.push(' ');
-        let mut first = true;
-        for range in &entry.line_ranges {
-            if !first {
-                output.push(',');
-            }
-            first = false;
-            match range {
-                crate::authorship::authorship_log::LineRange::Single(line) => {
-                    let _ = write!(output, "{}", line);
-                }
-                crate::authorship::authorship_log::LineRange::Range(start, end) => {
-                    let _ = write!(output, "{}-{}", start, end);
-                }
-            }
-        }
-        output.push('\n');
-    }
-    output
 }
 
 /// Serialize attestation text directly from line_attrs without building intermediate FileAttestation.
