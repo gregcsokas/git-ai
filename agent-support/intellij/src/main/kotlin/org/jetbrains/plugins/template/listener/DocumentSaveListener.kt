@@ -83,8 +83,7 @@ class DocumentSaveListener(
                 val content = LocalFileSystem.getInstance().findFileByPath(absolutePath)
                     ?.let { String(it.contentsToByteArray(), Charsets.UTF_8) }
                 if (content != null) {
-                    val relativePath = toRelativePath(absolutePath, workspaceRoot)
-                    dirtyFiles[relativePath] = content
+                    dirtyFiles[absolutePath] = content
                 }
             }
         }

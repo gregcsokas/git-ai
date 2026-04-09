@@ -75,10 +75,9 @@ export class KnownHumanCheckpointManager {
     const snapshot = [...paths];
     paths.clear();
 
-    // Build dirty_files as repo-relative path → current content
+    // Build dirty_files as absolute path → current content
     const dirtyFiles: Record<string, string> = {};
     for (const absolutePath of snapshot) {
-      const relativePath = path.relative(repoRoot, absolutePath);
       const doc = vscode.workspace.textDocuments.find(
         (d) => d.uri.fsPath === absolutePath && d.uri.scheme === "file"
       );
@@ -86,7 +85,7 @@ export class KnownHumanCheckpointManager {
       // fall back to reading from the saved document directly.
       const content = doc ? doc.getText() : null;
       if (content !== null) {
-        dirtyFiles[relativePath] = content;
+        dirtyFiles[absolutePath] = content;
       }
     }
 
