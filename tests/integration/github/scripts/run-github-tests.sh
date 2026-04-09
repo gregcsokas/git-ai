@@ -47,4 +47,4 @@ echo ""
 echo "🚀 Running GitHub integration tests..."
 echo ""
 
-cargo test --test github_integration -- --ignored --nocapture "${TEST_ARGS[@]}"
+cargo test --test github_integration -- --ignored --nocapture ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
