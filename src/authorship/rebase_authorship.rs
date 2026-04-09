@@ -3712,7 +3712,7 @@ fn build_metadata_template_parts(
 /// that `total_additions` / `total_deletions` reflect *this* commit, not an unrelated one
 /// that happens to sort first by SHA).
 ///
-/// `delta_humans` overrides `metadata.humans` with per-commit-delta humans (only h_<hash>
+/// `delta_humans` overrides `metadata.humans` with per-commit-delta humans (only `h_<hash>`
 /// entries that appear in this commit's changed files). Passing `None` leaves metadata.humans
 /// unchanged (used for the initial/non-per-commit path).
 fn build_metadata_template_parts_filtered(

@@ -22,7 +22,7 @@ pub struct InitialAttributions {
     /// Optional blob snapshot of the file content represented by INITIAL.
     #[serde(default)]
     pub file_blobs: HashMap<String, String>,
-    /// Known human records: h_<hash> -> HumanRecord
+    /// Known human records: `h_<hash>` -> HumanRecord
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub humans: std::collections::BTreeMap<String, HumanRecord>,
 }
