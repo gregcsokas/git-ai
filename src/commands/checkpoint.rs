@@ -188,6 +188,16 @@ pub fn explicit_capture_target_paths(
             PreparedPathRole::WillEdit,
             result.will_edit_filepaths.as_ref()?,
         )
+    } else if kind == CheckpointKind::KnownHuman {
+        // KnownHuman can be pre-save (will_edit) or post-save (edited); prefer edited.
+        if let Some(paths) = result.edited_filepaths.as_ref() {
+            (PreparedPathRole::Edited, paths)
+        } else {
+            (
+                PreparedPathRole::WillEdit,
+                result.will_edit_filepaths.as_ref()?,
+            )
+        }
     } else {
         (PreparedPathRole::Edited, result.edited_filepaths.as_ref()?)
     };
@@ -2322,6 +2332,40 @@ mod tests {
         assert_eq!(
             explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&agent_run_result)),
             None
+        );
+    }
+
+    #[test]
+    fn test_explicit_capture_target_paths_known_human_uses_edited_filepaths() {
+        // KnownHuman post-save: edit already happened, uses edited_filepaths.
+        let agent_run_result = test_agent_run_result(
+            CheckpointKind::KnownHuman,
+            Some(vec!["src/foo.rs"]),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            explicit_capture_target_paths(CheckpointKind::KnownHuman, Some(&agent_run_result)),
+            Some((PreparedPathRole::Edited, vec!["src/foo.rs".to_string()]))
+        );
+    }
+
+    #[test]
+    fn test_explicit_capture_target_paths_known_human_uses_will_edit_filepaths() {
+        // KnownHuman pre-save: edit hasn't happened yet, uses will_edit_filepaths.
+        // Regression: KnownHuman fell into the else branch which only reads edited_filepaths,
+        // returning None and silently disabling pathspec scoping for pre-save KnownHuman.
+        let agent_run_result = test_agent_run_result(
+            CheckpointKind::KnownHuman,
+            None,
+            Some(vec!["src/foo.rs"]),
+            None,
+        );
+
+        assert_eq!(
+            explicit_capture_target_paths(CheckpointKind::KnownHuman, Some(&agent_run_result)),
+            Some((PreparedPathRole::WillEdit, vec!["src/foo.rs".to_string()]))
         );
     }
 
