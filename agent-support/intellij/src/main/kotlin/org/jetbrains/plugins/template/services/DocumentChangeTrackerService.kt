@@ -6,7 +6,6 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.editor.EditorFactory
-import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.vfs.VirtualFileManager
 import org.jetbrains.plugins.template.listener.DocumentChangeListener
 import org.jetbrains.plugins.template.listener.DocumentSaveListener
@@ -45,9 +44,8 @@ class DocumentChangeTrackerService : Disposable {
             .subscribe(VirtualFileManager.VFS_CHANGES, vfsListener)
 
         val editorVersion = ApplicationInfo.getInstance().fullVersion
-        val extensionVersion = com.intellij.ide.plugins.PluginManagerCore
-            .getPlugin(PluginId.findId("com.usegitai.plugins.jetbrains"))
-            ?.version ?: "unknown"
+        // TODO: Get plugin version dynamically when IntelliJ platform API stabilizes
+        val extensionVersion = "0.1.6"
         val saveListener = DocumentSaveListener(scheduler, editorVersion, extensionVersion)
         ApplicationManager.getApplication().messageBus.connect(this)
             .subscribe(VirtualFileManager.VFS_CHANGES, saveListener)
