@@ -72,9 +72,8 @@ class DocumentSaveListener(
     private fun executeCheckpoint(workspaceRoot: String) {
         pendingFutures.remove(workspaceRoot)
 
-        val paths = pendingPaths[workspaceRoot] ?: return
+        val paths = pendingPaths.remove(workspaceRoot) ?: return
         val snapshot = paths.toList()
-        snapshot.forEach { paths.remove(it) }
         if (snapshot.isEmpty()) return
 
         val dirtyFiles = mutableMapOf<String, String>()
