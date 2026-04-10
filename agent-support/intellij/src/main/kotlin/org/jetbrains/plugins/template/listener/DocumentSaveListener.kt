@@ -48,9 +48,10 @@ class DocumentSaveListener(
 
             val workspaceRoot = findWorkspaceRoot(event.path) ?: continue
 
-            pendingPaths
-                .computeIfAbsent(workspaceRoot) { ConcurrentHashMap.newKeySet() }
-                .add(event.path)
+            val paths = pendingPaths.computeIfAbsent(workspaceRoot) { ConcurrentHashMap.newKeySet() }
+            synchronized(paths) {
+                paths.add(event.path)
+            }
             workspaceRoots.add(workspaceRoot)
 
             logger.warn("[SAVE] Document saved: ${event.path}")
@@ -72,8 +73,12 @@ class DocumentSaveListener(
     private fun executeCheckpoint(workspaceRoot: String) {
         pendingFutures.remove(workspaceRoot)
 
-        val paths = pendingPaths.remove(workspaceRoot) ?: return
-        val snapshot = paths.toList()
+        val paths = pendingPaths[workspaceRoot] ?: return
+        val snapshot = synchronized(paths) {
+            val snap = paths.toList()
+            paths.clear()
+            snap
+        }
         if (snapshot.isEmpty()) return
 
         val dirtyFiles = mutableMapOf<String, String>()
