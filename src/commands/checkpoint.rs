@@ -52,8 +52,6 @@ const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 
 #[cfg(not(any(test, feature = "test-support")))]
 const KNOWN_HUMAN_MIN_SECS_AFTER_AI: u64 = 1;
-#[cfg(any(test, feature = "test-support"))]
-const KNOWN_HUMAN_MIN_SECS_AFTER_AI: u64 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -791,7 +789,10 @@ fn execute_resolved_checkpoint(
     // Reject KnownHuman checkpoints that arrive within KNOWN_HUMAN_MIN_SECS_AFTER_AI
     // seconds of an AI checkpoint on any of the same files. These are likely spurious
     // IDE save events triggered by the AI completing its edit, not genuine human keystrokes.
-    if kind == CheckpointKind::KnownHuman && KNOWN_HUMAN_MIN_SECS_AFTER_AI > 0 {
+    // Only compiled in non-test builds where the constant is non-zero; under --all-targets
+    // clippy would otherwise flag the comparisons as always-false for u64.
+    #[cfg(not(any(test, feature = "test-support")))]
+    if kind == CheckpointKind::KnownHuman {
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
