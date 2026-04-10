@@ -58,7 +58,9 @@ export class KnownHumanCheckpointManager {
     }
 
     const timer = setTimeout(() => {
-      this.executeCheckpoint(repoRoot);
+      this.executeCheckpoint(repoRoot).catch((err) =>
+        console.error("[git-ai] KnownHumanCheckpointManager: Checkpoint error:", err)
+      );
     }, this.debounceMs);
 
     this.pendingTimers.set(repoRoot, timer);
