@@ -74,11 +74,12 @@ impl VirtualAttributions {
             }
         }
 
-        // Find missing author_ids (not in prompts map)
-        // An author_id is missing if it doesn't exist as a key in the outer prompts map
+        // Find missing author_ids (not in prompts or humans maps)
+        // An author_id is missing if it doesn't exist in prompts or humans
+        // h_-prefixed KnownHuman IDs are stored in self.humans, not self.prompts
         let missing_ids: Vec<String> = all_author_ids
             .into_iter()
-            .filter(|id| !self.prompts.contains_key(id))
+            .filter(|id| !self.prompts.contains_key(id) && !self.humans.contains_key(id))
             .collect();
 
         if missing_ids.is_empty() {
