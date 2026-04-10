@@ -40,17 +40,17 @@ class DocumentChangeTrackerService : Disposable {
         val docListener = DocumentChangeListener(agentTouchedFiles, scheduler)
         EditorFactory.getInstance().eventMulticaster.addDocumentListener(docListener, this)
 
-        val bus = ApplicationManager.getApplication().messageBus.connect(this)
-
         val vfsListener = VfsRefreshListener(agentTouchedFiles, scheduler)
-        bus.subscribe(VirtualFileManager.VFS_CHANGES, vfsListener)
+        ApplicationManager.getApplication().messageBus.connect(this)
+            .subscribe(VirtualFileManager.VFS_CHANGES, vfsListener)
 
         val editorVersion = ApplicationInfo.getInstance().fullVersion
         val extensionVersion = com.intellij.ide.plugins.PluginManagerCore
             .getPlugin(PluginId.getId("com.usegitai.plugins.jetbrains"))
             ?.version ?: "unknown"
         val saveListener = DocumentSaveListener(scheduler, editorVersion, extensionVersion)
-        bus.subscribe(VirtualFileManager.VFS_CHANGES, saveListener)
+        ApplicationManager.getApplication().messageBus.connect(this)
+            .subscribe(VirtualFileManager.VFS_CHANGES, saveListener)
 
         // Periodic eviction of stale tracking entries
         scheduler.scheduleAtFixedRate(
