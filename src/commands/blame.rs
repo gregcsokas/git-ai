@@ -1089,8 +1089,22 @@ fn overlay_ai_authorship(
                         }
 
                         prompt_records.insert(prompt_hash, prompt_record.clone());
+                    } else if let Some(ref hash) = prompt_hash
+                        && hash.starts_with("h_")
+                    {
+                        // Known human attestation (h_-prefixed hash from KnownHuman checkpoint)
+                        if options.use_prompt_hashes_as_names {
+                            line_authors.insert(current_line_num, hash.clone());
+                        } else if options.return_human_authors_as_human {
+                            line_authors.insert(
+                                current_line_num,
+                                CheckpointKind::Human.to_str().to_string(),
+                            );
+                        } else {
+                            line_authors.insert(current_line_num, author.username.clone());
+                        }
                     } else {
-                        // Has authorship log but line not AI = human-authored
+                        // Has authorship log but line not AI and not KnownHuman = unattested
                         if options.return_human_authors_as_human {
                             line_authors.insert(
                                 current_line_num,
@@ -1101,7 +1115,7 @@ fn overlay_ai_authorship(
                         }
                     }
                 } else {
-                    // Has authorship log but no attribution found = human-authored
+                    // Has authorship log but no attribution found = unattested (unknown)
                     if options.return_human_authors_as_human {
                         line_authors
                             .insert(current_line_num, CheckpointKind::Human.to_str().to_string());

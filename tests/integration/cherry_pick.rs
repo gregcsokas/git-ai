@@ -100,7 +100,6 @@ fn test_cherry_pick_preserves_human_only_commit_note_metadata() {
         .expect("source commit should have a metadata-only note");
     let source_log =
         AuthorshipLog::deserialize_from_string(&source_note).expect("parse source note");
-    assert!(source_log.attestations.is_empty());
     assert!(source_log.metadata.prompts.is_empty());
 
     repo.git(&["checkout", &main_branch]).unwrap();
@@ -112,7 +111,6 @@ fn test_cherry_pick_preserves_human_only_commit_note_metadata() {
         .read_authorship_note(&new_commit)
         .expect("cherry-picked commit should preserve metadata-only note");
     let new_log = AuthorshipLog::deserialize_from_string(&new_note).expect("parse new note");
-    assert!(new_log.attestations.is_empty());
     assert!(new_log.metadata.prompts.is_empty());
     assert_eq!(new_log.metadata.base_commit_sha, new_commit);
 }
@@ -139,12 +137,8 @@ fn test_cherry_pick_preserves_prompt_only_commit_note_metadata() {
     let mut source_log =
         AuthorshipLog::deserialize_from_string(&source_note).expect("parse source note");
     assert!(
-        source_log.attestations.is_empty(),
-        "precondition: source should start metadata-only"
-    );
-    assert!(
         source_log.metadata.prompts.is_empty(),
-        "precondition: source commit should not have prompts before test mutation"
+        "precondition: source commit should not have AI prompts before test mutation"
     );
 
     let mut test_attrs = HashMap::new();
@@ -192,7 +186,6 @@ fn test_cherry_pick_preserves_prompt_only_commit_note_metadata() {
         .read_authorship_note(&new_commit)
         .expect("cherry-picked commit should preserve prompt-only note");
     let new_log = AuthorshipLog::deserialize_from_string(&new_note).expect("parse new note");
-    assert!(new_log.attestations.is_empty());
     assert_eq!(new_log.metadata.prompts.len(), 1);
     assert_eq!(new_log.metadata.base_commit_sha, new_commit);
 

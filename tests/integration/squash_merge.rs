@@ -104,7 +104,7 @@ fn test_prepare_working_log_squash_with_main_changes() {
         "// Master update at top".human(),
         "section 1".human(),
         "section 2".human(),
-        "section 3".ai(),
+        "section 3".human(),
         "// AI feature addition at end".ai()
     ]);
 
@@ -114,11 +114,11 @@ fn test_prepare_working_log_squash_with_main_changes() {
         stats.git_diff_added_lines, 2,
         "Squash commit adds 2 lines from feature (includes newline)"
     );
-    assert_eq!(stats.ai_additions, 2, "2 AI lines from feature branch");
-    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
+    assert_eq!(stats.ai_additions, 1, "1 AI line from feature branch");
+    assert_eq!(stats.ai_accepted, 1, "1 AI line accepted without edits");
     assert_eq!(
-        stats.human_additions, 0,
-        "0 human lines from feature branch"
+        stats.human_additions, 1,
+        "1 human line from feature branch (section 3 included in squash diff)"
     );
     assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
@@ -161,7 +161,7 @@ fn test_prepare_working_log_squash_multiple_sessions() {
         "// AI session 1".ai(),
         "body".human(),
         "// Human addition".human(),
-        "footer".ai(),
+        "footer".human(),
         "// AI session 2".ai()
     ]);
 
@@ -172,11 +172,14 @@ fn test_prepare_working_log_squash_multiple_sessions() {
         "Squash commit adds 4 lines total (includes newline)"
     );
     assert_eq!(
-        stats.ai_additions, 3,
-        "3 AI lines from feature branch (both sessions plus reformatted footer)"
+        stats.ai_additions, 2,
+        "2 AI lines from feature branch (both sessions)"
     );
-    assert_eq!(stats.ai_accepted, 3, "3 AI lines accepted without edits");
-    assert_eq!(stats.human_additions, 1, "1 human line from feature branch");
+    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
+    assert_eq!(
+        stats.human_additions, 2,
+        "2 human lines from feature branch (Human addition + footer)"
+    );
     assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
@@ -470,9 +473,145 @@ fn test_squash_rebase_preserves_interleaved_attribution() {
     ]);
 }
 
+/// Variant of test_prepare_working_log_squash_with_main_changes using unattributed (legacy)
+/// human checkpoints. Assertions match origin/main behavior: with empty attribution, "section 3"
+/// gains the AI-attributed trailing newline in the squash diff and is counted as AI.
+#[test]
+fn test_prepare_working_log_squash_with_main_changes_standard_human() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("document.txt");
+
+    // Create master branch with initial content
+    file.set_contents(crate::lines![
+        "section 1".unattributed_human(),
+        "section 2".unattributed_human(),
+        "section 3".unattributed_human()
+    ]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let default_branch = repo.current_branch();
+
+    // Create feature branch and add AI changes
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.insert_at(3, crate::lines!["// AI feature addition at end".ai()]);
+    repo.stage_all_and_commit("AI adds feature").unwrap();
+
+    // Switch back to master and make out-of-band changes
+    repo.git(&["checkout", &default_branch]).unwrap();
+
+    // Re-initialize file after checkout to get current master state
+    let mut file = repo.filename("document.txt");
+    file.insert_at(
+        0,
+        crate::lines!["// Master update at top".unattributed_human()],
+    );
+    repo.stage_all_and_commit("Out-of-band update on master")
+        .unwrap();
+
+    // Squash merge feature into master
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    repo.stage_all_and_commit("Squashed feature with out-of-band")
+        .unwrap();
+
+    // Verify attribution — with empty attribution, "section 3" gains the AI-attributed
+    // trailing newline from the squash diff and is counted as AI (origin/main behavior).
+    file.assert_lines_and_blame(crate::lines![
+        "// Master update at top".human(),
+        "section 1".human(),
+        "section 2".human(),
+        "section 3".ai(),
+        "// AI feature addition at end".ai()
+    ]);
+
+    let stats = repo.stats().unwrap();
+    assert_eq!(
+        stats.git_diff_added_lines, 2,
+        "Squash commit adds 2 lines from feature (includes newline)"
+    );
+    assert_eq!(stats.ai_additions, 2, "2 AI lines from feature branch");
+    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
+    assert_eq!(
+        stats.human_additions, 0,
+        "0 human lines from feature branch"
+    );
+    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
+}
+
+/// Variant of test_prepare_working_log_squash_multiple_sessions using unattributed (legacy)
+/// human checkpoints. Assertions match origin/main behavior: "footer" gains the AI-attributed
+/// trailing newline and is counted as AI.
+#[test]
+fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("file.txt");
+
+    // Create master branch
+    file.set_contents(crate::lines![
+        "header".unattributed_human(),
+        "body".unattributed_human(),
+        "footer".unattributed_human()
+    ]);
+    repo.stage_all_and_commit("Initial").unwrap();
+
+    let default_branch = repo.current_branch();
+
+    // Create feature branch
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // First AI session
+    file.insert_at(1, crate::lines!["// AI session 1".ai()]);
+    repo.stage_all_and_commit("AI session 1").unwrap();
+
+    // Human edit
+    file.insert_at(3, crate::lines!["// Human addition".unattributed_human()]);
+    repo.stage_all_and_commit("Human edit").unwrap();
+
+    // Second AI session (different agent - simulated by new checkpoint)
+    file.insert_at(5, crate::lines!["// AI session 2".ai()]);
+    repo.stage_all_and_commit("AI session 2").unwrap();
+
+    // Squash merge into master
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    repo.commit("Squashed multiple sessions").unwrap();
+
+    // Verify attribution — "footer" gains the AI-attributed trailing newline and is counted
+    // as AI (origin/main behavior).
+    file.assert_lines_and_blame(crate::lines![
+        "header".human(),
+        "// AI session 1".ai(),
+        "body".human(),
+        "// Human addition".human(),
+        "footer".ai(),
+        "// AI session 2".ai()
+    ]);
+
+    let stats = repo.stats().unwrap();
+    assert_eq!(
+        stats.git_diff_added_lines, 4,
+        "Squash commit adds 4 lines total (includes newline)"
+    );
+    assert_eq!(
+        stats.ai_additions, 3,
+        "3 AI lines from feature branch (both sessions plus reformatted footer)"
+    );
+    assert_eq!(stats.ai_accepted, 3, "3 AI lines accepted without edits");
+    assert_eq!(
+        stats.human_additions, 0,
+        "0 KnownHuman-attested lines (checkpoint -- produces empty attribution)"
+    );
+    assert_eq!(
+        stats.unknown_additions, 1,
+        "1 unattested human line (// Human addition, unattributed via checkpoint --)"
+    );
+    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
+}
+
 crate::reuse_tests_in_worktree!(
     test_prepare_working_log_simple_squash,
     test_prepare_working_log_squash_with_main_changes,
     test_prepare_working_log_squash_multiple_sessions,
     test_prepare_working_log_squash_with_mixed_additions,
+    test_prepare_working_log_squash_with_main_changes_standard_human,
+    test_prepare_working_log_squash_multiple_sessions_standard_human,
 );

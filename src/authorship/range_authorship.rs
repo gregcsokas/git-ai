@@ -207,12 +207,8 @@ fn create_authorship_log_for_range(
             crate::authorship::authorship_log_serialization::AuthorshipLog {
                 attestations: Vec::new(),
                 metadata: crate::authorship::authorship_log_serialization::AuthorshipMetadata {
-                    schema_version: "3".to_string(),
-                    git_ai_version: Some(
-                        crate::authorship::authorship_log_serialization::GIT_AI_VERSION.to_string(),
-                    ),
                     base_commit_sha: end_sha.to_string(),
-                    prompts: std::collections::BTreeMap::new(),
+                    ..crate::authorship::authorship_log_serialization::AuthorshipMetadata::new()
                 },
             },
         );
@@ -428,6 +424,7 @@ fn calculate_range_stats_direct(
         git_diff_added_lines,
         git_diff_deleted_lines,
         diff_ai_stats.total_ai_accepted,
+        0,
         &diff_ai_stats.per_tool_model,
     );
 
@@ -670,7 +667,9 @@ mod tests {
         // Range authorship merges attributions from start to end, filtering to commits in range
         // The exact AI/human split depends on the merge attribution logic
         assert_eq!(stats.range_stats.ai_additions, 2);
-        assert_eq!(stats.range_stats.human_additions, 1);
+        // range_authorship passes known_human_accepted=0, so human lines appear as unknown_additions
+        assert_eq!(stats.range_stats.human_additions, 0);
+        assert_eq!(stats.range_stats.unknown_additions, 1);
         assert_eq!(stats.range_stats.git_diff_added_lines, 3);
     }
 
@@ -878,9 +877,10 @@ mod tests {
         assert_eq!(stats.range_stats.git_diff_added_lines, 3); // Only lib.rs, package-lock.json excluded
         // Verify the total is much less than 3003 (if lockfile was included)
         assert!(stats.range_stats.git_diff_added_lines < 100);
-        // Verify that some AI and human work is detected
+        // Verify that some AI work is detected and unattested lines exist
         assert!(stats.range_stats.ai_additions > 0);
-        assert!(stats.range_stats.human_additions > 0);
+        // range_authorship passes known_human_accepted=0, so human lines show as unknown_additions
+        assert!(stats.range_stats.unknown_additions > 0);
     }
 
     #[test]
