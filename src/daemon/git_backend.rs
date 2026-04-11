@@ -622,12 +622,14 @@ fn takes_value(arg: &str) -> bool {
             | "--reference"
             | "--reference-if-able"
             | "--dissociate"
-            | "-c" | "--config"
+            | "-c"
+            | "--config"
             | "--object-format"
             | "--depth"
             | "--shallow-since"
             | "--shallow-exclude"
-            | "-j" | "--jobs"
+            | "-j"
+            | "--jobs"
             | "--filter"
             | "--bundle-uri"
             | "--server-option"
@@ -730,7 +732,9 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitBackend, SystemGitBackend, clone_init_positionals, default_clone_target_from_source};
+    use super::{
+        GitBackend, SystemGitBackend, clone_init_positionals, default_clone_target_from_source,
+    };
     use std::path::PathBuf;
 
     fn argv(args: &[&str]) -> Vec<String> {
@@ -777,7 +781,11 @@ mod tests {
 
     #[test]
     fn clone_positionals_skips_value_for_config_short_flag() {
-        let args = argv(&["-c", "http.sslVerify=false", "https://example.com/org/test-repo.git"]);
+        let args = argv(&[
+            "-c",
+            "http.sslVerify=false",
+            "https://example.com/org/test-repo.git",
+        ]);
         assert_eq!(
             clone_init_positionals(&args),
             vec!["https://example.com/org/test-repo.git".to_string()],
@@ -789,7 +797,13 @@ mod tests {
     fn clone_target_derives_name_from_url_with_depth_flag() {
         let backend = SystemGitBackend::new();
         let cwd = PathBuf::from("/home/testuser/projects");
-        let args = argv(&["git", "clone", "--depth", "1", "https://example.com/org/test-repo.git"]);
+        let args = argv(&[
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "https://example.com/org/test-repo.git",
+        ]);
         let result = backend.clone_target(&args, Some(&cwd)).unwrap();
         assert_eq!(
             result,
