@@ -3,9 +3,8 @@ use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
 use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, install_vsc_editor_extension,
-    is_git_ai_checkpoint_command, is_github_codespaces, is_vsc_editor_extension_installed,
-    resolve_editor_cli, write_atomic,
+    generate_diff, home_dir, install_vsc_editor_extension, is_git_ai_checkpoint_command,
+    is_github_codespaces, is_vsc_editor_extension_installed, resolve_editor_cli, write_atomic,
 };
 use crate::utils::debug_log;
 use serde_json::{Value, json};
@@ -209,38 +208,15 @@ impl HookInstaller for WindsurfInstaller {
     }
 
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
-        let resolved_cli = resolve_editor_cli("windsurf");
-        let has_cli = resolved_cli.is_some();
-        let has_binary = binary_exists("windsurf");
+        let has_cli = resolve_editor_cli("windsurf").is_some();
         let has_dotfiles = home_dir().join(".codeium").join("windsurf").exists();
 
-        if !has_cli && !has_binary && !has_dotfiles {
+        if !has_cli && !has_dotfiles {
             return Ok(HookCheckResult {
                 tool_installed: false,
                 hooks_installed: false,
                 hooks_up_to_date: false,
             });
-        }
-
-        // Check if VS Code extension is installed
-        if let Some(cli) = &resolved_cli {
-            match is_vsc_editor_extension_installed(cli, "git-ai.git-ai-vscode") {
-                Ok(true) => {
-                    return Ok(HookCheckResult {
-                        tool_installed: true,
-                        hooks_installed: true,
-                        hooks_up_to_date: true,
-                    });
-                }
-                Ok(false) => {
-                    return Ok(HookCheckResult {
-                        tool_installed: true,
-                        hooks_installed: false,
-                        hooks_up_to_date: false,
-                    });
-                }
-                Err(_) => {}
-            }
         }
 
         // Check all hook locations
