@@ -868,7 +868,9 @@ impl VirtualAttributions {
         });
         // Human records don't have a "non-landing" concept, so prune any whose lines
         // were deleted (e.g. a known-human line from an earlier commit removed in amend).
-        merged_va.humans.retain(|id, _| referenced_in_merged.contains(id));
+        merged_va
+            .humans
+            .retain(|id, _| referenced_in_merged.contains(id));
 
         Ok(merged_va)
     }
@@ -933,7 +935,9 @@ impl VirtualAttributions {
         merged_va.prompts.retain(|id, _| {
             checkpoint_prompt_ids.contains(id) || referenced_in_merged.contains(id)
         });
-        merged_va.humans.retain(|id, _| referenced_in_merged.contains(id));
+        merged_va
+            .humans
+            .retain(|id, _| referenced_in_merged.contains(id));
 
         Ok(merged_va)
     }
