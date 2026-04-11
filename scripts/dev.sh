@@ -63,10 +63,10 @@ fi
 # issues: direct cp reuses the inode, causing syspolicyd to fail validating the
 # changed binary, leaving the process stuck in launched-suspended state unkillably.
 echo "Installing binary to ~/.git-ai/bin/git-ai..."
-TMP_BIN=$(mktemp "$HOME/.git-ai/bin/git-ai.new.XXXXXX")
-trap 'rm -f "$TMP_BIN"' EXIT
+TMP_BIN="$HOME/.git-ai/bin/git-ai.tmp.$$"
 cp "target/$BUILD_TYPE/git-ai" "$TMP_BIN"
 mv -f "$TMP_BIN" "$HOME/.git-ai/bin/git-ai"
+chmod +x "$HOME/.git-ai/bin/git-ai"
 
 # Run install hooks
 echo "Running install hooks..."
