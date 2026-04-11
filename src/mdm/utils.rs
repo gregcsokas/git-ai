@@ -295,7 +295,9 @@ fn get_editor_cli_candidates(cli_name: &str) -> Vec<(PathBuf, PathBuf)> {
             #[cfg(windows)]
             {
                 if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-                    let base = PathBuf::from(local_app_data).join("Programs").join("Windsurf");
+                    let base = PathBuf::from(local_app_data)
+                        .join("Programs")
+                        .join("Windsurf");
                     candidates.push((
                         base.join("Windsurf.exe"),
                         base.join("resources")
