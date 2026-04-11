@@ -621,7 +621,6 @@ fn takes_value(arg: &str) -> bool {
             | "--separate-git-dir"
             | "--reference"
             | "--reference-if-able"
-            | "--dissociate"
             | "-c"
             | "--config"
             | "--object-format"
@@ -855,6 +854,26 @@ mod tests {
         assert!(
             result.starts_with("/home/testuser/projects/my-repo"),
             "result should be rooted at the cwd"
+        );
+    }
+
+    // --- Bug (pre-existing): `--dissociate` is a boolean flag but was listed in
+    // `takes_value`, causing the next argument (typically the URL) to be swallowed
+    // as its "value".  `git clone --reference /mirror --dissociate <url>` would leave
+    // the positionals list empty and `clone_target()` would return None.
+
+    #[test]
+    fn clone_positionals_treats_dissociate_as_boolean_not_value_taking() {
+        let args = argv(&[
+            "--reference",
+            "/mirror",
+            "--dissociate",
+            "https://example.com/org/test-repo.git",
+        ]);
+        assert_eq!(
+            clone_init_positionals(&args),
+            vec!["https://example.com/org/test-repo.git".to_string()],
+            "--dissociate is boolean and must not consume the following URL"
         );
     }
 
