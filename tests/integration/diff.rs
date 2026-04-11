@@ -2839,7 +2839,17 @@ fn test_diff_json_output_includes_human_id_in_hunks() {
         human_hunks
     );
 
+    // Verify the top-level humans map is present and can resolve human_id values
+    let humans = diff["humans"]
+        .as_object()
+        .expect("JSON should have top-level humans object");
+    assert!(
+        !humans.is_empty(),
+        "humans map should not be empty when there are human-authored hunks"
+    );
+
     // If we get here, verify the human_id starts with "h_" and prompt_id is not set
+    // Also verify that each human_id can be resolved via the top-level humans map
     for hunk in &human_hunks {
         if let Some(human_id) = hunk.get("human_id").and_then(|v| v.as_str()) {
             assert!(
@@ -2850,6 +2860,19 @@ fn test_diff_json_output_includes_human_id_in_hunks() {
             assert!(
                 hunk["prompt_id"].is_null() || !hunk.as_object().unwrap().contains_key("prompt_id"),
                 "Human hunks should not have prompt_id when they have human_id"
+            );
+
+            // Verify the human_id can be resolved via the humans map
+            let human_record = humans.get(human_id).expect(&format!(
+                "human_id '{}' from hunk should be resolvable in top-level humans map",
+                human_id
+            ));
+            let author = human_record["author"]
+                .as_str()
+                .expect("human record should have author field");
+            assert!(
+                !author.is_empty(),
+                "Resolved author name should not be empty"
             );
         }
     }

@@ -83,6 +83,9 @@ pub struct DiffJson {
     pub files: BTreeMap<String, FileDiffJson>,
     /// Prompt records keyed by prompt hash
     pub prompts: BTreeMap<String, PromptRecord>,
+    /// Human records keyed by human hash (h_-prefixed)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub humans: BTreeMap<String, HumanRecord>,
     /// Per-hunk records for machine consumption
     #[serde(default)]
     pub hunks: Vec<DiffJsonHunk>,
@@ -1531,6 +1534,7 @@ fn build_diff_json(
     Ok(DiffJson {
         files,
         prompts: prompts.clone(),
+        humans: artifacts.humans.clone(),
         hunks: artifacts.json_hunks.clone(),
         commits: artifacts.commits.clone(),
         commit_stats,
