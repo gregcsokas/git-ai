@@ -844,7 +844,13 @@ mod tests {
     #[test]
     fn init_target_resolves_dot_when_cwd_hint_is_provided() {
         let backend = SystemGitBackend::new();
-        let cwd = PathBuf::from("/home/testuser/projects/my-repo");
+        // Use temp_dir() so the base path is absolute on all platforms (Windows
+        // does not consider Unix-style paths like "/home/..." absolute).
+        let cwd = std::env::temp_dir().join("git-ai-test-my-repo");
+        assert!(
+            cwd.is_absolute(),
+            "temp_dir should be absolute on all platforms"
+        );
         let args = argv(&["git", "init"]);
         let result = backend.init_target(&args, Some(&cwd)).unwrap();
         assert!(
@@ -852,7 +858,7 @@ mod tests {
             "result must be absolute when cwd_hint is provided"
         );
         assert!(
-            result.starts_with("/home/testuser/projects/my-repo"),
+            result.starts_with(&cwd),
             "result should be rooted at the cwd"
         );
     }
