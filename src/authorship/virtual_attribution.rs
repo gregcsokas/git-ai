@@ -826,16 +826,11 @@ impl VirtualAttributions {
         //   3. blame_va.file_contents       (fallback – preserves previous behaviour for
         //                                    files that were deleted from the worktree)
 
-        // Save session prompt and human IDs before the merge consumes checkpoint_va.
-        // These come from the existing note (initial_attributions) plus any new entries
-        // from the current session and must be kept in the note even if their attributed
-        // lines were deleted during the amend.  The note is a commit-level historical
-        // record of every contributor; losing a line removes the *attribution* coordinate
-        // but must not erase the contributor's association with the commit.
+        // Save session prompt IDs before the merge consumes checkpoint_va.  These are
+        // prompts from the *current* amend/commit session and must be kept in
+        // metadata.prompts even if no lines landed (non-landing prompts).
         let checkpoint_prompt_ids: std::collections::HashSet<String> =
             checkpoint_va.prompts.keys().cloned().collect();
-        let checkpoint_human_ids: std::collections::HashSet<String> =
-            checkpoint_va.humans.keys().cloned().collect();
 
         let mut final_state = checkpoint_va.file_contents.clone();
         if let Ok(workdir) = repo.workdir() {
@@ -856,13 +851,12 @@ impl VirtualAttributions {
         let mut merged_va =
             merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
 
-        // Prune blame-history prompts/humans whose lines were deleted (e.g. because the
-        // user deleted an AI-authored or KnownHuman line during an amend).  We keep:
-        //   • any entry that came from this commit's existing note or the current session
-        //     (checkpoint_prompt_ids / checkpoint_human_ids), and
-        //   • any entry that still has at least one live attribution in the merged VA.
-        // This avoids leaking records from earlier commits into the amended note while
-        // preserving all contributors that were already linked to this commit.
+        // Prune blame-history prompts whose lines were deleted (e.g. because the user
+        // deleted an AI-authored line during an amend).  We keep:
+        //   • any prompt that came from the current session (checkpoint_prompt_ids), and
+        //   • any prompt that still has at least one live attribution in the merged VA.
+        // This avoids leaking PromptRecords from earlier commits into the amended note
+        // while preserving intentional non-landing prompts from the current session.
         let referenced_in_merged: std::collections::HashSet<String> = merged_va
             .attributions
             .values()
@@ -872,9 +866,11 @@ impl VirtualAttributions {
         merged_va.prompts.retain(|id, _| {
             checkpoint_prompt_ids.contains(id) || referenced_in_merged.contains(id)
         });
+        // Human records don't have a "non-landing" concept, so prune any whose lines
+        // were deleted (e.g. a known-human line from an earlier commit removed in amend).
         merged_va
             .humans
-            .retain(|id, _| checkpoint_human_ids.contains(id) || referenced_in_merged.contains(id));
+            .retain(|id, _| referenced_in_merged.contains(id));
 
         Ok(merged_va)
     }
@@ -906,12 +902,9 @@ impl VirtualAttributions {
             final_state_snapshot,
         )?;
 
-        // Save session prompt and human IDs before the merge consumes checkpoint_va.
-        // Same semantics as `from_working_log_for_commit`.
+        // Save session prompt IDs before the merge consumes checkpoint_va.
         let checkpoint_prompt_ids: std::collections::HashSet<String> =
             checkpoint_va.prompts.keys().cloned().collect();
-        let checkpoint_human_ids: std::collections::HashSet<String> =
-            checkpoint_va.humans.keys().cloned().collect();
 
         // Priority for `final_state` per file:
         //   1. checkpoint_va.file_contents  (working-log snapshot entries)
@@ -931,7 +924,7 @@ impl VirtualAttributions {
         let mut merged_va =
             merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
 
-        // Prune blame-history prompts/humans whose lines were deleted.  Same logic as
+        // Prune blame-history prompts whose lines were deleted.  Same logic as
         // `from_working_log_for_commit`.
         let referenced_in_merged: std::collections::HashSet<String> = merged_va
             .attributions
@@ -944,7 +937,7 @@ impl VirtualAttributions {
         });
         merged_va
             .humans
-            .retain(|id, _| checkpoint_human_ids.contains(id) || referenced_in_merged.contains(id));
+            .retain(|id, _| referenced_in_merged.contains(id));
 
         Ok(merged_va)
     }
