@@ -2868,6 +2868,15 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
     // Update base commit SHA
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
+    // Preserve human contributors from the original commit's note — deleting a
+    // KnownHuman-attributed line removes the attribution coordinate but must not
+    // erase the contributor's association with the commit.
+    if let Ok(original_log) = get_reference_as_authorship_log_v3(repo, original_commit) {
+        for (id, record) in original_log.metadata.humans {
+            authorship_log.metadata.humans.entry(id).or_insert(record);
+        }
+    }
+
     // Inject custom attributes into all PromptRecords (same behavior as post_commit).
     // Always use Config::fresh() to support runtime config updates
     // (especially important for daemon mode, but also good for consistency)
