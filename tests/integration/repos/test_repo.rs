@@ -687,6 +687,8 @@ fn is_known_checkpoint_preset(arg: &str) -> bool {
             | "ai_tab"
             | "firebender"
             | "mock_ai"
+            | "mock_known_human"
+            | "known_human"
             | "droid"
             | "agent-v1"
     )

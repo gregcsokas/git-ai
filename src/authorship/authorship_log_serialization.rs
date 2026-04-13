@@ -1,4 +1,4 @@
-use crate::authorship::authorship_log::{Author, LineRange, PromptRecord};
+use crate::authorship::authorship_log::{Author, HumanRecord, LineRange, PromptRecord};
 use crate::authorship::working_log::CheckpointKind;
 use crate::git::repository::Repository;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,8 @@ pub struct AuthorshipMetadata {
     pub git_ai_version: Option<String>,
     pub base_commit_sha: String,
     pub prompts: BTreeMap<String, PromptRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub humans: BTreeMap<String, HumanRecord>,
 }
 
 impl AuthorshipMetadata {
@@ -36,6 +38,7 @@ impl AuthorshipMetadata {
             git_ai_version: Some(GIT_AI_VERSION.to_string()),
             base_commit_sha: String::new(),
             prompts: BTreeMap::new(),
+            humans: BTreeMap::new(),
         }
     }
 }
@@ -46,13 +49,16 @@ impl Default for AuthorshipMetadata {
     }
 }
 
-/// Attestation entry: short hash followed by line ranges
+/// Attestation entry: a short hash followed by line ranges.
 ///
-/// IMPORTANT: The hash ALWAYS corresponds to a prompt in the prompts section.
-/// This system only tracks AI-generated content, not human-authored content.
+/// The hash maps to either:
+/// - An AI session entry in `metadata.prompts` (16 hex chars, no prefix), or
+/// - A known-human author entry in `metadata.humans` (prefixed with `h_`)
+///
+/// Lines with no attestation entry are "unknown" — not tracked by git-ai.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttestationEntry {
-    /// Short hash (7 chars) that maps to an entry in the prompts section of the metadata
+    /// Short hash (16 chars) that maps to an entry in the prompts section of the metadata
     pub hash: String,
     /// Line ranges that this prompt is responsible for
     pub line_ranges: Vec<LineRange>,
@@ -244,6 +250,22 @@ impl AuthorshipLog {
             // Check if this line is covered by any of the line ranges
             let contains = entry.line_ranges.iter().any(|range| range.contains(line));
             if contains {
+                // h_-prefixed hashes are known-human attestations — route to humans map
+                if entry.hash.starts_with("h_") {
+                    if let Some(human_record) = self.metadata.humans.get(&entry.hash) {
+                        return Some((
+                            Author {
+                                username: human_record.author.clone(),
+                                email: String::new(),
+                            },
+                            Some(entry.hash.clone()),
+                            None, // No PromptRecord for known-human lines
+                        ));
+                    }
+                    // h_ hash not found locally (foreign cherry-pick) — skip this entry
+                    continue;
+                }
+
                 // The hash corresponds to a prompt session short hash
                 if let Some(prompt_record) = self.metadata.prompts.get(&entry.hash) {
                     // Create author info from the prompt record
@@ -372,6 +394,11 @@ impl AuthorshipLog {
             let mut session_prompt_records: Vec<PromptRecord> = Vec::new();
 
             for (session_hash, ranges) in &session_entries {
+                // Skip known-human attestations — they don't have prompt records
+                if session_hash.starts_with("h_") {
+                    continue;
+                }
+
                 let prompt_record = self
                     .metadata
                     .prompts
@@ -625,14 +652,24 @@ fn needs_quoting(path: &str) -> bool {
     path.contains(' ') || path.contains('\t') || path.contains('\n')
 }
 
-/// Generate a short hash (7 characters) from agent_id and tool
+/// Generate a short hash (16 characters) from agent_id and tool
 pub fn generate_short_hash(agent_id: &str, tool: &str) -> String {
     let combined = format!("{}:{}", tool, agent_id);
     let mut hasher = Sha256::new();
     hasher.update(combined.as_bytes());
     let result = hasher.finalize();
-    // Take first 7 characters of the hex representation
+    // Take first 16 characters of the hex representation
     format!("{:x}", result)[..16].to_string()
+}
+
+/// Generate a short hash identifying a known human author from their git committer identity.
+/// Returns "h_" + first 14 hex chars of SHA256(author_identity) = 16 chars total.
+/// The "h_" prefix distinguishes human hashes from AI session hashes throughout the system.
+pub fn generate_human_short_hash(author_identity: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(author_identity.as_bytes());
+    let hex = format!("{:x}", hasher.finalize());
+    format!("h_{}", &hex[..14])
 }
 
 #[cfg(test)]
@@ -858,14 +895,17 @@ mod tests {
         let serialized = log.serialize_to_string().unwrap();
         assert_debug_snapshot!(serialized);
 
-        // Verify that every hash in attestations has a corresponding prompt
+        // Verify that every non-h_ hash in attestations has a corresponding prompt.
+        // Only non-h_ hashes must map to prompts; h_ hashes map to humans instead.
         for file_attestation in &log.attestations {
             for entry in &file_attestation.entries {
-                assert!(
-                    log.metadata.prompts.contains_key(&entry.hash),
-                    "Hash '{}' should have a corresponding prompt in metadata",
-                    entry.hash
-                );
+                if !entry.hash.starts_with("h_") {
+                    assert!(
+                        log.metadata.prompts.contains_key(&entry.hash),
+                        "Hash '{}' should have a corresponding prompt in metadata",
+                        entry.hash
+                    );
+                }
             }
         }
     }
@@ -1350,4 +1390,103 @@ mod tests {
             .sum();
         assert_eq!(lines_session2, 20);
     }
+
+    #[test]
+    fn test_generate_human_short_hash() {
+        let hash = generate_human_short_hash("Alice Smith <alice@example.com>");
+        // Must be exactly 16 chars: "h_" + 14 hex chars
+        assert_eq!(hash.len(), 16);
+        assert!(hash.starts_with("h_"));
+        assert_eq!(hash, "h_31dce776f88375");
+        // Must be deterministic
+        assert_eq!(
+            hash,
+            generate_human_short_hash("Alice Smith <alice@example.com>")
+        );
+        // Different identities → different hashes
+        assert_ne!(
+            hash,
+            generate_human_short_hash("Bob Jones <bob@example.com>")
+        );
+    }
+
+    /// Test that `convert_to_checkpoints_for_squash` correctly skips h_ attestation entries
+    /// rather than failing with "Missing prompt record".
+    #[test]
+    fn test_convert_to_checkpoints_skips_h_entries() {
+        use crate::authorship::transcript::{AiTranscript, Message};
+        use crate::authorship::working_log::AgentId;
+        use std::collections::HashMap;
+
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = "base123".to_string();
+
+        // AI session
+        let agent_id = AgentId {
+            tool: "cursor".to_string(),
+            id: "session_abc".to_string(),
+            model: "claude-3-sonnet".to_string(),
+        };
+        let mut transcript = AiTranscript::new();
+        transcript.add_message(Message::user("Write a helper".to_string(), None));
+        transcript.add_message(Message::assistant("Here it is".to_string(), None));
+        let ai_hash = generate_short_hash(&agent_id.id, &agent_id.tool);
+        log.metadata.prompts.insert(
+            ai_hash.clone(),
+            crate::authorship::authorship_log::PromptRecord {
+                agent_id,
+                human_author: None,
+                messages: transcript.messages().to_vec(),
+                total_additions: 5,
+                total_deletions: 0,
+                accepted_lines: 5,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: None,
+            },
+        );
+
+        // Known-human attestation — h_ hash present in attestations but NOT in prompts.
+        let human_hash = generate_human_short_hash("Alice <alice@example.com>");
+        log.metadata.humans.insert(
+            human_hash.clone(),
+            crate::authorship::authorship_log::HumanRecord {
+                author: "Alice".to_string(),
+            },
+        );
+
+        // File: AI owns lines 1-5, human owns lines 6-10
+        let mut file1 = FileAttestation::new("src/lib.rs".to_string());
+        file1.add_entry(AttestationEntry::new(
+            ai_hash.clone(),
+            vec![LineRange::Range(1, 5)],
+        ));
+        file1.add_entry(AttestationEntry::new(
+            human_hash.clone(),
+            vec![LineRange::Range(6, 10)],
+        ));
+        log.attestations.push(file1);
+
+        let mut file_contents = HashMap::new();
+        let content: String = (1..=10).map(|i| format!("line{}\n", i)).collect();
+        file_contents.insert("src/lib.rs".to_string(), content);
+
+        // Must succeed — h_ entry must be silently skipped
+        let result = log.convert_to_checkpoints_for_squash(&file_contents);
+        assert!(
+            result.is_ok(),
+            "convert_to_checkpoints_for_squash should not fail on h_ entries: {:?}",
+            result.err()
+        );
+        let checkpoints = result.unwrap();
+
+        // Only 1 AI checkpoint — the human entry has no corresponding prompt record
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].author, "ai");
+    }
+
+    // TODO: `get_line_attribution` routing for h_ hashes requires a live `Repository` instance
+    // and cannot be unit-tested here without significant mocking infrastructure.
+    // The h_-routing path (returning HumanRecord data instead of PromptRecord) is covered by
+    // integration tests in the authorship integration test suite.
 }

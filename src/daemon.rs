@@ -1324,6 +1324,7 @@ fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
         "human" => Some(CheckpointKind::Human),
         "ai_agent" => Some(CheckpointKind::AiAgent),
         "ai_tab" => Some(CheckpointKind::AiTab),
+        "known_human" => Some(CheckpointKind::KnownHuman),
         _ => None,
     }
 }
@@ -1443,6 +1444,7 @@ fn remove_working_log_attributions_for_pathspecs(
             files: filtered_files,
             prompts: initial.prompts,
             file_blobs: filtered_blobs,
+            humans: initial.humans,
         })?;
     }
 
@@ -1774,6 +1776,7 @@ fn capture_recent_working_log_snapshot(
         file_contents: va.snapshot_contents_for_files(initial.files.keys()),
         files: initial.files,
         prompts: initial.prompts,
+        humans: initial.humans,
     }))
 }
 
@@ -1791,6 +1794,7 @@ fn restore_recent_working_log_snapshot(
         .write_initial_attributions_with_contents(
             snapshot.files.clone(),
             snapshot.prompts.clone(),
+            snapshot.humans.clone(),
             snapshot.file_contents.clone(),
         )?;
     Ok(working_log_has_tracked_state_for_base(repo, base_commit))
@@ -2643,11 +2647,11 @@ fn rewrite_event_needs_authorship_processing(
     if has_initial {
         return Ok(true);
     }
-    let has_ai_checkpoints = working_log
+    let has_processable_checkpoints = working_log
         .read_all_checkpoints()?
         .iter()
         .any(|checkpoint| checkpoint.kind != CheckpointKind::Human);
-    Ok(has_ai_checkpoints)
+    Ok(has_processable_checkpoints)
 }
 
 fn deferred_commit_carryover_context(
@@ -3545,6 +3549,7 @@ struct RecentWorkingLogSnapshot {
     files: HashMap<String, Vec<crate::authorship::attribution_tracker::LineAttribution>>,
     prompts: HashMap<String, crate::authorship::authorship_log::PromptRecord>,
     file_contents: HashMap<String, String>,
+    humans: std::collections::BTreeMap<String, crate::authorship::authorship_log::HumanRecord>,
 }
 
 impl RecentWorkingLogSnapshot {
@@ -8239,5 +8244,64 @@ mod tests {
             normalize_commit_carryover_snapshot(Some(&carryover), Some(&committed)).unwrap();
 
         assert_eq!(normalized.get("example.txt"), carryover.get("example.txt"));
+    }
+
+    #[test]
+    fn recent_working_log_snapshot_preserves_humans_on_restore() {
+        use crate::authorship::attribution_tracker::LineAttribution;
+        use crate::authorship::authorship_log::HumanRecord;
+        use crate::git::test_utils::TmpRepo;
+        use std::collections::BTreeMap;
+
+        let test_repo = TmpRepo::new().expect("Failed to create test repo");
+        let repo = test_repo.gitai_repo();
+
+        // Create a snapshot with KnownHuman attributions
+        let h_hash = "h_abc123";
+        let human_record = HumanRecord {
+            author: "Test User <test@example.com>".to_string(),
+        };
+
+        let file_path = "test.txt";
+        let line_attributions = vec![LineAttribution {
+            start_line: 1,
+            end_line: 1,
+            author_id: h_hash.to_string(),
+            overrode: None,
+        }];
+
+        let mut humans = BTreeMap::new();
+        humans.insert(h_hash.to_string(), human_record.clone());
+
+        let snapshot = RecentWorkingLogSnapshot {
+            files: HashMap::from([(file_path.to_string(), line_attributions.clone())]),
+            prompts: HashMap::new(),
+            file_contents: HashMap::from([(file_path.to_string(), "test line\n".to_string())]),
+            humans: humans.clone(),
+        };
+
+        // Restore the snapshot
+        let base_commit = "HEAD";
+        let restored = restore_recent_working_log_snapshot(repo, base_commit, &snapshot).unwrap();
+        assert!(restored, "Snapshot should be restored");
+
+        // Read back the INITIAL file and verify humans are present
+        let working_log = repo
+            .storage
+            .working_log_for_base_commit(base_commit)
+            .unwrap();
+        let initial = working_log.read_initial_attributions();
+
+        // Verify humans were restored
+        assert_eq!(
+            initial.humans.len(),
+            1,
+            "Should have one human record after restore"
+        );
+        assert_eq!(
+            initial.humans.get(h_hash),
+            Some(&human_record),
+            "Human record should match"
+        );
     }
 }

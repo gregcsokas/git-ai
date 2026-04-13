@@ -298,7 +298,7 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
     let old_log =
         AuthorshipLog::deserialize_from_string(&old_note).expect("parse original authorship note");
     assert!(
-        old_log.attestations.is_empty(),
+        old_log.metadata.prompts.is_empty(),
         "precondition: human-only commit should have no attestations"
     );
     assert!(
@@ -317,7 +317,7 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
     let rebased_log = AuthorshipLog::deserialize_from_string(&rebased_note)
         .expect("parse rebased authorship note");
     assert!(
-        rebased_log.attestations.is_empty(),
+        rebased_log.metadata.prompts.is_empty(),
         "rebased human-only commit should still have no attestations"
     );
     assert!(
@@ -355,7 +355,7 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
     let mut original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse source note");
     assert!(
-        original_log.attestations.is_empty(),
+        original_log.metadata.prompts.is_empty(),
         "precondition: should start metadata-only"
     );
     assert!(
@@ -402,7 +402,6 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
         .expect("rebased commit should preserve prompt-only note");
     let rebased_log =
         AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
-    assert!(rebased_log.attestations.is_empty());
     assert_eq!(rebased_log.metadata.prompts.len(), 1);
     assert_eq!(rebased_log.metadata.base_commit_sha, rebased_sha);
 

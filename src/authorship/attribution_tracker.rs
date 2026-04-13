@@ -2118,7 +2118,11 @@ fn find_dominant_author_for_line_candidates(
         // Zero-length attributions are deletion markers - they indicate the author
         // deleted content at this position, so they should influence line attribution
         let is_deletion_marker = attribution.start == attribution.end;
-        let is_ai_author = attribution.author_id != CheckpointKind::Human.to_str();
+        // h_<hash> IDs are known-human attestations; treat them like "human" for
+        // whitespace-inclusion purposes so their newline ranges don't bleed into
+        // adjacent lines during an AI checkpoint.
+        let is_ai_author = attribution.author_id != CheckpointKind::Human.to_str()
+            && !attribution.author_id.starts_with("h_");
         let include_ai_whitespace = is_ai_checkpoint && is_ai_author;
         if has_non_whitespace || is_line_empty || is_deletion_marker || include_ai_whitespace {
             candidate_attrs.push(attribution);
@@ -2143,7 +2147,8 @@ fn find_dominant_author_for_line_candidates(
     let mut last_ai_edit: Option<&Attribution> = None;
     let mut last_human_edit: Option<&Attribution> = None;
     for attr in &candidate_attrs {
-        if attr.author_id == CheckpointKind::Human.to_str() {
+        // Both legacy "human" and KnownHuman h_<hash> IDs are human edits.
+        if attr.author_id == CheckpointKind::Human.to_str() || attr.author_id.starts_with("h_") {
             last_human_edit = Some(attr);
         } else {
             last_ai_edit = Some(attr);

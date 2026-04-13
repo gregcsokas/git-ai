@@ -522,12 +522,12 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai() {
     repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
         .expect("pre-hook checkpoint should succeed");
 
-    readme.set_contents(crate::lines!["Project README", "Updated by Codex"]);
+    readme.set_contents(crate::lines!["Project README", "Updated by Codex".ai()]);
     repo.stage_all_and_commit("Codex append proof")
         .expect("Codex append commit should succeed");
 
     readme.assert_lines_and_blame(crate::lines![
-        "Project README".ai(),
+        "Project README".human(),
         "Updated by Codex".ai(),
     ]);
 
@@ -554,14 +554,14 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai() {
 
     readme.set_contents(crate::lines![
         "Project README",
-        "Updated by Codex",
-        "Updated again by Codex",
+        "Updated by Codex".ai(),
+        "Updated again by Codex".ai(),
     ]);
     repo.stage_all_and_commit("Codex append proof 2")
         .expect("second Codex append commit should succeed");
 
     readme.assert_lines_and_blame(crate::lines![
-        "Project README".ai(),
+        "Project README".human(),
         "Updated by Codex".ai(),
         "Updated again by Codex".ai(),
     ]);
@@ -740,6 +740,93 @@ fn test_codex_read_only_bash_post_tool_use_before_edit_does_not_steal_commit_att
     ]);
 }
 
+/// Variant of test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai using
+/// unattributed (legacy) human checkpoints. Assertions match origin/main behavior: with empty
+/// attribution, all lines (including "Project README") are attributed to AI because the codex
+/// session claims any unattributed content.
+#[test]
+fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai_standard_human() {
+    use crate::repos::test_repo::TestRepo;
+
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+    });
+
+    let mut readme = repo.filename("README.md");
+    readme.set_contents(crate::lines!["Project README".unattributed_human()]);
+    repo.stage_all_and_commit("Initial README")
+        .expect("initial README commit should succeed");
+
+    let repo_root = repo.canonical_path();
+    let simple_fixture = fixture_path("codex-session-simple.jsonl");
+    let transcript_path = repo_root.join("codex-bash-append-rollout-standard-human.jsonl");
+    fs::copy(&simple_fixture, &transcript_path).unwrap();
+
+    let pre_hook_input = json!({
+        "session_id": "codex-bash-append-session-sh",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "bash-use-append-commit-sh",
+        "tool_input": {
+            "command": "git add README.md && git commit -m 'Codex append proof'"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
+        .expect("pre-hook checkpoint should succeed");
+
+    readme.set_contents(crate::lines![
+        "Project README".unattributed_human(),
+        "Updated by Codex".unattributed_human()
+    ]);
+    repo.stage_all_and_commit("Codex append proof")
+        .expect("Codex append commit should succeed");
+
+    readme.assert_lines_and_blame(crate::lines![
+        "Project README".ai(),
+        "Updated by Codex".ai(),
+    ]);
+
+    let second_pre_hook_input = json!({
+        "session_id": "codex-bash-append-session-2-sh",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "bash-use-append-commit-2-sh",
+        "tool_input": {
+            "command": "git add README.md && git commit -m 'Codex append proof 2'"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&[
+        "checkpoint",
+        "codex",
+        "--hook-input",
+        &second_pre_hook_input,
+    ])
+    .expect("second pre-hook checkpoint should succeed");
+
+    readme.set_contents(crate::lines![
+        "Project README".unattributed_human(),
+        "Updated by Codex".unattributed_human(),
+        "Updated again by Codex".unattributed_human(),
+    ]);
+    repo.stage_all_and_commit("Codex append proof 2")
+        .expect("second Codex append commit should succeed");
+
+    readme.assert_lines_and_blame(crate::lines![
+        "Project README".ai(),
+        "Updated by Codex".ai(),
+        "Updated again by Codex".ai(),
+    ]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_parse_codex_rollout_transcript,
     test_codex_preset_legacy_hook_input,
@@ -754,4 +841,5 @@ crate::reuse_tests_in_worktree!(
     test_codex_file_edit_then_bash_pretooluse_does_not_steal_ai_commit_attribution,
     test_codex_file_edit_then_camel_case_bash_pretooluse_does_not_steal_ai_commit_attribution,
     test_codex_read_only_bash_post_tool_use_before_edit_does_not_steal_commit_attribution,
+    test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai_standard_human,
 );

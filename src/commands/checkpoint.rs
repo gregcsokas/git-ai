@@ -50,6 +50,9 @@ use crate::authorship::working_log::AgentId;
 #[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 
+#[cfg(not(any(test, feature = "test-support")))]
+const KNOWN_HUMAN_MIN_SECS_AFTER_AI: u64 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreparedPathRole {
@@ -185,6 +188,16 @@ pub fn explicit_capture_target_paths(
             PreparedPathRole::WillEdit,
             result.will_edit_filepaths.as_ref()?,
         )
+    } else if kind == CheckpointKind::KnownHuman {
+        // KnownHuman can be pre-save (will_edit) or post-save (edited); prefer edited.
+        if let Some(paths) = result.edited_filepaths.as_ref() {
+            (PreparedPathRole::Edited, paths)
+        } else {
+            (
+                PreparedPathRole::WillEdit,
+                result.will_edit_filepaths.as_ref()?,
+            )
+        }
     } else {
         (PreparedPathRole::Edited, result.edited_filepaths.as_ref()?)
     };
@@ -626,8 +639,7 @@ fn resolve_live_checkpoint_execution(
             .map(|files| files.is_empty())
             .unwrap_or(true);
         let has_initial_attributions = !working_log.read_initial_attributions().files.is_empty();
-        let has_explicit_ai_agent_context =
-            kind != CheckpointKind::Human && agent_run_result.is_some();
+        let has_explicit_ai_agent_context = kind.is_ai() && agent_run_result.is_some();
 
         if has_no_ai_edits
             && !has_initial_attributions
@@ -784,6 +796,31 @@ fn execute_resolved_checkpoint(
         read_checkpoints_start.elapsed()
     ));
 
+    // Reject KnownHuman checkpoints that arrive within KNOWN_HUMAN_MIN_SECS_AFTER_AI
+    // seconds of an AI checkpoint on any of the same files. These are likely spurious
+    // IDE save events triggered by the AI completing its edit, not genuine human keystrokes.
+    // Only compiled in non-test builds where the constant is non-zero; under --all-targets
+    // clippy would otherwise flag the comparisons as always-false for u64.
+    #[cfg(not(any(test, feature = "test-support")))]
+    if kind == CheckpointKind::KnownHuman {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let too_soon = checkpoints.iter().rev().any(|cp| {
+            cp.kind.is_ai()
+                && now_secs.saturating_sub(cp.timestamp) < KNOWN_HUMAN_MIN_SECS_AFTER_AI
+                && cp.entries.iter().any(|e| resolved.files.contains(&e.file))
+        });
+        if too_soon {
+            debug_log(&format!(
+                "[KnownHuman] Rejected: fired within {}s of an AI checkpoint on the same file",
+                KNOWN_HUMAN_MIN_SECS_AFTER_AI
+            ));
+            return Ok((0, 0, 0));
+        }
+    }
+
     let save_states_start = Instant::now();
     let file_content_hashes = save_current_file_states(&working_log, &resolved.files)?;
     debug_log(&format!(
@@ -810,6 +847,7 @@ fn execute_resolved_checkpoint(
     let entries_start = Instant::now();
     let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
         kind,
+        author,
         repo,
         &working_log,
         &resolved.files,
@@ -837,19 +875,37 @@ fn execute_resolved_checkpoint(
         checkpoint.timestamp = (resolved.ts / 1000) as u64;
         checkpoint.line_stats = compute_line_stats(&file_stats)?;
 
-        if kind != CheckpointKind::Human
+        if kind.is_ai() {
+            if let Some(agent_run) = &agent_run_result {
+                checkpoint.transcript = Some(agent_run.transcript.clone().unwrap_or_default());
+                checkpoint.agent_id = Some(agent_run.agent_id.clone());
+                checkpoint.agent_metadata = agent_run.agent_metadata.clone();
+            }
+        } else if kind == CheckpointKind::KnownHuman
             && let Some(agent_run) = &agent_run_result
+            && let Some(meta) = &agent_run.agent_metadata
         {
-            checkpoint.transcript = Some(agent_run.transcript.clone().unwrap_or_default());
-            checkpoint.agent_id = Some(agent_run.agent_id.clone());
-            checkpoint.agent_metadata = agent_run.agent_metadata.clone();
+            let editor = meta.get("kh_editor").cloned().unwrap_or_default();
+            let editor_version = meta.get("kh_editor_version").cloned().unwrap_or_default();
+            let extension_version = meta
+                .get("kh_extension_version")
+                .cloned()
+                .unwrap_or_default();
+            if !editor.is_empty() {
+                use crate::authorship::working_log::KnownHumanMetadata;
+                checkpoint.known_human_metadata = Some(KnownHumanMetadata {
+                    editor,
+                    editor_version,
+                    extension_version,
+                });
+            }
         }
         debug_log(&format!(
             "[BENCHMARK] Checkpoint creation took {:?}",
             checkpoint_create_start.elapsed()
         ));
 
-        if kind != CheckpointKind::Human
+        if kind.is_ai()
             && checkpoint.agent_id.is_some()
             && checkpoint.transcript.is_some()
             && let Err(e) = upsert_checkpoint_prompt_to_db(
@@ -882,7 +938,7 @@ fn execute_resolved_checkpoint(
         let attrs =
             build_checkpoint_attrs(repo, &resolved.base_commit, checkpoint.agent_id.as_ref());
 
-        if kind != CheckpointKind::Human
+        if kind.is_ai()
             && let Some(agent_id) = checkpoint.agent_id.as_ref()
             && should_emit_agent_usage(agent_id)
         {
@@ -904,7 +960,7 @@ fn execute_resolved_checkpoint(
         }
     }
 
-    let agent_tool = if kind != CheckpointKind::Human
+    let agent_tool = if kind.is_ai()
         && let Some(agent_run_result) = &agent_run_result
     {
         Some(agent_run_result.agent_id.tool.as_str())
@@ -1519,15 +1575,19 @@ fn get_previous_content_from_head(
     }
 }
 
+fn is_ai_author_id(author_id: &str) -> bool {
+    author_id != "human" && !author_id.starts_with("h_")
+}
+
 fn working_log_entry_has_non_human_attribution(entry: &WorkingLogEntry) -> bool {
     entry
         .line_attributions
         .iter()
-        .any(|attr| attr.author_id != CheckpointKind::Human.to_str())
+        .any(|attr| is_ai_author_id(&attr.author_id))
         || entry
             .attributions
             .iter()
-            .any(|attr| attr.author_id != CheckpointKind::Human.to_str())
+            .any(|attr| is_ai_author_id(&attr.author_id))
 }
 
 fn build_previous_file_state_maps(
@@ -1548,9 +1608,7 @@ fn build_previous_file_state_maps(
                 },
             );
 
-            if checkpoint.kind != CheckpointKind::Human
-                || working_log_entry_has_non_human_attribution(entry)
-            {
+            if checkpoint.kind.is_ai() || working_log_entry_has_non_human_attribution(entry) {
                 ai_touched_files.insert(entry.file.clone());
             }
         }
@@ -1591,11 +1649,7 @@ fn get_checkpoint_entry_for_file(
     // Pre-commit fast path:
     // If this file has no prior AI attribution and no INITIAL attribution,
     // we can skip it entirely. Human-only files do not affect AI authorship.
-    if is_pre_commit
-        && kind == CheckpointKind::Human
-        && !has_prior_ai_edits
-        && initial_attrs_for_file.is_empty()
-    {
+    if is_pre_commit && !kind.is_ai() && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
         return Ok(None);
     }
 
@@ -1606,6 +1660,8 @@ fn get_checkpoint_entry_for_file(
     // Non-pre-commit fast path:
     // Preserve existing `git-ai checkpoint` behavior for human-only files by writing an
     // attribution-empty entry while still capturing line stats.
+    // KnownHuman checkpoints must bypass this path so they record h_<hash> attributions
+    // that later AI checkpoints can use to identify human-written lines.
     if kind == CheckpointKind::Human && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
         let previous_content = if let Some(state) = previous_state.as_ref() {
             working_log
@@ -1714,7 +1770,7 @@ fn get_checkpoint_entry_for_file(
         }
 
         // For AI checkpoints, attribute any lines NOT in INITIAL and NOT returned by ai_blame
-        if kind != CheckpointKind::Human {
+        if kind.is_ai() {
             let total_lines = current_content.lines().count() as u32;
             for line_num in 1..=total_lines {
                 if !initial_covered_lines.contains(&line_num) && !blamed_lines.contains(&line_num) {
@@ -1769,7 +1825,7 @@ fn get_checkpoint_entry_for_file(
         file_path: &file_path,
         blob_sha: &file_content_hash,
         author_id: author_id.as_ref(),
-        is_ai_checkpoint: kind != CheckpointKind::Human,
+        is_ai_checkpoint: kind.is_ai(),
         previous_content: &previous_content,
         previous_attributions: &prev_attributions,
         content: &current_content,
@@ -1786,6 +1842,7 @@ fn get_checkpoint_entry_for_file(
 #[allow(clippy::too_many_arguments)]
 async fn get_checkpoint_entries(
     kind: CheckpointKind,
+    author: &str,
     repo: &Repository,
     working_log: &PersistedWorkingLog,
     files: &[String],
@@ -1825,19 +1882,22 @@ async fn get_checkpoint_entries(
     ));
 
     // Determine author_id based on checkpoint kind and agent_id
-    let author_id = if kind != CheckpointKind::Human {
-        // For AI checkpoints, use session hash
-        agent_run_result
-            .map(|result| {
-                crate::authorship::authorship_log_serialization::generate_short_hash(
-                    &result.agent_id.id,
-                    &result.agent_id.tool,
-                )
-            })
-            .unwrap_or_else(|| kind.to_str())
-    } else {
-        // For human checkpoints, use checkpoint kind string
-        kind.to_str()
+    let author_id = match kind {
+        CheckpointKind::Human => kind.to_str(), // "human" — stripped, never attested
+        CheckpointKind::KnownHuman => {
+            crate::authorship::authorship_log_serialization::generate_human_short_hash(author)
+        }
+        _ => {
+            // AI kinds: use session hash
+            agent_run_result
+                .map(|result| {
+                    crate::authorship::authorship_log_serialization::generate_short_hash(
+                        &result.agent_id.id,
+                        &result.agent_id.tool,
+                    )
+                })
+                .unwrap_or_else(|| kind.to_str())
+        }
     };
 
     // Get HEAD commit info for git operations
@@ -2272,6 +2332,40 @@ mod tests {
         assert_eq!(
             explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&agent_run_result)),
             None
+        );
+    }
+
+    #[test]
+    fn test_explicit_capture_target_paths_known_human_uses_edited_filepaths() {
+        // KnownHuman post-save: edit already happened, uses edited_filepaths.
+        let agent_run_result = test_agent_run_result(
+            CheckpointKind::KnownHuman,
+            Some(vec!["src/foo.rs"]),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            explicit_capture_target_paths(CheckpointKind::KnownHuman, Some(&agent_run_result)),
+            Some((PreparedPathRole::Edited, vec!["src/foo.rs".to_string()]))
+        );
+    }
+
+    #[test]
+    fn test_explicit_capture_target_paths_known_human_uses_will_edit_filepaths() {
+        // KnownHuman pre-save: edit hasn't happened yet, uses will_edit_filepaths.
+        // Regression: KnownHuman fell into the else branch which only reads edited_filepaths,
+        // returning None and silently disabling pathspec scoping for pre-save KnownHuman.
+        let agent_run_result = test_agent_run_result(
+            CheckpointKind::KnownHuman,
+            None,
+            Some(vec!["src/foo.rs"]),
+            None,
+        );
+
+        assert_eq!(
+            explicit_capture_target_paths(CheckpointKind::KnownHuman, Some(&agent_run_result)),
+            Some((PreparedPathRole::WillEdit, vec!["src/foo.rs".to_string()]))
         );
     }
 
@@ -2854,7 +2948,7 @@ mod tests {
     }
 
     #[test]
-    fn test_human_checkpoint_without_ai_history_uses_empty_attributions() {
+    fn test_known_human_checkpoint_without_ai_history_records_h_hash_attributions() {
         let repo = TmpRepo::new().unwrap();
         let mut file = repo.write_file("simple.txt", "one\n", true).unwrap();
 
@@ -2884,17 +2978,22 @@ mod tests {
             .find(|entry| entry.file == "simple.txt")
             .unwrap();
 
+        // KnownHuman checkpoints always record h_<hash> line attributions, even with no AI history.
+        // This allows downstream stats to count these lines as human_additions.
         assert!(
-            entry.attributions.is_empty(),
-            "Human-only file should skip char-level attribution generation"
+            !entry.line_attributions.is_empty(),
+            "KnownHuman checkpoint should record line-level h_<hash> attributions"
         );
         assert!(
-            entry.line_attributions.is_empty(),
-            "Human-only file should skip line-level attribution generation"
+            entry
+                .line_attributions
+                .iter()
+                .all(|la| la.author_id.starts_with("h_")),
+            "All line attributions should be h_<hash> IDs"
         );
         assert!(
             latest.line_stats.additions > 0,
-            "Fast path should still record line stats"
+            "KnownHuman checkpoint should record line stats"
         );
     }
 
@@ -2941,13 +3040,18 @@ mod tests {
             .iter()
             .find(|entry| entry.file == "alphabet.md")
             .unwrap();
+        // KnownHuman checkpoints record h_<hash> attributions for all files, including
+        // files with no AI history. This ensures human lines are counted correctly in stats.
         assert!(
-            human_only_entry.attributions.is_empty(),
-            "Human-only file should use fast path with empty char attributions"
+            !human_only_entry.line_attributions.is_empty(),
+            "KnownHuman checkpoint should record line attributions for human-only files"
         );
         assert!(
-            human_only_entry.line_attributions.is_empty(),
-            "Human-only file should use fast path with empty line attributions"
+            human_only_entry
+                .line_attributions
+                .iter()
+                .all(|la| la.author_id.starts_with("h_")),
+            "Human-only file attributions should all be h_<hash> IDs"
         );
     }
 

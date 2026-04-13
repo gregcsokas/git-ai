@@ -1057,8 +1057,9 @@ fn test_ai_deletion_with_human_checkpoint_in_same_commit() {
     )
     .unwrap();
 
-    // Human checkpoint
-    repo.git_ai(&["checkpoint"]).unwrap();
+    // KnownHuman checkpoint for the human-added lines
+    repo.git_ai(&["checkpoint", "mock_known_human", "data.txt"])
+        .unwrap();
 
     // Step 2: AI deletes one of its own lines and adds 2 new lines
     fs::write(
@@ -1705,12 +1706,19 @@ fn test_ai_generated_file_then_human_full_rewrite() {
     let agent_author_id = "3bd30911a58cb074";
     // Determine the git dir and base commit for checkpoint storage.
     // In worktree mode .git is a gitlink file, so use rev-parse to resolve.
-    let git_dir = repo
+    // `--git-dir` may return a relative path; resolve it against the repo root
+    // so that fs::create_dir_all works regardless of the process CWD.
+    let git_dir_raw = repo
         .git(&["rev-parse", "--git-dir"])
         .unwrap()
         .trim()
         .to_string();
-    let git_dir = std::path::Path::new(&git_dir);
+    let git_dir_path = if std::path::Path::new(&git_dir_raw).is_absolute() {
+        std::path::PathBuf::from(&git_dir_raw)
+    } else {
+        repo.path().join(&git_dir_raw)
+    };
+    let git_dir = git_dir_path.as_path();
     let base_commit = repo
         .git(&["rev-parse", "HEAD"])
         .unwrap_or_else(|_| "initial".to_string())

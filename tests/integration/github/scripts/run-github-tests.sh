@@ -9,7 +9,7 @@
 # Or with --no-cleanup to leave the test repositories in place for manual inspection:
 # ./run-github-tests.sh --no-cleanup 
 
-set -e
+set -euo pipefail
 
 # Parse arguments
 NO_CLEANUP=0
@@ -47,4 +47,4 @@ echo ""
 echo "🚀 Running GitHub integration tests..."
 echo ""
 
-cargo test --test github_integration -- --ignored --nocapture "${TEST_ARGS[@]}"
+cargo test --test github_integration -- --ignored --nocapture ${TEST_ARGS[@]+"${TEST_ARGS[@]}"}
