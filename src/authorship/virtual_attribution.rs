@@ -1494,22 +1494,18 @@ impl VirtualAttributions {
                         let next = line_to_author.iter().find(|(l, _)| *l > line);
 
                         // Fill only if both neighbors exist and are the same AI author
-                        if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next) {
-                            if prev_author == next_author
-                                && *prev_author != CheckpointKind::Human.to_str()
-                                && !prev_author.starts_with("h_")
-                            {
-                                gap_fills.push((prev_author.to_string(), line));
-                            }
+                        if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
+                            && prev_author == next_author
+                            && *prev_author != CheckpointKind::Human.to_str()
+                            && !prev_author.starts_with("h_")
+                        {
+                            gap_fills.push((prev_author.to_string(), line));
                         }
                     }
                 }
 
                 for (author_id, line) in gap_fills {
-                    committed_lines_map
-                        .entry(author_id)
-                        .or_default()
-                        .push(line);
+                    committed_lines_map.entry(author_id).or_default().push(line);
                 }
             }
 
@@ -1756,22 +1752,18 @@ impl VirtualAttributions {
                         }
                         let prev = line_to_author.iter().rev().find(|(l, _)| *l < line);
                         let next = line_to_author.iter().find(|(l, _)| *l > line);
-                        if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next) {
-                            if prev_author == next_author
-                                && *prev_author != CheckpointKind::Human.to_str()
-                                && !prev_author.starts_with("h_")
-                            {
-                                gap_fills.push((prev_author.to_string(), line));
-                            }
+                        if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
+                            && prev_author == next_author
+                            && *prev_author != CheckpointKind::Human.to_str()
+                            && !prev_author.starts_with("h_")
+                        {
+                            gap_fills.push((prev_author.to_string(), line));
                         }
                     }
                 }
 
                 for (author_id, line) in gap_fills {
-                    committed_lines_map
-                        .entry(author_id)
-                        .or_default()
-                        .push(line);
+                    committed_lines_map.entry(author_id).or_default().push(line);
                 }
             }
 

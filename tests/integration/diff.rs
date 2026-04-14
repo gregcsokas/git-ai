@@ -3429,7 +3429,8 @@ export default function ExtraLanguageCard({
     let full_path = repo.path().join(file_path);
     fs::write(&full_path, old_content).expect("write old content");
     repo.git(&["add", file_path]).expect("git add");
-    repo.git_og(&["commit", "-m", "initial"]).expect("initial commit");
+    repo.git_og(&["commit", "-m", "initial"])
+        .expect("initial commit");
 
     // Step 2: AI makes changes — write new content and checkpoint as AI
     fs::write(&full_path, new_content).expect("write new content");
@@ -3479,7 +3480,7 @@ export default function ExtraLanguageCard({
         assert!(
             line.attribution
                 .as_ref()
-                .map_or(false, |a| a.contains("ai:mock_ai")),
+                .is_some_and(|a| a.contains("ai:mock_ai")),
             "Added line should be attributed to mock_ai, but got {:?}: content='{}'\nFull diff:\n{}",
             line.attribution,
             line.content,
