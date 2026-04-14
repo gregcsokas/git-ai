@@ -252,11 +252,16 @@ pub fn compute_line_changes<'a>(old: &'a str, new: &'a str) -> Vec<LineChange<'a
 /// Normalize line endings: strip `\r` from `\r\n` pairs so that CRLF and LF
 /// content compare identically at the line level. Returns a borrowed `Cow` when
 /// no `\r` is present (zero-copy fast path).
+///
+/// Only handles `\r\n` → `\n` (Windows CRLF). Bare `\r` is left unchanged
+/// because converting it to `\n` would increase the line count, breaking the
+/// index alignment between normalized diff hunks and original line arrays in
+/// `compute_line_changes`.
 pub(crate) fn normalize_line_endings(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains('\r') {
         return std::borrow::Cow::Borrowed(s);
     }
-    std::borrow::Cow::Owned(s.replace("\r\n", "\n").replace('\r', "\n"))
+    std::borrow::Cow::Owned(s.replace("\r\n", "\n"))
 }
 
 /// Splits a string into lines, preserving line terminators.
