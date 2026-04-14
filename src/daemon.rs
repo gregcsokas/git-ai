@@ -7857,7 +7857,40 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
     write_pid_metadata(&config)?;
+
+    // Initialize tracing subscriber before log file redirect so the fmt layer
+    // captures stderr (fd 2). After dup2, writes go to the daemon log file.
+    {
+        use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+        let env_filter = if std::env::var("GIT_AI_DEBUG").as_deref() == Ok("1") {
+            EnvFilter::new("debug")
+        } else {
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        };
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(false)
+                    .with_thread_ids(false)
+                    .with_ansi(false),
+            )
+            .with(crate::daemon::sentry_layer::SentryLayer)
+            .init();
+    }
+
     let _log_guard = maybe_setup_daemon_log_file(&config);
+
+    tracing::info!(
+        pid = std::process::id(),
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        "daemon started"
+    );
+
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
 
@@ -7934,6 +7967,8 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
     remove_pid_metadata(&config)?;
+
+    tracing::info!("daemon shutdown complete");
 
     Ok(())
 }
