@@ -3106,16 +3106,23 @@ pub fn reconstruct_working_log_after_reset(
 
     // Step 4: Build VirtualAttributions from target_commit.
     //
-    // The previous implementation called `new_for_base_commit` with both `base_commit` and
-    // `blame_start_commit` set to `target_commit_sha`. This produces a git blame range of
-    // `target..target` (oldest == newest), which is always empty — every line is attributed to a
-    // "boundary" commit (before the range) and mapped to human. Running git blame for every
-    // changed file was therefore O(files × file_size) wasted work that scaled directly with
-    // commit size, causing noticeable slowness on large commits in async_mode = false.
+    // The original intent was to capture AI lines that predate the reset range — lines that were
+    // AI-authored before `target_commit` and are still present in the working directory — so that
+    // `merge_attributions_favoring_first` (Step 5) could fill gaps in `old_head_va` with them.
     //
-    // We create an empty VA directly instead. `merge_attributions_favoring_first` (Step 5) uses
-    // `old_head_va` as the primary source and `target_va` to fill gaps; with `target_va` empty,
-    // `old_head_va` is the sole attribution source, which matches the previous net behaviour.
+    // The implementation was broken from the start: it called `new_for_base_commit` with both
+    // `base_commit` and `blame_start_commit` set to `target_commit_sha`, producing a blame range
+    // of `target..target` (oldest == newest). That range is always empty — every line is
+    // attributed to a boundary commit and mapped to human — so `target_va` always had zero AI
+    // attributions and never filled any gaps.
+    //
+    // Additionally, `old_head_va` is built via `from_working_log_for_commit`, which replays the
+    // existing working log entries at `old_head` on top of blame. Any AI lines that predate the
+    // reset range and are tracked by git-ai are already carried into `old_head_va` through the
+    // working log replay, so a correct `target_va` would have been redundant anyway.
+    //
+    // We create an empty VA directly (no subprocess calls). The merge result is identical to
+    // before the fix because `target_va` was always empty.
     let target_va = {
         use std::time::{SystemTime, UNIX_EPOCH};
         let ts = SystemTime::now()
