@@ -8976,6 +8976,29 @@ mod tests {
         assert_eq!(normalized.get("example.txt"), carryover.get("example.txt"));
     }
 
+    #[test]
+    fn explicit_stop_overrides_prior_restart_intent() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let coordinator = ActorDaemonCoordinator::new();
+
+            coordinator.request_restart_after_update();
+            assert_eq!(
+                coordinator.shutdown_action(),
+                DaemonExitAction::RestartAfterUpdate
+            );
+
+            coordinator.request_stop();
+
+            assert!(coordinator.is_shutting_down());
+            assert_eq!(coordinator.shutdown_action(), DaemonExitAction::Stop);
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Readonly command ingress fast-path tests
     //
