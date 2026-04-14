@@ -167,7 +167,10 @@ pub fn write_stats_to_terminal(stats: &CommitStats, is_interactive: bool) -> Str
         } else {
             0
         };
-        (untracked_bars, remaining_width.saturating_sub(untracked_bars))
+        (
+            untracked_bars,
+            remaining_width.saturating_sub(untracked_bars),
+        )
     } else {
         (0, remaining_width)
     };
@@ -175,9 +178,9 @@ pub fn write_stats_to_terminal(stats: &CommitStats, is_interactive: bool) -> Str
     // Build the progress bar
     let mut progress_bar = String::new();
     progress_bar.push_str("you  ");
-    progress_bar.push_str(&"█".repeat(final_human_bars));    // known human (attested)
+    progress_bar.push_str(&"█".repeat(final_human_bars)); // known human (attested)
     progress_bar.push_str(&"·".repeat(final_untracked_bars)); // untracked (no attestation)
-    progress_bar.push_str(&"░".repeat(final_ai_bars));        // AI
+    progress_bar.push_str(&"░".repeat(final_ai_bars)); // AI
     progress_bar.push_str(" ai");
 
     // Format time waiting for AI
