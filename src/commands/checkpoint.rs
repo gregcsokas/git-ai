@@ -3352,7 +3352,8 @@ mod tests {
         let repo = TmpRepo::new().unwrap();
         let crlf_content = "line1\r\nline2\r\nline3\r\nline4\r\nline5\r\n";
         repo.write_file("test.txt", crlf_content, true).unwrap();
-        repo.commit_with_message("initial commit with CRLF").unwrap();
+        repo.commit_with_message("initial commit with CRLF")
+            .unwrap();
 
         // Step 2: Overwrite the file with LF endings + one new line,
         // simulating an AI tool that writes LF on a Windows repo.
@@ -3376,7 +3377,9 @@ mod tests {
             .working_log_for_base_commit(&base_commit)
             .unwrap();
         let checkpoints = working_log.read_all_checkpoints().unwrap();
-        let latest = checkpoints.last().expect("Should have at least one checkpoint");
+        let latest = checkpoints
+            .last()
+            .expect("Should have at least one checkpoint");
 
         // The key assertion: stats should reflect only the actual addition,
         // NOT inflate every line because of CRLF→LF conversion.
@@ -3400,7 +3403,8 @@ mod tests {
         let repo = TmpRepo::new().unwrap();
         let crlf_content = "line1\r\nline2\r\nline3\r\n";
         repo.write_file("test.txt", crlf_content, true).unwrap();
-        repo.commit_with_message("initial commit with CRLF").unwrap();
+        repo.commit_with_message("initial commit with CRLF")
+            .unwrap();
 
         // Overwrite with LF-only — same text content, different line endings
         let lf_content = "line1\nline2\nline3\n";
