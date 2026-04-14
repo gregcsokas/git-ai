@@ -3104,26 +3104,39 @@ pub fn reconstruct_working_log_after_reset(
         old_head_va.prompts().len()
     ));
 
-    // Step 4: Build VirtualAttributions from target_commit
-    let repo_clone = repo.clone();
-    let target_clone = target_commit_sha.to_string();
-    let pathspecs_clone = pathspecs.clone();
-
-    let target_va = smol::block_on(async {
-        crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
-            repo_clone,
-            target_clone,
-            &pathspecs_clone,
-            Some(target_commit_sha.to_string()),
+    // Step 4: Build VirtualAttributions from target_commit.
+    //
+    // The original intent was to capture AI lines that predate the reset range — lines that were
+    // AI-authored before `target_commit` and are still present in the working directory — so that
+    // `merge_attributions_favoring_first` (Step 5) could fill gaps in `old_head_va` with them.
+    //
+    // The implementation was broken from the start: it called `new_for_base_commit` with both
+    // `base_commit` and `blame_start_commit` set to `target_commit_sha`, producing a blame range
+    // of `target..target` (oldest == newest). That range is always empty — every line is
+    // attributed to a boundary commit and mapped to human — so `target_va` always had zero AI
+    // attributions and never filled any gaps.
+    //
+    // Additionally, `old_head_va` is built via `from_working_log_for_commit`, which replays the
+    // existing working log entries at `old_head` on top of blame. Any AI lines that predate the
+    // reset range and are tracked by git-ai are already carried into `old_head_va` through the
+    // working log replay, so a correct `target_va` would have been redundant anyway.
+    //
+    // We create an empty VA directly (no subprocess calls). The merge result is identical to
+    // before the fix because `target_va` was always empty.
+    let target_va = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        crate::authorship::virtual_attribution::VirtualAttributions::new(
+            repo.clone(),
+            target_commit_sha.to_string(),
+            HashMap::new(),
+            HashMap::new(),
+            ts,
         )
-        .await
-    })?;
-
-    debug_log(&format!(
-        "Built target VA with {} files, {} prompts",
-        target_va.files().len(),
-        target_va.prompts().len()
-    ));
+    };
 
     // Step 5: Merge VAs favoring old_head to preserve uncommitted AI changes
     // old_head (with working log) wins overlaps, target fills gaps
