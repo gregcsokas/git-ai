@@ -103,8 +103,7 @@ impl ApiContext {
 
     /// Create a GET request with common headers (User-Agent, X-Distinct-ID)
     /// Use this for all HTTP GET requests to ensure consistent headers.
-    /// The returned (Agent, Request) pair uses TLS config from the current config
-    /// (including ssl_cert_file and ssl_no_verify options).
+    /// The returned (Agent, Request) pair uses the system's native certificate store.
     pub fn http_get(url: &str, timeout_secs: Option<u64>) -> (ureq::Agent, ureq::Request) {
         let agent = http::build_agent(timeout_secs);
         let request = agent
@@ -119,8 +118,7 @@ impl ApiContext {
 
     /// Create a POST request with common headers (User-Agent, X-Distinct-ID)
     /// Use this for all HTTP POST requests to ensure consistent headers.
-    /// The returned (Agent, Request) pair uses TLS config from the current config
-    /// (including ssl_cert_file and ssl_no_verify options).
+    /// The returned (Agent, Request) pair uses the system's native certificate store.
     pub fn http_post(url: &str, timeout_secs: Option<u64>) -> (ureq::Agent, ureq::Request) {
         let agent = http::build_agent(timeout_secs);
         let request = agent

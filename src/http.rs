@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::time::Duration;
 
 /// Build a ureq Agent that uses the system's native certificate store.
@@ -66,5 +67,3 @@ pub fn send_with_body(request: ureq::Request, body: &str) -> Result<Response, St
         Err(ureq::Error::Transport(err)) => Err(err.to_string()),
     }
 }
-
-use std::io::Read;
