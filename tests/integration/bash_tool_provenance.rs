@@ -8,9 +8,13 @@
 //! commands.
 
 use crate::repos::test_repo::TestRepo;
+#[cfg(unix)]
+use git_ai::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash;
+#[cfg(unix)]
+use git_ai::commands::checkpoint_agent::bash_tool::handle_bash_pre_tool_use_with_context;
 use git_ai::commands::checkpoint_agent::bash_tool::{
-    BashCheckpointAction, BashToolResult, HookEvent, checkpoint_context_from_active_bash, diff,
-    git_status_fallback, handle_bash_tool, handle_bash_pre_tool_use_with_context, snapshot,
+    BashCheckpointAction, BashToolResult, HookEvent, diff, git_status_fallback, handle_bash_tool,
+    snapshot,
 };
 use std::fs;
 use std::process::Command;
@@ -1579,9 +1583,8 @@ exit 0
 "#,
     );
 
-    let pre_action =
-        handle_bash_tool(HookEvent::PreToolUse, &root, "hooknew-sess", "hooknew-t1")
-            .expect("PreToolUse should succeed");
+    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "hooknew-sess", "hooknew-t1")
+        .expect("PreToolUse should succeed");
     assert!(matches!(
         pre_action.action,
         BashCheckpointAction::TakePreSnapshot
@@ -1603,13 +1606,8 @@ exit 0
         "pre-commit hook should have created .commit-metadata"
     );
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "hooknew-sess",
-        "hooknew-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "hooknew-sess", "hooknew-t1")
+        .expect("PostToolUse should succeed");
 
     // Both the agent's file and the hook-created file should be detected
     assert_checkpoint_contains(&post_action, "feature.py");
@@ -1625,12 +1623,7 @@ fn test_bash_provenance_precommit_hook_modifies_untouched_file() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
-    add_and_commit(
-        &repo,
-        "build-stamp.txt",
-        "build: 0\n",
-        "add build stamp",
-    );
+    add_and_commit(&repo, "build-stamp.txt", "build: 0\n", "add build stamp");
 
     install_pre_commit_hook(
         &repo,
@@ -1715,14 +1708,9 @@ exit 0
         id: "test-session-1".to_string(),
         model: "opus-4".to_string(),
     };
-    let pre_action = handle_bash_pre_tool_use_with_context(
-        &root,
-        "agent-sess",
-        "agent-t1",
-        &agent_id,
-        None,
-    )
-    .expect("PreToolUse with context should succeed");
+    let pre_action =
+        handle_bash_pre_tool_use_with_context(&root, "agent-sess", "agent-t1", &agent_id, None)
+            .expect("PreToolUse with context should succeed");
     assert!(matches!(
         pre_action.action,
         BashCheckpointAction::TakePreSnapshot
@@ -1791,8 +1779,13 @@ exit 0
 "#,
     );
 
-    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "multi-fmt-sess", "multi-fmt-t1")
-        .expect("PreToolUse should succeed");
+    let pre_action = handle_bash_tool(
+        HookEvent::PreToolUse,
+        &root,
+        "multi-fmt-sess",
+        "multi-fmt-t1",
+    )
+    .expect("PreToolUse should succeed");
     assert!(matches!(
         pre_action.action,
         BashCheckpointAction::TakePreSnapshot
