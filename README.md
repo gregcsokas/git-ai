@@ -37,11 +37,29 @@ fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let fro
 
 ### Supported Agents
 
-| | | | | |
-|:---:|:---:|:---:|:---:|:---:|
-| <img src="assets/docs/badges/claude_code.svg" alt="Claude Code" height="30" /> | <img src="assets/docs/badges/codex-black.svg" alt="Codex" height="30" /> | <img src="assets/docs/badges/cursor.svg" alt="Cursor" height="30" /> | <img src="assets/docs/badges/opencode.svg" alt="OpenCode" height="30" /> | <img src="assets/docs/badges/windsurf.svg" alt="Windsurf" height="30" /> |
-| <img src="assets/docs/badges/amp.svg" alt="Amp" height="30" /> | <img src="assets/docs/badges/gemini.svg" alt="Gemini" height="30" /> | <img src="assets/docs/badges/copilot.svg" alt="GitHub Copilot" height="30" /> | <img src="assets/docs/badges/continue.svg" alt="Continue" height="30" /> | <img src="assets/docs/badges/droid.svg" alt="Droid" height="30" /> |
-| <img src="assets/docs/badges/junie_white.svg" alt="Junie" height="30" /> | <img src="assets/docs/badges/rovodev.svg" alt="Rovo Dev" height="30" /> | <img src="assets/docs/badges/firebender.svg" alt="Firebender" height="30" /> | | [+ Add an Agent](https://usegitai.com/docs/cli/add-your-agent) |
+<table>
+<tr>
+<td bgcolor="#ffffff" align="center" width="20%"><img src="assets/docs/agents/claude_code.png" alt="Claude Code" height="40" /></td>
+<td bgcolor="#ffffff" align="center" width="20%"><img src="assets/docs/agents/codex-black.png" alt="Codex" height="40" /></td>
+<td bgcolor="#ffffff" align="center" width="20%"><img src="assets/docs/agents/cursor.png" alt="Cursor" height="40" /></td>
+<td bgcolor="#ffffff" align="center" width="20%"><img src="assets/docs/agents/opencode.png" alt="OpenCode" height="40" /></td>
+<td bgcolor="#ffffff" align="center" width="20%"><img src="assets/docs/agents/windsurf.png" alt="Windsurf" height="40" /></td>
+</tr>
+<tr>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/amp.png" alt="Amp" height="40" /></td>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/gemini.png" alt="Gemini" height="40" /></td>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/copilot.png" alt="GitHub Copilot" height="40" /></td>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/continue.png" alt="Continue" height="40" /></td>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/droid.png" alt="Droid" height="40" /></td>
+</tr>
+<tr>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/junie_white.png" alt="Junie" height="40" /></td>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/rovodev.png" alt="Rovo Dev" height="40" /></td>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/badges/firebender.svg" alt="Firebender" height="40" /></td>
+<td></td>
+<td align="center"><a href="https://usegitai.com/docs/cli/add-your-agent">+ Add an Agent</a></td>
+</tr>
+</table>
 
 
 ## Install
