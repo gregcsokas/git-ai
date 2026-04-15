@@ -66,7 +66,12 @@ fn test_stale_prompt_not_carried_to_subsequent_human_commits() {
             "Stale AI prompt '{}' should NOT appear in human-only commit note.\n\
              Prompts in human commit: {:?}",
             prompt_id,
-            human_commit.authorship_log.metadata.prompts.keys().collect::<Vec<_>>()
+            human_commit
+                .authorship_log
+                .metadata
+                .prompts
+                .keys()
+                .collect::<Vec<_>>()
         );
     }
 
@@ -88,7 +93,12 @@ fn test_stale_prompt_not_carried_to_subsequent_human_commits() {
             "Stale AI prompt '{}' should NOT appear in second human-only commit note.\n\
              Prompts in second human commit: {:?}",
             prompt_id,
-            human_commit2.authorship_log.metadata.prompts.keys().collect::<Vec<_>>()
+            human_commit2
+                .authorship_log
+                .metadata
+                .prompts
+                .keys()
+                .collect::<Vec<_>>()
         );
     }
 }
@@ -147,7 +157,10 @@ fn test_unstaged_ai_lines_prompt_not_in_human_commit_note() {
         .keys()
         .cloned()
         .collect();
-    assert!(!ai_prompt_ids.is_empty(), "First commit should have AI prompts");
+    assert!(
+        !ai_prompt_ids.is_empty(),
+        "First commit should have AI prompts"
+    );
 
     // Create a human-only file WITHOUT using set_contents (which would stage everything
     // via `git add -A`). Write the file directly and stage only it to keep base.txt's
@@ -155,7 +168,9 @@ fn test_unstaged_ai_lines_prompt_not_in_human_commit_note() {
     let human_file_path = repo.path().join("human.txt");
     fs::write(&human_file_path, "Pure human content\n").unwrap();
     repo.git(&["add", "human.txt"]).unwrap();
-    let human_commit = repo.commit("Human-only commit while unstaged AI exists").unwrap();
+    let human_commit = repo
+        .commit("Human-only commit while unstaged AI exists")
+        .unwrap();
 
     // The human-only commit should NOT contain AI prompts even though
     // unstaged AI lines exist in the working directory
@@ -169,8 +184,12 @@ fn test_unstaged_ai_lines_prompt_not_in_human_commit_note() {
             "AI prompt '{}' from unstaged lines should NOT appear in human-only commit note.\n\
              Prompts in human commit: {:?}",
             prompt_id,
-            human_commit.authorship_log.metadata.prompts.keys().collect::<Vec<_>>()
+            human_commit
+                .authorship_log
+                .metadata
+                .prompts
+                .keys()
+                .collect::<Vec<_>>()
         );
     }
-
 }
