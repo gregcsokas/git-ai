@@ -641,9 +641,7 @@ impl OpenCodePreset {
         let mut parts_by_message = Self::read_all_session_parts_from_sqlite(&conn, session_id)?;
 
         Self::build_transcript_from_messages(messages, |message_id| {
-            Ok(parts_by_message
-                .remove(message_id)
-                .unwrap_or_default())
+            Ok(parts_by_message.remove(message_id).unwrap_or_default())
         })
     }
 
