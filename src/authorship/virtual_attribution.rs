@@ -1496,7 +1496,6 @@ impl VirtualAttributions {
                         // Fill only if both neighbors exist and are the same AI author
                         if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
                             && prev_author == next_author
-                            && *prev_author != CheckpointKind::Human.to_str()
                             && !prev_author.starts_with("h_")
                         {
                             gap_fills.push((prev_author.to_string(), line));
@@ -1754,7 +1753,6 @@ impl VirtualAttributions {
                         let next = line_to_author.iter().find(|(l, _)| *l > line);
                         if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
                             && prev_author == next_author
-                            && *prev_author != CheckpointKind::Human.to_str()
                             && !prev_author.starts_with("h_")
                         {
                             gap_fills.push((prev_author.to_string(), line));
