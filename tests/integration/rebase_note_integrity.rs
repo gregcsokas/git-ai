@@ -1148,11 +1148,7 @@ fn test_rebase_conflict_on_ai_file_preserves_note() {
     assert!(result.is_err(), "rebase should conflict on shared.rs");
 
     // Human resolves with completely different content (no AI lines survive).
-    std::fs::write(
-        repo.path().join("shared.rs"),
-        "fn human_resolved() {}\n",
-    )
-    .unwrap();
+    std::fs::write(repo.path().join("shared.rs"), "fn human_resolved() {}\n").unwrap();
     repo.git(&["add", "shared.rs"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .expect("rebase --continue should succeed");

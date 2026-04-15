@@ -9590,11 +9590,7 @@ fn test_human_conflict_multicommit_chain_middle_conflict_all_notes_preserved() {
     let main_branch = repo.current_branch();
 
     // Feature branch from initial commits
-    let base_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let base_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates file_a.py (no conflict)
