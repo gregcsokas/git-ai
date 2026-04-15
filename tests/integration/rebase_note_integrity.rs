@@ -1093,6 +1093,82 @@ fn test_rebase_empty_file_does_not_panic_or_pollute_attribution() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #1079: conflict rebase — AI file IS the conflict file
+// ---------------------------------------------------------------------------
+
+/// When the ONLY AI-tracked file is the one that has a merge conflict, and the
+/// human resolves the conflict manually (not through git-ai), the authorship note
+/// must survive the rebase.  Before the fix:
+///   1. Fast path fails (blobs differ due to conflict resolution)
+///   2. Slow path content-diff finds no matching AI lines in the human-resolved content
+///   3. The note is silently dropped (no fallback remap)
+///
+/// Fix: after the slow-path loop, remap the original note for any commit that
+/// had a note but wasn't covered by the diff-based attribution transfer.
+#[test]
+fn test_rebase_conflict_on_ai_file_preserves_note() {
+    let repo = TestRepo::new();
+
+    // shared.rs with trailing newline for clean conflict detection.
+    write_raw_commit(&repo, "shared.rs", "fn original() {}", "Initial commit");
+    let default_branch = repo.current_branch();
+
+    // Upstream: completely different content for shared.rs → will conflict.
+    write_raw_commit(
+        &repo,
+        "shared.rs",
+        "fn upstream_version() {}",
+        "Upstream: rewrite shared.rs",
+    );
+
+    // Feature branch from before upstream change.
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
+
+    // AI modifies shared.rs — the only commit, the only AI file.
+    let mut shared = repo.filename("shared.rs");
+    shared.set_contents(crate::lines!["fn ai_version() {}".ai()]);
+    repo.stage_all_and_commit("feat: AI rewrites shared.rs")
+        .unwrap();
+
+    // Verify note exists before rebase.
+    let pre_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    assert!(
+        repo.read_authorship_note(&pre_sha).is_some(),
+        "AI commit must have a note before rebase"
+    );
+
+    // Rebase → conflict on shared.rs.
+    repo.git(&["checkout", "feature"]).unwrap();
+    let result = repo.git(&["rebase", &default_branch]);
+    assert!(result.is_err(), "rebase should conflict on shared.rs");
+
+    // Human resolves with completely different content (no AI lines survive).
+    std::fs::write(
+        repo.path().join("shared.rs"),
+        "fn human_resolved() {}\n",
+    )
+    .unwrap();
+    repo.git(&["add", "shared.rs"]).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should succeed");
+
+    // Post-rebase: the note must still exist (remapped from original).
+    let post_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let post_note = repo.read_authorship_note(&post_sha);
+    assert!(
+        post_note.is_some(),
+        "AI authorship note must survive conflict rebase where the AI file IS the \
+         conflict file (issue #1079). The original note should be remapped to the \
+         rebased commit to preserve AI provenance."
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Issue #1079: metadata-only notes must survive slow-path rebase
 // ---------------------------------------------------------------------------
 
@@ -1271,6 +1347,7 @@ crate::reuse_tests_in_worktree!(
     test_rebase_attribution_loss_compounds_across_three_commits,
     test_rebase_same_line_overwritten_by_consecutive_commits,
     test_rebase_empty_file_does_not_panic_or_pollute_attribution,
+    test_rebase_conflict_on_ai_file_preserves_note,
     test_rebase_metadata_only_notes_survive_slow_path,
     test_rebase_mixed_ai_and_human_commits_all_retain_notes_after_slow_path,
 );

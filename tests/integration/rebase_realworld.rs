@@ -9574,6 +9574,112 @@ fn test_human_conflict_ai_file_is_conflict_file_note_preserved() {
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["ai_file.py"]);
 }
 
+/// Regression test for #1079: three AI commits on a feature branch; the second
+/// commit's file conflicts with upstream.  After human conflict resolution and
+/// `rebase --continue`, ALL three rebased commits must retain their authorship
+/// notes.  Before the fix, the conflict commit's note was lost (content-diff
+/// produced nothing for the manually resolved file and the fallback remap was
+/// too narrow).
+#[test]
+fn test_human_conflict_multicommit_chain_middle_conflict_all_notes_preserved() {
+    let repo = TestRepo::new();
+
+    // Initial: shared.py (will conflict) + base.txt
+    write_raw_commit(&repo, "shared.py", "base content\n", "Initial commit");
+    write_raw_commit(&repo, "base.txt", "base\n", "Add base.txt");
+    let main_branch = repo.current_branch();
+
+    // Feature branch from initial commits
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
+
+    // C1: AI creates file_a.py (no conflict)
+    let mut file_a = repo.filename("file_a.py");
+    file_a.set_contents(crate::lines!["def ai_func_a(): pass".ai()]);
+    repo.stage_all_and_commit("feat: AI creates file_a.py")
+        .unwrap();
+
+    // C2: AI modifies shared.py (WILL conflict with upstream)
+    let mut shared = repo.filename("shared.py");
+    shared.set_contents(crate::lines!["ai version of shared".ai()]);
+    repo.stage_all_and_commit("feat: AI modifies shared.py")
+        .unwrap();
+
+    // C3: AI creates file_c.py (no conflict)
+    let mut file_c = repo.filename("file_c.py");
+    file_c.set_contents(crate::lines!["def ai_func_c(): pass".ai()]);
+    repo.stage_all_and_commit("feat: AI creates file_c.py")
+        .unwrap();
+
+    // Verify all 3 commits have notes before rebase
+    let chain_pre = get_commit_chain(&repo, 3);
+    for (i, sha) in chain_pre.iter().enumerate() {
+        assert!(
+            repo.read_authorship_note(sha).is_some(),
+            "pre-rebase commit {} (C{}) must have a note",
+            &sha[..8],
+            i + 1
+        );
+    }
+
+    // Upstream: change shared.py to create conflict
+    repo.git(&["checkout", &main_branch]).unwrap();
+    write_raw_commit(
+        &repo,
+        "shared.py",
+        "upstream version of shared\n",
+        "main: modify shared.py",
+    );
+
+    // Rebase feature onto main — C2 will conflict on shared.py
+    repo.git(&["checkout", "feature"]).unwrap();
+    let rebase_result = repo.git(&["rebase", &main_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on shared.py (C2 vs upstream)"
+    );
+
+    // Human resolves conflict with different content
+    fs::write(repo.path().join("shared.py"), "human resolved shared\n").unwrap();
+    repo.git(&["add", "shared.py"]).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should succeed");
+
+    // All 3 rebased commits must have notes
+    let chain = get_commit_chain(&repo, 3);
+
+    // C1': file_a.py — AI, no conflict
+    let note_c1 = repo.read_authorship_note(&chain[0]);
+    assert!(
+        note_c1.is_some(),
+        "C1' (file_a.py, no conflict) must retain authorship note after conflict rebase (issue #1079)"
+    );
+    assert_note_files_exact(&repo, &chain[0], "c1_files", &["file_a.py"]);
+
+    // C2': shared.py — AI, conflict resolved by human
+    // The original note must be remapped because content-diff can't carry
+    // attribution through manually resolved conflict content.
+    let note_c2 = repo.read_authorship_note(&chain[1]);
+    assert!(
+        note_c2.is_some(),
+        "C2' (shared.py, conflict resolved by human) must retain authorship note \
+         after conflict rebase (issue #1079): original note should be remapped"
+    );
+    assert_note_files_exact(&repo, &chain[1], "c2_files", &["shared.py"]);
+
+    // C3': file_c.py — AI, no conflict
+    let note_c3 = repo.read_authorship_note(&chain[2]);
+    assert!(
+        note_c3.is_some(),
+        "C3' (file_c.py, no conflict) must retain authorship note after conflict rebase (issue #1079)"
+    );
+    assert_note_files_exact(&repo, &chain[2], "c3_files", &["file_c.py"]);
+}
+
 // ============================================================================
 // END Category 3: Human Conflict Resolution
 // ============================================================================
@@ -13573,6 +13679,7 @@ crate::reuse_tests_in_worktree!(
     test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact,
     test_human_conflict_resolves_all_ai_lines_replaced,
     test_human_conflict_ai_file_is_conflict_file_note_preserved,
+    test_human_conflict_multicommit_chain_middle_conflict_all_notes_preserved,
     // Category 4: AI conflict resolution
     test_conflict_ai_resolves_timeout_constant,
     test_conflict_ai_resolves_timeout_constant_standard_human,
