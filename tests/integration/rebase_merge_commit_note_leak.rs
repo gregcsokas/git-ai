@@ -32,8 +32,14 @@ fn test_rebase_onto_branch_with_merge_commits_does_not_note_merge_commits() {
     repo.stage_all_and_commit("main commit before merge")
         .expect("main commit before merge");
 
-    repo.git(&["merge", "--no-ff", "side-branch", "-m", "Merge side-branch into main"])
-        .expect("merge side-branch");
+    repo.git(&[
+        "merge",
+        "--no-ff",
+        "side-branch",
+        "-m",
+        "Merge side-branch into main",
+    ])
+    .expect("merge side-branch");
 
     let merge_commit_sha = repo
         .git(&["rev-parse", "HEAD"])
@@ -52,10 +58,7 @@ fn test_rebase_onto_branch_with_merge_commits_does_not_note_merge_commits() {
         .expect("create feature branch");
 
     let mut ai_file = repo.filename("ai_feature.txt");
-    ai_file.set_contents(vec![
-        "AI generated line 1".ai(),
-        "AI generated line 2".ai(),
-    ]);
+    ai_file.set_contents(vec!["AI generated line 1".ai(), "AI generated line 2".ai()]);
     repo.stage_all_and_commit("add AI feature")
         .expect("AI feature commit");
 
@@ -129,9 +132,7 @@ fn test_pull_rebase_onto_branch_with_merge_commits_does_not_note_merge_commits()
         .stage_all_and_commit("side branch commit")
         .expect("side commit");
 
-    local
-        .git(&["checkout", &branch])
-        .expect("switch to main");
+    local.git(&["checkout", &branch]).expect("switch to main");
     let mut main_file = local.filename("main_extra.txt");
     main_file.set_contents(vec!["main extra".human()]);
     local
@@ -158,17 +159,12 @@ fn test_pull_rebase_onto_branch_with_merge_commits_does_not_note_merge_commits()
         .expect("reset to initial");
 
     let mut ai_file = local.filename("ai_feature.txt");
-    ai_file.set_contents(vec![
-        "AI generated line 1".ai(),
-        "AI generated line 2".ai(),
-    ]);
+    ai_file.set_contents(vec!["AI generated line 1".ai(), "AI generated line 2".ai()]);
     local
         .stage_all_and_commit("add AI feature")
         .expect("AI commit");
 
-    local
-        .git(&["pull", "--rebase"])
-        .expect("pull --rebase");
+    local.git(&["pull", "--rebase"]).expect("pull --rebase");
 
     let merge_note = local.read_authorship_note(&merge_commit_sha);
     assert!(
