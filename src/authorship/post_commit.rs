@@ -649,6 +649,17 @@ fn record_commit_metrics(
 ) {
     use crate::metrics::{CommittedValues, EventAttributes, record};
 
+    // Never emit telemetry for mock_ai (test preset).  If every tool in the
+    // breakdown is mock_ai the entire committed event is test data.
+    let only_mock_ai = !stats.tool_model_breakdown.is_empty()
+        && stats
+            .tool_model_breakdown
+            .keys()
+            .all(|k| k.starts_with("mock_ai::"));
+    if only_mock_ai {
+        return;
+    }
+
     // Build parallel arrays: index 0 = "all" (aggregate), index 1+ = per tool/model
     let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
     let mut mixed_additions: Vec<u32> = vec![stats.mixed_additions];
@@ -658,8 +669,11 @@ fn record_commit_metrics(
     let mut total_ai_deletions: Vec<u32> = vec![stats.total_ai_deletions];
     let mut time_waiting_for_ai: Vec<u64> = vec![stats.time_waiting_for_ai];
 
-    // Add per-tool/model breakdown
+    // Add per-tool/model breakdown, skipping mock_ai (test preset)
     for (tool_model, tool_stats) in &stats.tool_model_breakdown {
+        if tool_model.starts_with("mock_ai::") {
+            continue;
+        }
         tool_model_pairs.push(tool_model.clone());
         mixed_additions.push(tool_stats.mixed_additions);
         ai_additions.push(tool_stats.ai_additions);
