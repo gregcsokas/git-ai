@@ -1454,6 +1454,60 @@ impl VirtualAttributions {
                 }
             }
 
+            // Fill gaps in committed hunks caused by imara_diff Equal matching.
+            //
+            // When AI rewrites a region, imara_diff can match byte-for-byte
+            // identical lines (e.g. empty lines between code blocks) as "Equal",
+            // preserving the old human attribution. Those lines get stripped from
+            // the checkpoint's line_attributions and never make it here. This
+            // leaves gaps in committed_hunks that show as [no-data] in `git ai diff`.
+            //
+            // Fix: for each gap line in a committed hunk, check the nearest
+            // attributed line before and after it. If both neighbors have the
+            // same AI author (not human/h_), fill the gap with that author.
+            if let Some(hunks) = file_committed_hunks {
+                // Build a sorted map of committed line → author_id for neighbor lookups
+                let mut line_to_author: Vec<(u32, &str)> = Vec::new();
+                for (author_id, lines) in &committed_lines_map {
+                    for &line in lines {
+                        line_to_author.push((line, author_id.as_str()));
+                    }
+                }
+                line_to_author.sort_by_key(|(line, _)| *line);
+
+                let mut gap_fills: Vec<(String, u32)> = Vec::new();
+
+                for hunk in hunks {
+                    for line in hunk.expand() {
+                        // Skip lines that already have attribution
+                        if line_to_author
+                            .binary_search_by_key(&line, |(l, _)| *l)
+                            .is_ok()
+                        {
+                            continue;
+                        }
+
+                        // Find nearest attributed neighbor before this line
+                        let prev = line_to_author.iter().rev().find(|(l, _)| *l < line);
+
+                        // Find nearest attributed neighbor after this line
+                        let next = line_to_author.iter().find(|(l, _)| *l > line);
+
+                        // Fill only if both neighbors exist and are the same AI author
+                        if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
+                            && prev_author == next_author
+                            && !prev_author.starts_with("h_")
+                        {
+                            gap_fills.push((prev_author.to_string(), line));
+                        }
+                    }
+                }
+
+                for (author_id, line) in gap_fills {
+                    committed_lines_map.entry(author_id).or_default().push(line);
+                }
+            }
+
             // Add committed attributions to authorship log
             if !committed_lines_map.is_empty() {
                 // Create attestation entries from committed lines
@@ -1670,6 +1724,44 @@ impl VirtualAttributions {
                             .or_default()
                             .push(line_num);
                     }
+                }
+            }
+
+            // Fill attribution gaps for lines in committed hunks that weren't
+            // directly attributed (e.g. empty lines between AI-authored blocks).
+            // Only fill if both nearest neighbors share the same AI author.
+            {
+                let mut line_to_author: Vec<(u32, &str)> = Vec::new();
+                for (author_id, lines) in &committed_lines_map {
+                    for &line in lines {
+                        line_to_author.push((line, author_id.as_str()));
+                    }
+                }
+                line_to_author.sort_by_key(|(line, _)| *line);
+
+                let mut gap_fills: Vec<(String, u32)> = Vec::new();
+
+                for hunk in file_committed_hunks {
+                    for line in hunk.expand() {
+                        if line_to_author
+                            .binary_search_by_key(&line, |(l, _)| *l)
+                            .is_ok()
+                        {
+                            continue;
+                        }
+                        let prev = line_to_author.iter().rev().find(|(l, _)| *l < line);
+                        let next = line_to_author.iter().find(|(l, _)| *l > line);
+                        if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
+                            && prev_author == next_author
+                            && !prev_author.starts_with("h_")
+                        {
+                            gap_fills.push((prev_author.to_string(), line));
+                        }
+                    }
+                }
+
+                for (author_id, line) in gap_fills {
+                    committed_lines_map.entry(author_id).or_default().push(line);
                 }
             }
 
@@ -1914,12 +2006,8 @@ impl VirtualAttributions {
         // Update all prompt records with calculated metrics
         for (session_id, commits) in prompts.iter_mut() {
             for prompt_record in commits.values_mut() {
-                if let Some(&additions) = session_additions.get(session_id) {
-                    prompt_record.total_additions = additions;
-                }
-                if let Some(&deletions) = session_deletions.get(session_id) {
-                    prompt_record.total_deletions = deletions;
-                }
+                prompt_record.total_additions = *session_additions.get(session_id).unwrap_or(&0);
+                prompt_record.total_deletions = *session_deletions.get(session_id).unwrap_or(&0);
                 prompt_record.accepted_lines =
                     *session_accepted_lines.get(session_id).unwrap_or(&0);
                 prompt_record.overriden_lines =
@@ -2076,17 +2164,15 @@ pub fn merge_attributions_favoring_first(
         }
     }
 
-    // Calculate and update prompt metrics (will set accepted_lines and overridden_lines).
-    // Empty session maps preserve existing total_additions/total_deletions values.
+    // Calculate and update prompt metrics (will set accepted_lines and overridden_lines)
     VirtualAttributions::calculate_and_update_prompt_metrics(
         &mut merged.prompts,
         &merged.attributions,
-        &HashMap::new(),
-        &HashMap::new(),
+        &HashMap::new(), // Empty - will result in total_additions = 0
+        &HashMap::new(), // Empty - will result in total_deletions = 0
     );
 
-    // Overwrite total_additions/total_deletions with the summed values from both sources,
-    // since merge should reflect the combined totals from primary + secondary.
+    // Restore the saved total_additions and total_deletions
     for (prompt_id, commits) in merged.prompts.iter_mut() {
         if let Some(&(additions, deletions)) = saved_totals.get(prompt_id) {
             for prompt_record in commits.values_mut() {
@@ -2113,18 +2199,13 @@ pub fn restore_stashed_va(
     new_head: &str,
     stashed_va: VirtualAttributions,
 ) {
-    use crate::utils::debug_log;
-
-    debug_log(&format!(
-        "Restoring stashed VA: {} -> {}",
-        old_head, new_head
-    ));
+    tracing::debug!("Restoring stashed VA: {} -> {}", old_head, new_head);
 
     // Get the files that were in the stashed VA
     let stashed_files: Vec<String> = stashed_va.files();
 
     if stashed_files.is_empty() {
-        debug_log("Stashed VA has no files, nothing to restore");
+        tracing::debug!("Stashed VA has no files, nothing to restore");
         return;
     }
 
@@ -2141,10 +2222,10 @@ pub fn restore_stashed_va(
                 // file may contain conflict markers. We keep "ours" (stashed VA) lines
                 // so the attribution merge operates on clean content.
                 let clean_content = if content_has_conflict_markers(&content) {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Conflict markers detected in {}, stripping for VA merge",
                         file_path
-                    ));
+                    );
                     strip_conflict_markers_keep_ours(&content)
                 } else {
                     content
@@ -2155,7 +2236,7 @@ pub fn restore_stashed_va(
     }
 
     if working_files.is_empty() {
-        debug_log("No working files to restore attributions for");
+        tracing::debug!("No working files to restore attributions for");
         return;
     }
 
@@ -2167,7 +2248,7 @@ pub fn restore_stashed_va(
     ) {
         Ok(va) => va,
         Err(e) => {
-            debug_log(&format!("Failed to build new VA: {}, using empty", e));
+            tracing::debug!("Failed to build new VA: {}, using empty", e);
             VirtualAttributions::new(
                 repository.clone(),
                 new_head.to_string(),
@@ -2182,7 +2263,7 @@ pub fn restore_stashed_va(
     let merged_va = match merge_attributions_favoring_first(stashed_va, new_va, working_files) {
         Ok(va) => va,
         Err(e) => {
-            debug_log(&format!("Failed to merge VirtualAttributions: {}", e));
+            tracing::debug!("Failed to merge VirtualAttributions: {}", e);
             return;
         }
     };
@@ -2207,10 +2288,7 @@ pub fn restore_stashed_va(
         let working_log = match repository.storage.working_log_for_base_commit(new_head) {
             Ok(wl) => wl,
             Err(e) => {
-                debug_log(&format!(
-                    "Failed to get working log for {}: {}",
-                    new_head, e
-                ));
+                tracing::debug!("Failed to get working log for {}: {}", new_head, e);
                 return;
             }
         };
@@ -2224,14 +2302,14 @@ pub fn restore_stashed_va(
             initial_attributions.humans,
             initial_file_contents,
         ) {
-            debug_log(&format!("Failed to write INITIAL attributions: {}", e));
+            tracing::debug!("Failed to write INITIAL attributions: {}", e);
             return;
         }
 
-        debug_log(&format!(
-            "✓ Restored AI attributions to INITIAL for new HEAD {}",
+        tracing::debug!(
+            "Restored AI attributions to INITIAL for new HEAD {}",
             &new_head[..8.min(new_head.len())]
-        ));
+        );
     }
 }
 
@@ -2611,149 +2689,5 @@ mod tests {
         }
 
         assert!(!virtual_attributions.files().is_empty());
-    }
-
-    /// Regression test for https://github.com/git-ai-project/git-ai/issues/1080
-    ///
-    /// When a prompt is inherited from INITIAL (e.g., from a previous agent session)
-    /// and has no new checkpoints in the current working log, its `total_additions`
-    /// must be preserved. Previously, `calculate_and_update_prompt_metrics` would
-    /// unconditionally overwrite with `unwrap_or(0)`, zeroing out inherited values.
-    #[test]
-    fn test_inherited_prompt_preserves_total_additions_when_no_checkpoint_data() {
-        use crate::authorship::authorship_log::PromptRecord;
-        use crate::authorship::working_log::AgentId;
-
-        // Set up two prompts: one with checkpoint data, one inherited (no checkpoint data)
-        let mut prompts = BTreeMap::new();
-
-        // Prompt A: inherited from INITIAL, already has total_additions = 42
-        let prompt_a_record = PromptRecord {
-            agent_id: AgentId {
-                tool: "cursor".to_string(),
-                id: "session_a".to_string(),
-                model: "gpt-4".to_string(),
-            },
-            human_author: Some("dev@example.com".to_string()),
-            messages: vec![],
-            total_additions: 42,
-            total_deletions: 10,
-            accepted_lines: 0,
-            overriden_lines: 0,
-            messages_url: None,
-            custom_attributes: None,
-        };
-        let mut prompt_a_commits = BTreeMap::new();
-        prompt_a_commits.insert(String::new(), prompt_a_record);
-        prompts.insert("session_a".to_string(), prompt_a_commits);
-
-        // Prompt B: has checkpoint data in this session
-        let prompt_b_record = PromptRecord {
-            agent_id: AgentId {
-                tool: "codex".to_string(),
-                id: "session_b".to_string(),
-                model: "gpt-4".to_string(),
-            },
-            human_author: Some("dev@example.com".to_string()),
-            messages: vec![],
-            total_additions: 0,
-            total_deletions: 0,
-            accepted_lines: 0,
-            overriden_lines: 0,
-            messages_url: None,
-            custom_attributes: None,
-        };
-        let mut prompt_b_commits = BTreeMap::new();
-        prompt_b_commits.insert(String::new(), prompt_b_record);
-        prompts.insert("session_b".to_string(), prompt_b_commits);
-
-        // Only session_b has checkpoint data; session_a has none (inherited from INITIAL)
-        let mut session_additions = HashMap::new();
-        session_additions.insert("session_b".to_string(), 25u32);
-        let mut session_deletions = HashMap::new();
-        session_deletions.insert("session_b".to_string(), 5u32);
-
-        // Empty attributions (we're only testing the total_additions/total_deletions logic)
-        let attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
-            HashMap::new();
-
-        VirtualAttributions::calculate_and_update_prompt_metrics(
-            &mut prompts,
-            &attributions,
-            &session_additions,
-            &session_deletions,
-        );
-
-        // Session A (inherited, no checkpoint data): total_additions must be PRESERVED
-        let prompt_a = prompts["session_a"].values().next().unwrap();
-        assert_eq!(
-            prompt_a.total_additions, 42,
-            "inherited prompt total_additions should be preserved, not reset to 0"
-        );
-        assert_eq!(
-            prompt_a.total_deletions, 10,
-            "inherited prompt total_deletions should be preserved, not reset to 0"
-        );
-
-        // Session B (has checkpoint data): total_additions must be UPDATED from checkpoints
-        let prompt_b = prompts["session_b"].values().next().unwrap();
-        assert_eq!(
-            prompt_b.total_additions, 25,
-            "prompt with checkpoint data should have total_additions updated"
-        );
-        assert_eq!(
-            prompt_b.total_deletions, 5,
-            "prompt with checkpoint data should have total_deletions updated"
-        );
-    }
-
-    /// Test that passing empty session maps preserves all existing values.
-    /// This is the pattern used by merge_attributions_favoring_first and rebase_authorship.
-    #[test]
-    fn test_empty_session_maps_preserve_existing_totals() {
-        use crate::authorship::authorship_log::PromptRecord;
-        use crate::authorship::working_log::AgentId;
-
-        let mut prompts = BTreeMap::new();
-
-        let prompt_record = PromptRecord {
-            agent_id: AgentId {
-                tool: "cursor".to_string(),
-                id: "session_x".to_string(),
-                model: "gpt-4".to_string(),
-            },
-            human_author: None,
-            messages: vec![],
-            total_additions: 100,
-            total_deletions: 30,
-            accepted_lines: 0,
-            overriden_lines: 0,
-            messages_url: None,
-            custom_attributes: None,
-        };
-        let mut commits = BTreeMap::new();
-        commits.insert("abc123".to_string(), prompt_record);
-        prompts.insert("session_x".to_string(), commits);
-
-        let attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
-            HashMap::new();
-
-        // Empty session maps (as used in merge/rebase paths)
-        VirtualAttributions::calculate_and_update_prompt_metrics(
-            &mut prompts,
-            &attributions,
-            &HashMap::new(),
-            &HashMap::new(),
-        );
-
-        let prompt = prompts["session_x"].values().next().unwrap();
-        assert_eq!(
-            prompt.total_additions, 100,
-            "empty session_additions map should not zero out existing total_additions"
-        );
-        assert_eq!(
-            prompt.total_deletions, 30,
-            "empty session_deletions map should not zero out existing total_deletions"
-        );
     }
 }

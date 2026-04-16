@@ -1,6 +1,5 @@
 use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
 use crate::error::GitAiError;
-use crate::utils::debug_log;
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::CstRootNode;
 use std::fs;
@@ -193,11 +192,11 @@ fn find_editor_cli_js(cli_name: &str) -> Option<EditorCliCommand> {
 
     for (electron_path, cli_js_path) in candidates {
         if electron_path.is_file() && cli_js_path.is_file() {
-            debug_log(&format!(
+            tracing::debug!(
                 "{}: CLI not in PATH, using cli.js fallback at {}",
                 cli_name,
                 cli_js_path.display()
-            ));
+            );
             return Some(EditorCliCommand::from_cli_js(&electron_path, &cli_js_path));
         }
     }
@@ -253,6 +252,53 @@ fn get_editor_cli_candidates(cli_name: &str) -> Vec<(PathBuf, PathBuf)> {
                     let base = PathBuf::from(&localappdata).join("Programs").join("Cursor");
                     candidates.push((
                         base.join("Cursor.exe"),
+                        base.join("resources")
+                            .join("app")
+                            .join("out")
+                            .join("cli.js"),
+                    ));
+                }
+            }
+        }
+        "windsurf" => {
+            #[cfg(target_os = "macos")]
+            {
+                for apps_dir in [PathBuf::from("/Applications"), home.join("Applications")] {
+                    let app = apps_dir.join("Windsurf.app");
+                    candidates.push((
+                        app.join("Contents").join("MacOS").join("Windsurf"),
+                        app.join("Contents")
+                            .join("Resources")
+                            .join("app")
+                            .join("out")
+                            .join("cli.js"),
+                    ));
+                }
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                for base in [
+                    PathBuf::from("/opt/Windsurf"),
+                    home.join(".local").join("share").join("windsurf"),
+                    home.join(".local").join("share").join("Windsurf"),
+                ] {
+                    candidates.push((
+                        base.join("windsurf"),
+                        base.join("resources")
+                            .join("app")
+                            .join("out")
+                            .join("cli.js"),
+                    ));
+                }
+            }
+            #[cfg(windows)]
+            {
+                if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                    let base = PathBuf::from(local_app_data)
+                        .join("Programs")
+                        .join("Windsurf");
+                    candidates.push((
+                        base.join("Windsurf.exe"),
                         base.join("resources")
                             .join("app")
                             .join("out")

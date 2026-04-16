@@ -88,7 +88,7 @@ jobs:
 
       - name: Upload HTML coverage report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: coverage-report
           path: target/coverage/
@@ -96,7 +96,7 @@ jobs:
 
       - name: Upload LCOV report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: lcov-report
           path: lcov.info

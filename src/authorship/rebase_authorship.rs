@@ -7,7 +7,6 @@ use crate::git::authorship_traversal::{
 use crate::git::refs::{get_reference_as_authorship_log_v3, note_blob_oids_for_commits};
 use crate::git::repository::{CommitRange, Repository, exec_git, exec_git_stdin};
 use crate::git::rewrite_log::RewriteLogEvent;
-use crate::utils::{debug_log, debug_performance_log};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Clone, Copy, Default)]
@@ -144,10 +143,11 @@ pub fn rewrite_authorship_if_needed(
                 commit_author,
             )?;
 
-            debug_log(&format!(
+            tracing::debug!(
                 "Ammended commit {} now has authorship log {}",
-                &commit_amend.original_commit, &commit_amend.amended_commit_sha
-            ));
+                &commit_amend.original_commit,
+                &commit_amend.amended_commit_sha
+            );
         }
         RewriteLogEvent::MergeSquash { merge_squash } => {
             let current_head = repo
@@ -156,10 +156,10 @@ pub fn rewrite_authorship_if_needed(
                 .and_then(|head| head.target().ok())
                 .map(|oid| oid.to_string());
             if current_head.as_deref() != Some(merge_squash.base_head.as_str()) {
-                debug_log(&format!(
+                tracing::debug!(
                     "Skipping merge --squash pre-commit prep because repo head already advanced past {}",
                     merge_squash.base_head
-                ));
+                );
                 return Ok(());
             }
             // --squash always fails if repo is not clean
@@ -167,10 +167,10 @@ pub fn rewrite_authorship_if_needed(
             repo.storage
                 .delete_working_log_for_base_commit(&merge_squash.base_head)?;
             if merge_squash.staged_file_blobs.is_empty() {
-                debug_log(&format!(
+                tracing::debug!(
                     "Skipping immediate merge --squash pre-commit prep for {} because no staged snapshot was captured; commit replay will reconstruct from the committed final state",
                     merge_squash.base_head
-                ));
+                );
                 return Ok(());
             }
 
@@ -183,12 +183,20 @@ pub fn rewrite_authorship_if_needed(
                 &commit_author,
             )?;
 
-            debug_log(&format!(
+            tracing::debug!(
                 "✓ Prepared authorship attributions for merge --squash of {} into {}",
-                merge_squash.source_branch, merge_squash.base_branch
-            ));
+                merge_squash.source_branch,
+                merge_squash.base_branch
+            );
         }
         RewriteLogEvent::RebaseComplete { rebase_complete } => {
+            // Fix #1079: fetch missing notes before attribution rewriting so that
+            // daemon mode has the same remote-note resolution as wrapper mode.
+            // This mirrors the fix applied to CherryPickComplete in #955.
+            crate::git::sync_authorship::fetch_missing_notes_for_commits(
+                repo,
+                &rebase_complete.original_commits,
+            );
             rewrite_authorship_after_rebase_v2(
                 repo,
                 &rebase_complete.original_head,
@@ -203,10 +211,10 @@ pub fn rewrite_authorship_if_needed(
                 &rebase_complete.new_head,
             )?;
 
-            debug_log(&format!(
+            tracing::debug!(
                 "✓ Rewrote authorship for {} rebased commits",
                 rebase_complete.new_commits.len()
-            ));
+            );
         }
         RewriteLogEvent::CherryPickComplete {
             cherry_pick_complete,
@@ -224,10 +232,10 @@ pub fn rewrite_authorship_if_needed(
                 &commit_author,
             )?;
 
-            debug_log(&format!(
+            tracing::debug!(
                 "✓ Rewrote authorship for {} cherry-picked commits",
                 cherry_pick_complete.new_commits.len()
-            ));
+            );
         }
         _ => {}
     }
@@ -266,15 +274,16 @@ fn migrate_working_log_after_rebase(
         if !initial.files.is_empty() {
             let new_wl = repo.storage.working_log_for_base_commit(new_head)?;
             new_wl.write_initial(initial)?;
-            debug_log(&format!(
+            tracing::debug!(
                 "Migrated INITIAL attributions from {} to {}",
-                original_head, new_head
-            ));
+                original_head,
+                new_head
+            );
         } else {
-            debug_log(&format!(
+            tracing::debug!(
                 "No INITIAL attributions to migrate from {} (dropping old working log)",
                 original_head
-            ));
+            );
         }
         repo.storage
             .delete_working_log_for_base_commit(original_head)?;
@@ -576,10 +585,11 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     };
     let target_branch_head_sha = target_branch_head.id().to_string();
 
-    debug_log(&format!(
+    tracing::debug!(
         "Rewriting authorship for squash/rebase merge: {} -> {}",
-        source_head_sha, merge_commit_sha
-    ));
+        source_head_sha,
+        merge_commit_sha
+    );
 
     // Step 2: Find merge base between source and target to optimize blame
     // We only need to look at commits after the merge base, not entire history
@@ -607,7 +617,7 @@ pub fn rewrite_authorship_after_squash_or_rebase(
 
     if changed_files.is_empty() {
         if commits_have_authorship_notes(repo, &source_commits)? {
-            debug_log(
+            tracing::debug!(
                 "No AI-touched files in merge, but notes exist in source commits; writing empty authorship log",
             );
             if let Some(authorship_log) = build_metadata_only_authorship_log_from_source_notes(
@@ -622,15 +632,15 @@ pub fn rewrite_authorship_after_squash_or_rebase(
             }
         } else {
             // No files changed, nothing to do
-            debug_log("No files changed in merge, skipping authorship rewrite");
+            tracing::debug!("No files changed in merge, skipping authorship rewrite");
         }
         return Ok(());
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Processing {} changed files for merge authorship",
         changed_files.len()
-    ));
+    );
 
     // Step 4: Create VirtualAttributions for both branches
     // Use merge_base to limit blame range for performance
@@ -660,10 +670,10 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     // Step 4: Read committed files from merge commit (captures final state with conflict resolutions)
     let committed_files = get_committed_files_content(repo, merge_commit_sha, &changed_files)?;
 
-    debug_log(&format!(
+    tracing::debug!(
         "Read {} committed files from merge commit",
         committed_files.len()
-    ));
+    );
 
     // Step 5: Merge VirtualAttributions, favoring target branch (base)
     let merged_va = merge_attributions_favoring_first(target_va, source_va, committed_files)?;
@@ -694,11 +704,11 @@ pub fn rewrite_authorship_after_squash_or_rebase(
         }
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Created authorship log with {} attestations, {} prompts",
         authorship_log.attestations.len(),
         authorship_log.metadata.prompts.len()
-    ));
+    );
 
     // Step 7: Save authorship log to git notes
     let authorship_json = authorship_log
@@ -707,10 +717,10 @@ pub fn rewrite_authorship_after_squash_or_rebase(
 
     crate::git::refs::notes_add(repo, merge_commit_sha, &authorship_json)?;
 
-    debug_log(&format!(
+    tracing::debug!(
         "✓ Saved authorship log for merge commit {}",
         merge_commit_sha
-    ));
+    );
 
     Ok(())
 }
@@ -1087,12 +1097,12 @@ pub fn rewrite_authorship_after_rebase_v2(
         "load_rebase_note_cache".to_string(),
         phase_start.elapsed().as_millis(),
     ));
-    debug_performance_log(&format!(
+    tracing::debug!(
         "rebase_v2: loaded note cache ({} original notes, {} new with notes) in {}ms",
         note_cache.original_note_contents.len(),
         note_cache.new_commits_with_notes.len(),
         phase_start.elapsed().as_millis()
-    ));
+    );
 
     // Filter out commits that already have authorship logs (these are commits from the target branch).
     let force_process_existing_notes = original_commits.len() > new_commits.len();
@@ -1102,10 +1112,7 @@ pub fn rewrite_authorship_after_rebase_v2(
             let has_log = !force_process_existing_notes
                 && note_cache.new_commits_with_notes.contains(commit.as_str());
             if has_log {
-                debug_log(&format!(
-                    "Skipping commit {} (already has authorship log)",
-                    commit
-                ));
+                tracing::debug!("Skipping commit {} (already has authorship log)", commit);
             }
             !has_log
         })
@@ -1113,15 +1120,15 @@ pub fn rewrite_authorship_after_rebase_v2(
         .collect();
 
     if commits_to_process.is_empty() {
-        debug_log("No new commits to process (all commits already have authorship logs)");
+        tracing::debug!("No new commits to process (all commits already have authorship logs)");
         return Ok(());
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Processing {} newly created commits (skipped {} existing commits)",
         commits_to_process.len(),
         new_commits.len() - commits_to_process.len()
-    ));
+    );
     let commits_to_process_lookup: HashSet<&str> =
         commits_to_process.iter().map(String::as_str).collect();
     let all_commit_pairs = pair_commits_for_rewrite(repo, original_commits, new_commits);
@@ -1167,23 +1174,23 @@ pub fn rewrite_authorship_after_rebase_v2(
         let remapped_count =
             remap_notes_for_commit_pairs(repo, &commit_pairs_to_process, &original_note_contents)?;
         if remapped_count > 0 {
-            debug_log(&format!(
+            tracing::debug!(
                 "Remapped {} metadata-only authorship notes for rebase commits",
                 remapped_count
-            ));
+            );
         } else {
-            debug_log("No AI-touched files and no source notes to remap during rebase");
+            tracing::debug!("No AI-touched files and no source notes to remap during rebase");
         }
         return Ok(());
     }
     let pathspecs_lookup: HashSet<&str> = pathspecs.iter().map(String::as_str).collect();
 
-    debug_log(&format!(
+    tracing::debug!(
         "Processing rebase: {} files modified across {} original commits -> {} new commits",
         pathspecs.len(),
         original_commits.len(),
         new_commits.len()
-    ));
+    );
 
     if try_fast_path_rebase_note_remap_cached(
         repo,
@@ -1273,14 +1280,14 @@ pub fn rewrite_authorship_after_rebase_v2(
             &note_cache,
             &original_hunks_by_commit,
         ) {
-        debug_log("Using fast note-based attribution reconstruction (skipping blame)");
+        tracing::debug!("Using fast note-based attribution reconstruction (skipping blame)");
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         (attrs, contents, prompts, humans, ts)
     } else {
-        debug_log("Falling back to VirtualAttributions (blame-based reconstruction)");
+        tracing::debug!("Falling back to VirtualAttributions (blame-based reconstruction)");
         let new_head = new_commits.last().unwrap();
         let merge_base = repo
             .merge_base(original_head.to_string(), new_head.to_string())
@@ -1486,12 +1493,12 @@ pub fn rewrite_authorship_after_rebase_v2(
         BTreeMap::new();
 
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
-        debug_log(&format!(
+        tracing::debug!(
             "Processing commit {}/{}: {}",
             idx + 1,
             commits_to_process.len(),
             new_commit
-        ));
+        );
 
         let (changed_files_in_commit, new_content_for_changed_files) = changed_contents_by_commit
             .remove(new_commit)
@@ -1767,6 +1774,60 @@ pub fn rewrite_authorship_after_rebase_v2(
         }
     }
 
+    // Fix #1079: After the slow-path loop, remap original notes for commits that
+    // were not covered by the diff-based attribution transfer.  This handles two cases:
+    //
+    // 1. Metadata-only notes (no file attestations before `---`): commits that touch
+    //    different files than the AI-tracked pathspecs.
+    //
+    // 2. Notes with real attestations where the slow path couldn't produce output:
+    //    this happens during conflict rebases when the AI-tracked file is the one
+    //    with the conflict.  The content-diff can't carry attribution for manually
+    //    resolved content, and build_note_from_conflict_wl returns None when no
+    //    checkpoint was written during resolution.  Rather than silently dropping
+    //    the note, remap the original — it may not perfectly reflect the resolved
+    //    content but preserves the AI authorship provenance.
+    let processed_new_commits: HashSet<&str> = pending_note_entries
+        .iter()
+        .map(|(sha, _)| sha.as_str())
+        .collect();
+    let unprocessed_pairs_with_notes: Vec<(String, String)> = commit_pairs_to_process
+        .iter()
+        .filter(|(orig, new)| {
+            if processed_new_commits.contains(new.as_str()) {
+                return false;
+            }
+            // Remap any commit whose original had a note (metadata-only or with
+            // real attestations).  The slow path already had its chance to produce
+            // a more accurate note; reaching here means it couldn't, so preserving
+            // the original is the best we can do.
+            note_cache.original_note_contents.contains_key(orig)
+        })
+        .cloned()
+        .collect();
+    if !unprocessed_pairs_with_notes.is_empty() {
+        let original_note_contents: HashMap<String, String> = unprocessed_pairs_with_notes
+            .iter()
+            .filter_map(|(orig, _)| {
+                note_cache
+                    .original_note_contents
+                    .get(orig)
+                    .map(|content| (orig.clone(), content.clone()))
+            })
+            .collect();
+        let remapped_count = remap_notes_for_commit_pairs(
+            repo,
+            &unprocessed_pairs_with_notes,
+            &original_note_contents,
+        )?;
+        if remapped_count > 0 {
+            tracing::debug!(
+                remapped_count,
+                "remapped original notes for commits not covered by slow-path attribution transfer"
+            );
+        }
+    }
+
     timing_phases.push((
         format!(
             "commit_processing_loop ({} commits)",
@@ -1814,17 +1875,18 @@ pub fn rewrite_authorship_after_rebase_v2(
     ));
 
     for (commit_sha, file_count) in pending_note_debug {
-        debug_log(&format!(
+        tracing::debug!(
             "Saved authorship log for commit {} ({} files)",
-            commit_sha, file_count
-        ));
+            commit_sha,
+            file_count
+        );
     }
 
     let total_ms = rewrite_start.elapsed().as_millis();
-    debug_performance_log(&format!(
+    tracing::debug!(
         "rebase_v2: TOTAL rewrite_authorship_after_rebase_v2 in {}ms",
         total_ms
-    ));
+    );
 
     // Write detailed timing breakdown for benchmarking
     if let Ok(timing_path) = std::env::var("GIT_AI_REBASE_TIMING_FILE") {
@@ -1875,11 +1937,11 @@ pub fn rewrite_authorship_after_cherry_pick(
         )));
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Processing cherry-pick: {} source commits -> {} new commits",
         source_commits.len(),
         new_commits.len()
-    ));
+    );
 
     let commit_pairs: Vec<(String, String)> = source_commits
         .iter()
@@ -1900,12 +1962,12 @@ pub fn rewrite_authorship_after_cherry_pick(
         let remapped_count =
             remap_notes_for_commit_pairs(repo, &commit_pairs, &source_note_contents)?;
         if remapped_count > 0 {
-            debug_log(&format!(
+            tracing::debug!(
                 "Remapped {} metadata-only authorship notes for cherry-picked commits",
                 remapped_count
-            ));
+            );
         } else {
-            debug_log("No files modified in source commits");
+            tracing::debug!("No files modified in source commits");
         }
         return Ok(());
     }
@@ -1917,11 +1979,11 @@ pub fn rewrite_authorship_after_cherry_pick(
     let mut source_note_content_by_new_commit: HashMap<String, String> = HashMap::new();
     let mut source_note_content_loaded = false;
 
-    debug_log(&format!(
+    tracing::debug!(
         "Processing cherry-pick: {} files modified across {} source commits",
         pathspecs.len(),
         source_commits.len()
-    ));
+    );
 
     // Step 2: Create VirtualAttributions from the LAST source commit
     // This is the key difference from rebase: cherry-pick applies patches sequentially,
@@ -1967,12 +2029,12 @@ pub fn rewrite_authorship_after_cherry_pick(
 
     // Step 3: Process each new commit in order (oldest to newest)
     for (idx, new_commit) in new_commits.iter().enumerate() {
-        debug_log(&format!(
+        tracing::debug!(
             "Processing cherry-picked commit {}/{}: {}",
             idx + 1,
             new_commits.len(),
             new_commit
-        ));
+        );
 
         // Get the DIFF for this commit (what actually changed)
         let commit_obj = repo.find_commit(new_commit.clone())?;
@@ -2044,11 +2106,11 @@ pub fn rewrite_authorship_after_cherry_pick(
 
         crate::git::refs::notes_add(repo, new_commit, &authorship_json)?;
 
-        debug_log(&format!(
+        tracing::debug!(
             "Saved authorship log for cherry-picked commit {} ({} files)",
             new_commit,
             authorship_log.attestations.len()
-        ));
+        );
     }
 
     Ok(())
@@ -2990,14 +3052,15 @@ pub fn reconstruct_working_log_after_reset(
         || is_zero_oid(target_commit_sha)
         || is_zero_oid(old_head_sha)
     {
-        debug_log("Skipping reset working-log reconstruction for invalid zero/empty oid");
+        tracing::debug!("Skipping reset working-log reconstruction for invalid zero/empty oid");
         return Ok(());
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Reconstructing working log after reset from {} to {}",
-        old_head_sha, target_commit_sha
-    ));
+        old_head_sha,
+        target_commit_sha
+    );
 
     // Step 1: Get all files changed between target and old_head
     let all_changed_files =
@@ -3031,17 +3094,17 @@ pub fn reconstruct_working_log_after_reset(
     let pathspecs = filter_pathspecs_to_ai_touched_files(repo, &commits_in_range, &pathspecs)?;
 
     if pathspecs.is_empty() {
-        debug_log("No files changed between commits, nothing to reconstruct");
+        tracing::debug!("No files changed between commits, nothing to reconstruct");
         // Still delete old working log
         repo.storage
             .delete_working_log_for_base_commit(old_head_sha)?;
         return Ok(());
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Processing {} files for reset authorship reconstruction",
         pathspecs.len()
-    ));
+    );
 
     // Step 2: Build final state from the captured command-exit snapshot when available.
     let has_captured_snapshot = final_state_override.is_some();
@@ -3059,10 +3122,7 @@ pub fn reconstruct_working_log_after_reset(
             };
             final_state.insert(file_path.clone(), content);
         }
-        debug_log(&format!(
-            "Read {} files from working directory",
-            final_state.len()
-        ));
+        tracing::debug!("Read {} files from working directory", final_state.len());
         final_state
     };
 
@@ -3098,32 +3158,45 @@ pub fn reconstruct_working_log_after_reset(
         })?
     };
 
-    debug_log(&format!(
+    tracing::debug!(
         "Built old_head VA with {} files, {} prompts",
         old_head_va.files().len(),
         old_head_va.prompts().len()
-    ));
+    );
 
-    // Step 4: Build VirtualAttributions from target_commit
-    let repo_clone = repo.clone();
-    let target_clone = target_commit_sha.to_string();
-    let pathspecs_clone = pathspecs.clone();
-
-    let target_va = smol::block_on(async {
-        crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
-            repo_clone,
-            target_clone,
-            &pathspecs_clone,
-            Some(target_commit_sha.to_string()),
+    // Step 4: Build VirtualAttributions from target_commit.
+    //
+    // The original intent was to capture AI lines that predate the reset range — lines that were
+    // AI-authored before `target_commit` and are still present in the working directory — so that
+    // `merge_attributions_favoring_first` (Step 5) could fill gaps in `old_head_va` with them.
+    //
+    // The implementation was broken from the start: it called `new_for_base_commit` with both
+    // `base_commit` and `blame_start_commit` set to `target_commit_sha`, producing a blame range
+    // of `target..target` (oldest == newest). That range is always empty — every line is
+    // attributed to a boundary commit and mapped to human — so `target_va` always had zero AI
+    // attributions and never filled any gaps.
+    //
+    // Additionally, `old_head_va` is built via `from_working_log_for_commit`, which replays the
+    // existing working log entries at `old_head` on top of blame. Any AI lines that predate the
+    // reset range and are tracked by git-ai are already carried into `old_head_va` through the
+    // working log replay, so a correct `target_va` would have been redundant anyway.
+    //
+    // We create an empty VA directly (no subprocess calls). The merge result is identical to
+    // before the fix because `target_va` was always empty.
+    let target_va = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        crate::authorship::virtual_attribution::VirtualAttributions::new(
+            repo.clone(),
+            target_commit_sha.to_string(),
+            HashMap::new(),
+            HashMap::new(),
+            ts,
         )
-        .await
-    })?;
-
-    debug_log(&format!(
-        "Built target VA with {} files, {} prompts",
-        target_va.files().len(),
-        target_va.prompts().len()
-    ));
+    };
 
     // Step 5: Merge VAs favoring old_head to preserve uncommitted AI changes
     // old_head (with working log) wins overlaps, target fills gaps
@@ -3133,20 +3206,17 @@ pub fn reconstruct_working_log_after_reset(
         final_state.clone(),
     )?;
 
-    debug_log(&format!(
-        "Merged VAs, result has {} files",
-        merged_va.files().len()
-    ));
+    tracing::debug!("Merged VAs, result has {} files", merged_va.files().len());
 
     // Step 6: Convert to INITIAL (everything is uncommitted after reset) without consulting the
     // live worktree again.
     let initial_attributions = merged_va.to_initial_working_log_only();
 
-    debug_log(&format!(
+    tracing::debug!(
         "Generated INITIAL attributions for {} files, {} prompts",
         initial_attributions.files.len(),
         initial_attributions.prompts.len()
-    ));
+    );
 
     // Step 7: Write INITIAL file
     let new_working_log = repo
@@ -3167,10 +3237,10 @@ pub fn reconstruct_working_log_after_reset(
     repo.storage
         .delete_working_log_for_base_commit(old_head_sha)?;
 
-    debug_log(&format!(
+    tracing::debug!(
         "✓ Wrote INITIAL attributions to working log for {}",
         target_commit_sha
-    ));
+    );
 
     Ok(())
 }
@@ -3461,11 +3531,11 @@ fn try_fast_path_rebase_note_remap_cached(
     if !tracked_paths_match_for_commit_pairs(repo, &commits_to_remap, tracked_paths)? {
         return Ok(false);
     }
-    debug_performance_log(&format!(
+    tracing::debug!(
         "Fast-path rebase note remap: compared tracked blobs for {} commit pairs in {}ms",
         commits_to_remap.len(),
         compare_start.elapsed().as_millis()
-    ));
+    );
 
     // Use cached note blob OIDs and contents instead of additional git calls.
     for (original_commit, _) in &commits_to_remap {
@@ -3493,20 +3563,20 @@ fn try_fast_path_rebase_note_remap_cached(
     let write_start = std::time::Instant::now();
     crate::git::refs::notes_add_batch(repo, &remapped_note_entries)?;
 
-    debug_performance_log(&format!(
+    tracing::debug!(
         "Fast-path rebase note remap: wrote {} remapped notes in {}ms",
         remapped_count,
         write_start.elapsed().as_millis()
-    ));
+    );
 
-    debug_log(&format!(
+    tracing::debug!(
         "Fast-path remapped authorship logs for {} commits (blob-equivalent tracked files)",
         remapped_count
-    ));
-    debug_performance_log(&format!(
+    );
+    tracing::debug!(
         "Fast-path rebase note remap complete in {}ms",
         fast_path_start.elapsed().as_millis()
-    ));
+    );
     Ok(true)
 }
 
@@ -3524,11 +3594,11 @@ fn try_fast_path_cherry_pick_note_remap(
     if !tracked_paths_match_for_commit_pairs(repo, commit_pairs, tracked_paths)? {
         return Ok(false);
     }
-    debug_performance_log(&format!(
+    tracing::debug!(
         "Fast-path cherry-pick note remap: compared tracked blobs for {} commit pairs in {}ms",
         commit_pairs.len(),
         compare_start.elapsed().as_millis()
-    ));
+    );
 
     let source_commits: Vec<String> = commit_pairs
         .iter()
@@ -3536,11 +3606,11 @@ fn try_fast_path_cherry_pick_note_remap(
         .collect();
     let note_oid_lookup_start = std::time::Instant::now();
     let source_note_blob_oids = note_blob_oids_for_commits(repo, &source_commits)?;
-    debug_performance_log(&format!(
+    tracing::debug!(
         "Fast-path cherry-pick note remap: resolved {} note blob oids in {}ms",
         source_note_blob_oids.len(),
         note_oid_lookup_start.elapsed().as_millis()
-    ));
+    );
     if source_note_blob_oids.len() != source_commits.len() {
         return Ok(false);
     }
@@ -3583,20 +3653,20 @@ fn try_fast_path_cherry_pick_note_remap(
     let write_start = std::time::Instant::now();
     crate::git::refs::notes_add_batch(repo, &remapped_note_entries)?;
 
-    debug_performance_log(&format!(
+    tracing::debug!(
         "Fast-path cherry-pick note remap: wrote {} remapped notes in {}ms",
         remapped_count,
         write_start.elapsed().as_millis()
-    ));
+    );
 
-    debug_log(&format!(
+    tracing::debug!(
         "Fast-path remapped authorship logs for {} cherry-picked commits (blob-equivalent tracked files)",
         remapped_count
-    ));
-    debug_performance_log(&format!(
+    );
+    tracing::debug!(
         "Fast-path cherry-pick note remap complete in {}ms",
         fast_path_start.elapsed().as_millis()
-    ));
+    );
     Ok(true)
 }
 
@@ -4556,16 +4626,15 @@ fn transform_attributions_to_final_state(
         }
     }
 
-    // Calculate and update prompt metrics based on transformed attributions.
-    // Empty session maps preserve existing total_additions/total_deletions values.
+    // Calculate and update prompt metrics based on transformed attributions
     crate::authorship::virtual_attribution::VirtualAttributions::calculate_and_update_prompt_metrics(
         &mut prompts,
         &attributions,
-        &HashMap::new(),
-        &HashMap::new(),
+        &HashMap::new(), // Empty - will result in total_additions = 0
+        &HashMap::new(), // Empty - will result in total_deletions = 0
     );
 
-    // Overwrite with the saved pre-rebase totals (rebase should preserve original totals).
+    // Restore the saved total_additions and total_deletions
     for (prompt_id, commits) in prompts.iter_mut() {
         if let Some(&(additions, deletions)) = saved_totals.get(prompt_id) {
             for prompt_record in commits.values_mut() {
