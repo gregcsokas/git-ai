@@ -2672,6 +2672,29 @@ fn func_one() {
         .stage_all_and_commit("B: AI adds new_func and moves func_one to end")
         .unwrap();
 
+    // Every line in the file should be AI-attributed via blame.
+    let mut file = repo.filename("src.rs");
+    file.assert_lines_and_blame(crate::lines![
+        "fn new_func() {".ai(),
+        "    // brand new function".ai(),
+        "    let z: u32 = 99;".ai(),
+        "    let w: u32 = 100;".ai(),
+        "    z + w".ai(),
+        "}".ai(),
+        "fn func_two() {".ai(),
+        "    // original function two body".ai(),
+        "    let a = String::from(\"hello\");".ai(),
+        "    let b = String::from(\"world\");".ai(),
+        "    format!(\"{} {}\", a, b)".ai(),
+        "}".ai(),
+        "fn func_one() {".ai(),
+        "    // original function one body".ai(),
+        "    let x: u32 = 1;".ai(),
+        "    let y: u32 = 2;".ai(),
+        "    x + y".ai(),
+        "}".ai()
+    ]);
+
     // Confirm the Myers diff actually puts func_one as explicit `+` lines.
     let raw_diff = repo
         .git_og(&[
