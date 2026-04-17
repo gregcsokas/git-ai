@@ -4632,6 +4632,7 @@ fn daemon_recovers_from_panic_in_side_effect_pipeline() {
 /// spawn a fresh daemon via ensure_daemon_running.
 #[test]
 #[serial]
+#[cfg(unix)]
 fn daemon_shuts_down_when_socket_files_are_deleted() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let control_socket_path = daemon_control_socket_path(&repo);
