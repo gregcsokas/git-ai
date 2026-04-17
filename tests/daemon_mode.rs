@@ -4733,6 +4733,7 @@ fn daemon_self_heals_after_socket_deletion() {
             ("GIT_AI_DAEMON_SOCKET_HEALTH_CHECK_SECS", "1"),
             ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "86400"),
             ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "86400"),
+            ("GIT_AI_DAEMON_MIN_UPTIME_FOR_RESTART_SECS", "0"),
         ],
     );
 

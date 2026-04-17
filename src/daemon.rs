@@ -7846,17 +7846,33 @@ fn spawn_self_restart() -> Result<(), String> {
         .map_err(|e| format!("failed to spawn restart process: {}", e))
 }
 
+const DAEMON_MIN_UPTIME_FOR_SELF_RESTART_SECS: u64 = 60;
+
+fn daemon_min_uptime_for_self_restart() -> u64 {
+    std::env::var("GIT_AI_DAEMON_MIN_UPTIME_FOR_RESTART_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DAEMON_MIN_UPTIME_FOR_SELF_RESTART_SECS)
+}
+
 /// Background loop that verifies the daemon's sockets are reachable by
 /// actually connecting to them.  A successful connect proves the socket file
 /// exists, points to this daemon's listener, and that the listener thread is
 /// alive and calling accept().  If either probe fails (deleted file, stale
 /// socket, hung listener), the daemon spawns a detached restart process and
 /// shuts down.
+///
+/// To prevent restart loops when the underlying issue is systemic (e.g.
+/// filesystem permissions, broken paths), the daemon only self-restarts if
+/// it has been up for at least 60 seconds.  If sockets fail before that,
+/// it shuts down without restart — the next wrapper invocation will attempt
+/// to start a fresh daemon.
 fn daemon_socket_health_check_loop(
     coordinator: Arc<ActorDaemonCoordinator>,
     control_socket_path: PathBuf,
     trace_socket_path: PathBuf,
 ) {
+    let started = std::time::Instant::now();
     let interval = daemon_socket_health_check_interval().max(1);
     tracing::info!(
         interval,
@@ -7889,13 +7905,25 @@ fn daemon_socket_health_check_loop(
             local_socket_connects_with_timeout(&trace_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT);
 
         if control_ok.is_err() || trace_ok.is_err() {
-            tracing::warn!(
-                control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
-                trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
-                "socket health check failed, spawning restart and shutting down"
-            );
-            if let Err(e) = spawn_self_restart() {
-                tracing::error!("failed to spawn self-restart: {}", e);
+            let uptime = started.elapsed();
+            let min_uptime = std::time::Duration::from_secs(daemon_min_uptime_for_self_restart());
+
+            if uptime >= min_uptime {
+                tracing::warn!(
+                    control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                    trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                    "socket health check failed, spawning restart and shutting down"
+                );
+                if let Err(e) = spawn_self_restart() {
+                    tracing::error!("failed to spawn self-restart: {}", e);
+                }
+            } else {
+                tracing::warn!(
+                    control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                    trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                    uptime_secs = uptime.as_secs(),
+                    "socket health check failed within minimum uptime, shutting down without restart"
+                );
             }
             coordinator.request_shutdown();
             return;
