@@ -87,10 +87,19 @@ impl HookInstaller for GitHubCopilotInstaller {
         }
 
         let hooks_path = Self::hooks_path();
-        if !hooks_path.exists() {
+        let legacy_path = Self::legacy_hooks_path();
+        if !hooks_path.exists() && !legacy_path.exists() {
             return Ok(HookCheckResult {
                 tool_installed: true,
                 hooks_installed: false,
+                hooks_up_to_date: false,
+            });
+        }
+
+        if !hooks_path.exists() && legacy_path.exists() {
+            return Ok(HookCheckResult {
+                tool_installed: true,
+                hooks_installed: true,
                 hooks_up_to_date: false,
             });
         }
@@ -331,6 +340,13 @@ impl HookInstaller for GitHubCopilotInstaller {
         _params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
+        if !dry_run {
+            let legacy_path = Self::legacy_hooks_path();
+            if legacy_path.exists() {
+                let _ = fs::remove_file(&legacy_path);
+            }
+        }
+
         let hooks_path = Self::hooks_path();
 
         if !hooks_path.exists() {
@@ -721,6 +737,58 @@ mod tests {
                 Some("echo before")
             );
             assert!(post.is_empty());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_uninstall_hooks_deletes_legacy_hooks_file() {
+        with_temp_home(|home| {
+            let legacy_path = home.join(".github").join("hooks").join("git-ai.json");
+            fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+            fs::write(&legacy_path, r#"{"hooks":{}}"#).unwrap();
+
+            let installer = GitHubCopilotInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            installer.uninstall_hooks(&params, false).unwrap();
+            assert!(!legacy_path.exists());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_check_hooks_detects_legacy_path_as_installed() {
+        with_temp_home(|home| {
+            let legacy_path = home.join(".github").join("hooks").join("git-ai.json");
+            fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+            let existing = json!({
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "type": "command",
+                            "command": "/tmp/git-ai/bin/git-ai checkpoint github-copilot --hook-input stdin"
+                        }
+                    ]
+                }
+            });
+            fs::write(
+                &legacy_path,
+                serde_json::to_string_pretty(&existing).unwrap(),
+            )
+            .unwrap();
+
+            let installer = GitHubCopilotInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            let result = installer.check_hooks(&params).unwrap();
+            assert!(result.tool_installed);
+            assert!(result.hooks_installed);
+            assert!(!result.hooks_up_to_date);
         });
     }
 }
