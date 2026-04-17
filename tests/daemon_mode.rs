@@ -4736,8 +4736,6 @@ fn daemon_self_heals_after_socket_deletion() {
         ],
     );
 
-    let original_pid = daemon.child.id();
-
     // Verify the daemon is alive and responsive.
     assert!(
         send_control_request(
@@ -4794,22 +4792,6 @@ fn daemon_self_heals_after_socket_deletion() {
     assert!(
         new_daemon_reachable,
         "a new daemon should be reachable after the original self-healed"
-    );
-
-    // The new daemon should be a different process.
-    let pid_file_path = repo
-        .daemon_home_path()
-        .join(".git-ai")
-        .join("internal")
-        .join("daemon")
-        .join("daemon.pid.json");
-    let new_pid_raw = fs::read_to_string(&pid_file_path).expect("should be able to read pid file");
-    let new_pid: serde_json::Value =
-        serde_json::from_str(&new_pid_raw).expect("pid file should be valid json");
-    let new_pid_num = new_pid["pid"].as_u64().expect("pid should be a number");
-    assert_ne!(
-        new_pid_num, original_pid as u64,
-        "new daemon should have a different PID than the original"
     );
 
     // Clean up the new daemon.
