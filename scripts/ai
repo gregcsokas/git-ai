@@ -30,11 +30,16 @@ def cmd_new(args):
         print(f"Worktree already exists: {worktree_dir}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Fetching origin/main...")
-    run(["git", "fetch", "origin", "main"])
+    base = args.base
+    if base.startswith("origin/"):
+        remote_branch = base[len("origin/"):]
+        print(f"Fetching {base}...")
+        run(["git", "fetch", "origin", remote_branch])
+    else:
+        print(f"Using local ref {base}...")
 
-    print(f"Creating worktree at {worktree_dir} on branch {branch}...")
-    run(["git", "worktree", "add", "-b", branch, worktree_dir, "origin/main"])
+    print(f"Creating worktree at {worktree_dir} on branch {branch} from {base}...")
+    run(["git", "worktree", "add", "-b", branch, worktree_dir, base])
 
     set_tmux_window_name(branch)
 
@@ -52,6 +57,7 @@ def build_parser():
 
     p_new = subparsers.add_parser("new", help="Create a worktree and open claude")
     p_new.add_argument("branch", help="Branch name for the new worktree")
+    p_new.add_argument("--base", default="origin/main", help="Base ref for the new worktree (default: origin/main)")
     p_new.set_defaults(func=cmd_new)
 
     return parser
