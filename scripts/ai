@@ -65,6 +65,45 @@ def is_branch_checked_out_in_root(branch):
     return current_branch == branch
 
 
+def cmd_resume(args):
+    """Resume work on an existing branch."""
+    branch = args.branch
+    repo_root = get_repo_root()
+    worktree_dir = os.path.join(repo_root, ".worktrees", branch)
+
+    # 1. Check if worktree already exists
+    if os.path.exists(worktree_dir):
+        print(f"Using existing worktree: {worktree_dir}")
+        open_worktree(worktree_dir, branch, resume_session=True)
+        return
+
+    # 2. Check if local branch exists
+    local_branch_exists = check_local_branch_exists(branch)
+
+    # 3. If not, check remote and fetch
+    if not local_branch_exists:
+        remote_branch_exists = check_remote_branch_exists(branch)
+        if not remote_branch_exists:
+            print(f"Error: Branch '{branch}' not found locally or on origin", file=sys.stderr)
+            sys.exit(1)
+        print(f"Fetching origin/{branch}...")
+        run(["git", "fetch", "origin", branch])
+        # Create local tracking branch
+        run(["git", "branch", branch, f"origin/{branch}"])
+
+    # 4. Verify branch not checked out in repo root
+    if is_branch_checked_out_in_root(branch):
+        print(f"Error: Branch '{branch}' is checked out in main repo, cannot create worktree", file=sys.stderr)
+        sys.exit(1)
+
+    # 5. Create worktree
+    print(f"Creating worktree at {worktree_dir} for branch {branch}...")
+    run(["git", "worktree", "add", worktree_dir, branch])
+
+    # 6. Launch Claude with resume
+    open_worktree(worktree_dir, branch, resume_session=True)
+
+
 def cmd_new(args):
     """Create a new worktree from origin/main and open claude in it."""
     branch = args.branch
@@ -101,6 +140,10 @@ def build_parser():
     p_new.add_argument("branch", help="Branch name for the new worktree")
     p_new.add_argument("--base", default="origin/main", help="Base ref for the new worktree (default: origin/main)")
     p_new.set_defaults(func=cmd_new)
+
+    p_resume = subparsers.add_parser("resume", help="Resume work on an existing branch")
+    p_resume.add_argument("branch", help="Branch name to resume")
+    p_resume.set_defaults(func=cmd_resume)
 
     return parser
 
