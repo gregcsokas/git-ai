@@ -45,14 +45,6 @@ def check_local_branch_exists(branch):
     return result.returncode == 0
 
 
-def check_remote_branch_exists(branch):
-    """Check if a remote branch exists on origin."""
-    result = subprocess.run(
-        ["git", "show-ref", "--verify", f"refs/remotes/origin/{branch}"],
-        capture_output=True,
-    )
-    return result.returncode == 0
-
 
 def is_branch_checked_out_in_root(branch):
     """Check if a branch is currently checked out in the repo root."""
@@ -95,14 +87,16 @@ def cmd_resume(args):
     # 2. Check if local branch exists
     local_branch_exists = check_local_branch_exists(branch)
 
-    # 3. If not, check remote and fetch
+    # 3. If not, try to fetch from remote
     if not local_branch_exists:
-        remote_branch_exists = check_remote_branch_exists(branch)
-        if not remote_branch_exists:
+        print(f"Fetching origin/{branch}...")
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin", branch],
+            capture_output=True,
+        )
+        if fetch_result.returncode != 0:
             print(f"Error: Branch '{branch}' not found locally or on origin", file=sys.stderr)
             sys.exit(1)
-        print(f"Fetching origin/{branch}...")
-        run(["git", "fetch", "origin", branch])
         # Create local tracking branch
         run(["git", "branch", branch, f"origin/{branch}"])
 
