@@ -2,6 +2,7 @@
 """CLI for git-ai development workflows."""
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -65,6 +66,20 @@ def is_branch_checked_out_in_root(branch):
     return current_branch == branch
 
 
+def get_pr_info(pr_number):
+    """Fetch PR metadata using GitHub CLI."""
+    result = subprocess.run(
+        ["gh", "pr", "view", str(pr_number), "--json", "headRefName,isCrossRepository"],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(result.stdout)
+
+    return {
+        "headRefName": data["headRefName"],
+        "isFork": data["isCrossRepository"],
+    }
+
+
 def cmd_resume(args):
     """Resume work on an existing branch."""
     branch = args.branch
@@ -102,6 +117,63 @@ def cmd_resume(args):
 
     # 6. Launch Claude with resume
     open_worktree(worktree_dir, branch, resume_session=True)
+
+
+def cmd_pr(args):
+    """Check out a PR into a worktree and launch Claude."""
+    pr_number = args.pr_number
+    repo_root = get_repo_root()
+
+    # 1. Fetch PR metadata
+    pr_info = get_pr_info(pr_number)
+    branch_name = pr_info["headRefName"]
+    is_fork = pr_info["isFork"]
+
+    # 2. Determine worktree directory name
+    if is_fork:
+        worktree_name = f"pr-{pr_number}"
+    else:
+        worktree_name = branch_name
+
+    worktree_dir = os.path.join(repo_root, ".worktrees", worktree_name)
+
+    # 3. Check if worktree already exists
+    if os.path.exists(worktree_dir):
+        print(f"Using existing worktree for PR #{pr_number}")
+        open_worktree(worktree_dir, branch_name, resume_session=False)
+        return
+
+    # 4. Checkout PR using gh CLI (handles fetching)
+    print(f"Checking out PR #{pr_number}...")
+    # Remember current branch to restore it after
+    current_result = subprocess.run(
+        ["git", "-C", repo_root, "symbolic-ref", "--short", "HEAD"],
+        capture_output=True, text=True,
+    )
+    original_branch = current_result.stdout.strip() if current_result.returncode == 0 else None
+
+    # Run gh pr checkout from repo root
+    subprocess.run(["gh", "pr", "checkout", str(pr_number)], cwd=repo_root, check=True)
+
+    # Switch back to original branch (or main if detached)
+    if original_branch:
+        subprocess.run(["git", "-C", repo_root, "checkout", original_branch],
+                      capture_output=True, check=True)
+    else:
+        subprocess.run(["git", "-C", repo_root, "checkout", "main"],
+                      capture_output=True, check=True)
+
+    # 5. Verify branch not checked out in repo root
+    if is_branch_checked_out_in_root(branch_name):
+        print(f"Error: Branch '{branch_name}' is checked out in main repo, cannot create worktree", file=sys.stderr)
+        sys.exit(1)
+
+    # 6. Create worktree from checked-out branch
+    print(f"Creating worktree at {worktree_dir}...")
+    run(["git", "worktree", "add", worktree_dir, branch_name])
+
+    # 7. Launch Claude without resume
+    open_worktree(worktree_dir, branch_name, resume_session=False)
 
 
 def cmd_new(args):
@@ -144,6 +216,10 @@ def build_parser():
     p_resume = subparsers.add_parser("resume", help="Resume work on an existing branch")
     p_resume.add_argument("branch", help="Branch name to resume")
     p_resume.set_defaults(func=cmd_resume)
+
+    p_pr = subparsers.add_parser("pr", help="Check out a PR and open claude")
+    p_pr.add_argument("pr_number", type=int, help="PR number to check out")
+    p_pr.set_defaults(func=cmd_pr)
 
     return parser
 
