@@ -175,7 +175,17 @@ fn execute_post_file_edit(
 }
 
 fn execute_known_human_edit(e: KnownHumanEdit) -> Result<Option<CheckpointRequest>, GitAiError> {
-    let files = build_file_entries(&e.file_paths)?;
+    if let Some(ref df) = e.dirty_files {
+        for key in df.keys() {
+            if !key.is_absolute() {
+                return Err(GitAiError::PresetError(format!(
+                    "dirty_files key must be an absolute path: {}",
+                    key.display()
+                )));
+            }
+        }
+    }
+    let files = build_file_entries_with_content(&e.file_paths, e.dirty_files.as_ref())?;
     if files.is_empty() {
         return Ok(None);
     }

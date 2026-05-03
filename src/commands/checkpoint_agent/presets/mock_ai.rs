@@ -60,8 +60,8 @@ impl AgentPreset for MockAiPreset {
         Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
             context,
             file_paths,
-            transcript_source: None,
             dirty_files: None,
+            transcript_source: None,
         })])
     }
 }

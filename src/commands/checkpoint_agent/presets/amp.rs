@@ -346,8 +346,8 @@ impl AgentPreset for AmpPreset {
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
-                transcript_source,
                 dirty_files: None,
+                transcript_source,
             }),
         };
 

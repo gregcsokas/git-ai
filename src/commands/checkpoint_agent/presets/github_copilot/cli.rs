@@ -217,9 +217,9 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/Users/a/project/very_fun.md")]
                 );
-                let co = e.dirty_files.as_ref().unwrap();
+                let df = e.dirty_files.as_ref().unwrap();
                 assert_eq!(
-                    co.get(&PathBuf::from("/Users/a/project/very_fun.md")),
+                    df.get(&PathBuf::from("/Users/a/project/very_fun.md")),
                     Some(&String::new())
                 );
             }

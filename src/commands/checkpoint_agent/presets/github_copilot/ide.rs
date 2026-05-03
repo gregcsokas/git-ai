@@ -26,7 +26,7 @@ pub(super) fn parse_legacy_extension_hooks(
             )
         })?;
 
-    let _dirty_files = super::dirty_files_from_hook_data(data, cwd);
+    let dirty_files = super::dirty_files_from_hook_data(data, cwd);
 
     let session_id = super::extract_session_id(data);
 
@@ -68,7 +68,7 @@ pub(super) fn parse_legacy_extension_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: will_edit_filepaths,
-            dirty_files: None,
+            dirty_files,
         })]);
     }
 
@@ -129,8 +129,8 @@ pub(super) fn parse_legacy_extension_hooks(
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
         context,
         file_paths: edited_filepaths,
+        dirty_files,
         transcript_source,
-        dirty_files: None,
     })])
 }
 
@@ -146,7 +146,7 @@ pub(super) fn parse_vscode_native_hooks(
     let cwd = parse::optional_str_multi(data, &["cwd", "workspace_folder", "workspaceFolder"])
         .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
 
-    let _dirty_files = super::dirty_files_from_hook_data(data, cwd);
+    let dirty_files = super::dirty_files_from_hook_data(data, cwd);
     let session_id = super::extract_session_id(data);
 
     let tool_name =
@@ -254,22 +254,21 @@ pub(super) fn parse_vscode_native_hooks(
 
         // For create_file PreToolUse, synthesize dirty_files with empty content
         if tool_name.eq_ignore_ascii_case("create_file") {
+            let mut empty_dirty_files: HashMap<PathBuf, String> = HashMap::new();
+            for path in &extracted_paths {
+                empty_dirty_files.insert(path.clone(), String::new());
+            }
+
             if extracted_paths.is_empty() {
                 return Err(GitAiError::PresetError(
                     "No file path found in create_file PreToolUse tool_input".to_string(),
                 ));
             }
 
-            // For create_file PreToolUse, use empty content as override
-            let dirty_files: HashMap<PathBuf, String> = extracted_paths
-                .iter()
-                .map(|p| (p.clone(), String::new()))
-                .collect();
-
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
-                dirty_files: Some(dirty_files),
+                dirty_files: Some(empty_dirty_files),
             })]);
         }
 
@@ -283,7 +282,7 @@ pub(super) fn parse_vscode_native_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: extracted_paths,
-            dirty_files: None,
+            dirty_files,
         })]);
     }
 
@@ -306,8 +305,8 @@ pub(super) fn parse_vscode_native_hooks(
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
         context,
         file_paths: extracted_paths,
+        dirty_files,
         transcript_source,
-        dirty_files: None,
     })])
 }
 
@@ -463,7 +462,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(!e.file_paths.is_empty());
+                assert!(e.dirty_files.is_some());
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -654,8 +653,11 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/new_file.rs")]
                 );
-                // dirty_files removed from PreFileEdit; just verify the path is present
-                assert!(!e.file_paths.is_empty());
+                let df = e.dirty_files.as_ref().unwrap();
+                assert_eq!(
+                    df.get(&PathBuf::from("/home/user/project/src/new_file.rs")),
+                    Some(&String::new())
+                );
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -831,7 +833,9 @@ mod tests {
             .unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert!(!e.file_paths.is_empty());
+                assert!(e.dirty_files.is_some());
+                let df = e.dirty_files.as_ref().unwrap();
+                assert!(df.contains_key(&PathBuf::from("/home/user/project/src/main.rs")));
             }
             _ => panic!("Expected PreFileEdit"),
         }

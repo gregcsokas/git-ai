@@ -69,8 +69,8 @@ impl AgentPreset for ContinueCliPreset {
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
-                transcript_source,
                 dirty_files: None,
+                transcript_source,
             }),
         };
 
