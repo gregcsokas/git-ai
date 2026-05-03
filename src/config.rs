@@ -1024,6 +1024,7 @@ fn is_executable(path: &Path) -> bool {
 /// Check whether two paths refer to the same underlying file.
 /// On Unix this compares (dev, ino); on other platforms it falls back to
 /// comparing canonicalized paths.
+#[cfg(not(windows))]
 fn same_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
