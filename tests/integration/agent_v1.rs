@@ -30,7 +30,14 @@ fn test_agent_v1_human_checkpoint_with_dirty_files() {
                 e.file_paths,
                 vec![PathBuf::from("/Users/test/project/file.ts")]
             );
-            // dirty_files was removed from PreFileEdit in the checkpoint rewrite
+            let dirty_files = e.dirty_files.as_ref().unwrap();
+            assert_eq!(dirty_files.len(), 1);
+            assert_eq!(
+                dirty_files
+                    .get(&PathBuf::from("/Users/test/project/file.ts"))
+                    .unwrap(),
+                "console.log('hello');"
+            );
         }
         _ => panic!("Expected PreFileEdit for human checkpoint"),
     }
@@ -64,7 +71,14 @@ fn test_agent_v1_ai_agent_checkpoint_with_dirty_files() {
                 e.file_paths,
                 vec![PathBuf::from("/Users/test/project/file.ts")]
             );
-            // dirty_files was removed from PostFileEdit in the checkpoint rewrite
+            let dirty_files = e.dirty_files.as_ref().unwrap();
+            assert_eq!(dirty_files.len(), 1);
+            assert_eq!(
+                dirty_files
+                    .get(&PathBuf::from("/Users/test/project/file.ts"))
+                    .unwrap(),
+                "console.log('hello');"
+            );
             // Inline transcripts removed - should now be None
             assert!(e.transcript_source.is_none());
         }
@@ -85,6 +99,7 @@ fn test_agent_v1_human_checkpoint_without_dirty_files() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PreFileEdit(e) => {
+            assert!(e.dirty_files.is_none());
             assert_eq!(
                 e.file_paths,
                 vec![PathBuf::from("/Users/test/project/file.ts")]
@@ -111,6 +126,7 @@ fn test_agent_v1_ai_agent_checkpoint_without_dirty_files() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.dirty_files.is_none());
             assert_eq!(
                 e.file_paths,
                 vec![PathBuf::from("/Users/test/project/file.ts")]
@@ -144,7 +160,20 @@ fn test_agent_v1_dirty_files_multiple_files() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
-            // dirty_files was removed from PostFileEdit in the checkpoint rewrite
+            let dirty_files = e.dirty_files.as_ref().unwrap();
+            assert_eq!(dirty_files.len(), 2);
+            assert_eq!(
+                dirty_files
+                    .get(&PathBuf::from("/Users/test/project/file1.ts"))
+                    .unwrap(),
+                "content1"
+            );
+            assert_eq!(
+                dirty_files
+                    .get(&PathBuf::from("/Users/test/project/file2.ts"))
+                    .unwrap(),
+                "content2"
+            );
             assert_eq!(e.file_paths.len(), 2);
         }
         _ => panic!("Expected PostFileEdit"),

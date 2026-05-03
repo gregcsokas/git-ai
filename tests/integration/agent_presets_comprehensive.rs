@@ -837,8 +837,13 @@ fn test_aitab_preset_with_dirty_files() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
-            // dirty_files was removed from PostFileEdit in the checkpoint rewrite
-            assert!(e.transcript_source.is_none());
+            assert!(e.dirty_files.is_some());
+            let dirty = e.dirty_files.as_ref().unwrap();
+            assert_eq!(dirty.len(), 2);
+            assert_eq!(
+                dirty.get(&std::path::PathBuf::from("/file1.rs")),
+                Some(&"content1".to_string())
+            );
         }
         _ => panic!("Expected PostFileEdit"),
     }
