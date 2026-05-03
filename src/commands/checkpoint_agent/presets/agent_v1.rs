@@ -66,7 +66,7 @@ impl AgentPreset for AgentV1Preset {
                         metadata: HashMap::new(),
                     },
                     file_paths,
-                    content_overrides: None,
+                    dirty_files: None,
                 })
             }
             AgentV1Payload::AiAgent {
@@ -100,7 +100,7 @@ impl AgentPreset for AgentV1Preset {
                     },
                     file_paths,
                     transcript_source: None,
-                    content_overrides: None,
+                    dirty_files: None,
                 })
             }
         };

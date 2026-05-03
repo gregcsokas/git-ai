@@ -65,7 +65,7 @@ impl AgentPreset for GeminiPreset {
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
-                content_overrides: None,
+                dirty_files: None,
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -76,7 +76,7 @@ impl AgentPreset for GeminiPreset {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
                 transcript_source,
-                content_overrides: None,
+                dirty_files: None,
             }),
         };
 

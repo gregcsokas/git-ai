@@ -172,7 +172,7 @@ impl AgentPreset for CodexPreset {
                     ParsedHookEvent::PreFileEdit(PreFileEdit {
                         context,
                         file_paths,
-                        content_overrides: None,
+                        dirty_files: None,
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(
@@ -201,7 +201,7 @@ impl AgentPreset for CodexPreset {
                         context,
                         file_paths,
                         transcript_source,
-                        content_overrides: None,
+                        dirty_files: None,
                     })
                 } else if tool_name.is_none() {
                     // Legacy/structured format: no tool_name means agent turn complete
@@ -210,7 +210,7 @@ impl AgentPreset for CodexPreset {
                         context,
                         file_paths,
                         transcript_source,
-                        content_overrides: None,
+                        dirty_files: None,
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(
@@ -225,7 +225,7 @@ impl AgentPreset for CodexPreset {
                     context,
                     file_paths,
                     transcript_source,
-                    content_overrides: None,
+                    dirty_files: None,
                 })
             }
             _ => {

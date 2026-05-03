@@ -116,7 +116,17 @@ fn execute_event(
 }
 
 fn execute_pre_file_edit(e: PreFileEdit) -> Result<Option<CheckpointRequest>, GitAiError> {
-    let files = build_file_entries_with_content(&e.file_paths, e.content_overrides.as_ref())?;
+    if let Some(ref df) = e.dirty_files {
+        for key in df.keys() {
+            if !key.is_absolute() {
+                return Err(GitAiError::PresetError(format!(
+                    "dirty_files key must be an absolute path: {}",
+                    key.display()
+                )));
+            }
+        }
+    }
+    let files = build_file_entries_with_content(&e.file_paths, e.dirty_files.as_ref())?;
     if files.is_empty() {
         return Ok(None);
     }
@@ -135,7 +145,17 @@ fn execute_post_file_edit(
     e: PostFileEdit,
     preset_name: &str,
 ) -> Result<Option<CheckpointRequest>, GitAiError> {
-    let files = build_file_entries_with_content(&e.file_paths, e.content_overrides.as_ref())?;
+    if let Some(ref df) = e.dirty_files {
+        for key in df.keys() {
+            if !key.is_absolute() {
+                return Err(GitAiError::PresetError(format!(
+                    "dirty_files key must be an absolute path: {}",
+                    key.display()
+                )));
+            }
+        }
+    }
+    let files = build_file_entries_with_content(&e.file_paths, e.dirty_files.as_ref())?;
     if files.is_empty() {
         return Ok(None);
     }

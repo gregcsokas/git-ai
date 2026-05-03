@@ -68,7 +68,7 @@ pub(super) fn parse_legacy_extension_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: will_edit_filepaths,
-            content_overrides: None,
+            dirty_files: None,
         })]);
     }
 
@@ -130,7 +130,7 @@ pub(super) fn parse_legacy_extension_hooks(
         context,
         file_paths: edited_filepaths,
         transcript_source,
-        content_overrides: None,
+        dirty_files: None,
     })])
 }
 
@@ -261,7 +261,7 @@ pub(super) fn parse_vscode_native_hooks(
             }
 
             // For create_file PreToolUse, use empty content as override
-            let content_overrides: HashMap<PathBuf, String> = extracted_paths
+            let dirty_files: HashMap<PathBuf, String> = extracted_paths
                 .iter()
                 .map(|p| (p.clone(), String::new()))
                 .collect();
@@ -269,7 +269,7 @@ pub(super) fn parse_vscode_native_hooks(
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
-                content_overrides: Some(content_overrides),
+                dirty_files: Some(dirty_files),
             })]);
         }
 
@@ -283,7 +283,7 @@ pub(super) fn parse_vscode_native_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: extracted_paths,
-            content_overrides: None,
+            dirty_files: None,
         })]);
     }
 
@@ -307,7 +307,7 @@ pub(super) fn parse_vscode_native_hooks(
         context,
         file_paths: extracted_paths,
         transcript_source,
-        content_overrides: None,
+        dirty_files: None,
     })])
 }
 

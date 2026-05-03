@@ -173,7 +173,7 @@ impl AgentPreset for DroidPreset {
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
-                content_overrides: None,
+                dirty_files: None,
             })]);
         }
 
@@ -190,7 +190,7 @@ impl AgentPreset for DroidPreset {
             context,
             file_paths,
             transcript_source,
-            content_overrides: None,
+            dirty_files: None,
         })])
     }
 }

@@ -54,7 +54,7 @@ pub struct PreFileEdit {
     pub context: PresetContext,
     pub file_paths: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_overrides: Option<HashMap<PathBuf, String>>,
+    pub dirty_files: Option<HashMap<PathBuf, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +63,7 @@ pub struct PostFileEdit {
     pub file_paths: Vec<PathBuf>,
     pub transcript_source: Option<TranscriptSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_overrides: Option<HashMap<PathBuf, String>>,
+    pub dirty_files: Option<HashMap<PathBuf, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
