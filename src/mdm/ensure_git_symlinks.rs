@@ -36,15 +36,13 @@ pub fn ensure_git_symlinks() -> Result<(), GitAiError> {
     // Create symlink: base_dir/libexec -> /usr/libexec
     let symlink_path = base_dir.join("libexec");
 
-    // Remove existing symlink/junction/directory if present
+    // Remove existing symlink/junction if present
     if symlink_path.exists() || symlink_path.symlink_metadata().is_ok() {
+        // On Windows, junctions are directories, so use remove_dir
         #[cfg(windows)]
         {
-            // Try remove_dir (works for empty dirs and junctions), then remove_dir_all
-            // (works for copied directories), then remove_file (for file symlinks).
-            if std::fs::remove_dir(&symlink_path).is_err()
-                && std::fs::remove_dir_all(&symlink_path).is_err()
-            {
+            // Try remove_dir first (for junctions), then remove_file (for symlinks)
+            if std::fs::remove_dir(&symlink_path).is_err() {
                 let _ = std::fs::remove_file(&symlink_path);
             }
         }
@@ -56,11 +54,7 @@ pub fn ensure_git_symlinks() -> Result<(), GitAiError> {
     std::os::unix::fs::symlink(libexec_target, &symlink_path)?;
 
     #[cfg(windows)]
-    {
-        if create_junction(&symlink_path, libexec_target).is_err() {
-            copy_dir_recursive(libexec_target, &symlink_path)?;
-        }
-    }
+    create_junction(&symlink_path, libexec_target)?;
 
     Ok(())
 }
@@ -93,21 +87,5 @@ fn create_junction(
         )));
     }
 
-    Ok(())
-}
-
-#[cfg(windows)]
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), GitAiError> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let entry_path = entry.path();
-        let dest_path = dst.join(entry.file_name());
-        if entry_path.is_dir() {
-            copy_dir_recursive(&entry_path, &dest_path)?;
-        } else {
-            std::fs::copy(&entry_path, &dest_path)?;
-        }
-    }
     Ok(())
 }
