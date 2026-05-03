@@ -416,8 +416,7 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    let elapsed = checkpoint_start.elapsed();
-    eprintln!("Checkpoint dispatched in {:?}", elapsed);
+    let _elapsed = checkpoint_start.elapsed();
 }
 
 fn strip_utf8_bom(input: String) -> String {

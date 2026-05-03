@@ -1053,11 +1053,6 @@ fn daemon_test_mode_git_ai_checkpoint_runs_via_daemon() {
         "daemon-mode checkpoint should not run the local checkpoint implementation: {}",
         output
     );
-    assert!(
-        output.contains("Checkpoint dispatched"),
-        "explicit-path daemon-mode checkpoint should queue asynchronously: {}",
-        output
-    );
 
     repo.wait_for_next_daemon_checkpoint_completion(completion_baseline);
 
