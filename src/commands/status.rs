@@ -57,8 +57,12 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
 
     let working_log = repo.storage.working_log_for_base_commit(&head_sha)?;
     let checkpoints = working_log.read_all_checkpoints()?;
+    let initial_attributions = working_log.read_initial_attributions();
 
-    if checkpoints.is_empty() {
+    let has_checkpoints = !checkpoints.is_empty();
+    let has_initial = !initial_attributions.files.is_empty();
+
+    if !has_checkpoints && !has_initial {
         if json {
             let output = StatusOutput {
                 stats: CommitStats::default(),
