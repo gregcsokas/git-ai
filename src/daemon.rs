@@ -3891,7 +3891,7 @@ impl ActorDaemonCoordinator {
         // shutdown_notify); we no longer rely on channel closure to stop it.
         self.shutdown_notify.notify_waiters();
         if let Some(transcript_shutdown) = self.transcript_shutdown_notify.get() {
-            transcript_shutdown.notify_waiters();
+            transcript_shutdown.notify_one();
         }
         // Hold the condvar mutex so notify_all cannot race with the
         // check-then-wait sequence in daemon_update_check_loop.
