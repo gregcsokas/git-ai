@@ -5,30 +5,25 @@ use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::{
     generate_session_id, generate_short_hash, generate_trace_id,
 };
-use crate::authorship::ignore::{
-    IgnoreMatcher, build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
-};
 use crate::authorship::imara_diff_utils::{
     LineChangeTag, compute_line_changes, normalize_line_endings,
 };
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
-use crate::commands::checkpoint_agent::orchestrator::{BaseCommit, CheckpointRequest};
+use crate::commands::checkpoint_agent::orchestrator::{CheckpointRequest};
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
 use crate::git::repository::Repository;
-use crate::git::status::{EntryKind, StatusCode};
-use crate::utils::normalize_to_posix;
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use unicode_normalization::UnicodeNormalization;
+use std::time::Instant;
+#[cfg(not(any(test, feature = "test-support")))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Per-file line statistics (in-memory only, not persisted)
 #[derive(Debug, Clone, Default)]
@@ -88,18 +83,11 @@ pub enum PreparedPathRole {
 }
 
 #[derive(Debug, Clone)]
-struct ResolvedCheckpointExecution {
-    base_commit: String,
-    ts: u128,
-    files: Vec<String>,
-    dirty_files: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[doc(hidden)]
-pub enum BaseOverrideResolutionPolicy {
-    AllowFallback,
-    RequireExplicitSnapshot,
+pub struct ResolvedCheckpointExecution {
+    pub base_commit: String,
+    pub ts: u128,
+    pub files: Vec<String>,
+    pub dirty_files: HashMap<String, String>,
 }
 
 /// Build EventAttributes with repo metadata.
@@ -151,551 +139,25 @@ fn build_checkpoint_attrs(
     attrs
 }
 
-pub fn explicit_capture_target_paths(
-    _kind: CheckpointKind,
-    checkpoint_request: Option<&CheckpointRequest>,
-) -> Option<(PreparedPathRole, Vec<String>)> {
-    let result = checkpoint_request?;
-    if result.files.is_empty() {
-        return None;
-    }
-
-    let paths: Vec<String> = result
-        .files
-        .iter()
-        .map(|f| f.path.to_string_lossy().to_string())
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect();
-
-    if paths.is_empty() {
-        None
-    } else {
-        Some((result.path_role, paths))
-    }
-}
-
-fn resolve_base_commit(repo: &Repository, base_commit_override: Option<&str>) -> String {
-    base_commit_override
-        .filter(|base| !base.trim().is_empty())
-        .map(|base| base.to_string())
-        .unwrap_or_else(|| match repo.head() {
-            Ok(head) => match head.target() {
-                Ok(oid) => oid,
-                Err(_) => "initial".to_string(),
-            },
-            Err(_) => "initial".to_string(),
-        })
-}
-
-pub fn run(
+pub fn execute_resolved_checkpoint_from_daemon(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    quiet: bool,
-    checkpoint_request: Option<CheckpointRequest>,
-) -> Result<(usize, usize, usize), GitAiError> {
-    run_with_base_commit_override(repo, author, kind, quiet, checkpoint_request, None)
-}
-
-pub fn run_with_base_commit_override(
-    repo: &Repository,
-    author: &str,
-    kind: CheckpointKind,
-    quiet: bool,
-    checkpoint_request: Option<CheckpointRequest>,
-    base_commit_override: Option<&str>,
-) -> Result<(usize, usize, usize), GitAiError> {
-    run_with_base_commit_override_with_policy(
-        repo,
-        author,
-        kind,
-        quiet,
-        checkpoint_request,
-        base_commit_override,
-        BaseOverrideResolutionPolicy::AllowFallback,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-#[doc(hidden)]
-pub fn run_with_base_commit_override_with_policy(
-    repo: &Repository,
-    author: &str,
-    kind: CheckpointKind,
-    quiet: bool,
-    checkpoint_request: Option<CheckpointRequest>,
-    base_commit_override: Option<&str>,
-    base_override_resolution_policy: BaseOverrideResolutionPolicy,
-) -> Result<(usize, usize, usize), GitAiError> {
+    checkpoint_request: CheckpointRequest,
+    resolved: ResolvedCheckpointExecution,
+) -> Result<(), GitAiError> {
     let checkpoint_start = Instant::now();
-    tracing::debug!("[BENCHMARK] Starting checkpoint run");
-    let resolved = resolve_live_checkpoint_execution(
-        repo,
-        kind,
-        checkpoint_request.as_ref(),
-        base_commit_override,
-        base_override_resolution_policy,
-    )?;
-    let Some(resolved) = resolved else {
-        tracing::debug!(
-            "[BENCHMARK] Total checkpoint run took {:?}",
-            checkpoint_start.elapsed()
-        );
-        return Ok((0, 0, 0));
-    };
-
+    tracing::debug!("[BENCHMARK] Starting daemon replay checkpoint");
     execute_resolved_checkpoint(
         repo,
         author,
         kind,
-        quiet,
+        true,
         checkpoint_request,
         resolved,
         checkpoint_start,
     )
-}
-
-fn filtered_pathspecs_for_checkpoint_request(
-    repo: &Repository,
-    kind: CheckpointKind,
-    checkpoint_request: Option<&CheckpointRequest>,
-) -> Option<Vec<String>> {
-    let (_, paths) = explicit_capture_target_paths(kind, checkpoint_request)?;
-    let repo_workdir = repo.workdir().ok()?;
-
-    let filtered = paths
-        .into_iter()
-        .filter_map(|path| {
-            let path_buf = if std::path::Path::new(&path).is_absolute() {
-                std::path::PathBuf::from(&path)
-            } else {
-                repo_workdir.join(&path)
-            };
-
-            if repo.path_is_in_workdir(&path_buf) {
-                if std::path::Path::new(&path).is_absolute() {
-                    if let Ok(relative) = path_buf.strip_prefix(&repo_workdir) {
-                        Some(normalize_to_posix(&relative.to_string_lossy()))
-                    } else {
-                        let canonical_workdir = repo_workdir.canonicalize().ok()?;
-                        let canonical_path = path_buf.canonicalize().ok()?;
-                        canonical_path
-                            .strip_prefix(&canonical_workdir)
-                            .ok()
-                            .map(|relative| normalize_to_posix(&relative.to_string_lossy()))
-                    }
-                } else {
-                    Some(normalize_to_posix(&path))
-                }
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if filtered.is_empty() {
-        None
-    } else {
-        Some(filtered)
-    }
-}
-
-fn resolve_base_override_dirty_file_execution(
-    base_commit: &str,
-    ts: u128,
-    edited_filepaths: &[String],
-    dirty_files: &HashMap<String, String>,
-    ignore_matcher: &IgnoreMatcher,
-) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
-    let normalized_dirty_files = dirty_files
-        .iter()
-        .map(|(path, content)| (normalize_to_posix(path), content.clone()))
-        .collect::<HashMap<_, _>>();
-    let mut files = Vec::new();
-    let mut resolved_dirty_files = HashMap::new();
-    let mut missing_paths = Vec::new();
-
-    for path in edited_filepaths {
-        if should_ignore_file_with_matcher(path, ignore_matcher) {
-            continue;
-        }
-        let Some(content) = normalized_dirty_files.get(path).cloned() else {
-            missing_paths.push(path.clone());
-            continue;
-        };
-        files.push(path.clone());
-        resolved_dirty_files.insert(path.clone(), content);
-    }
-
-    if !missing_paths.is_empty() {
-        return Err(GitAiError::Generic(format!(
-            "base override requires dirty snapshot entries for explicit file(s): {}",
-            missing_paths.join(", ")
-        )));
-    }
-
-    if files.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(ResolvedCheckpointExecution {
-            base_commit: base_commit.to_string(),
-            ts,
-            files,
-            dirty_files: resolved_dirty_files,
-        }))
-    }
-}
-
-fn explicit_dirty_file_content_if_text(
-    working_log: &PersistedWorkingLog,
-    file_path: &str,
-) -> Option<String> {
-    working_log
-        .dirty_files
-        .as_ref()
-        .and_then(|files| files.get(file_path))
-        .filter(|content| !content.chars().any(|c| c == '\0'))
-        .cloned()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn resolve_explicit_path_execution(
-    repo: &Repository,
-    working_log: &PersistedWorkingLog,
-    base_commit: &str,
-    ts: u128,
-    explicit_paths: &[String],
-    ignore_matcher: &IgnoreMatcher,
-    _kind: CheckpointKind,
-    checkpoint_request: Option<&CheckpointRequest>,
-) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
-    let repo_workdir = repo.workdir()?;
-    let mut candidate_paths = Vec::new();
-    let mut seen = HashSet::new();
-
-    for path in explicit_paths {
-        let normalized_path = normalize_to_posix(path);
-        if !seen.insert(normalized_path.clone()) {
-            continue;
-        }
-        if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-            continue;
-        }
-
-        let path_buf = if std::path::Path::new(&normalized_path).is_absolute() {
-            PathBuf::from(&normalized_path)
-        } else {
-            repo_workdir.join(&normalized_path)
-        };
-        if !repo.path_is_in_workdir(&path_buf) {
-            continue;
-        }
-
-        candidate_paths.push(normalized_path);
-    }
-
-    if candidate_paths.is_empty() {
-        return Ok(None);
-    }
-
-    // Fast path: when the orchestrator already captured file content for every
-    // file in the CheckpointRequest, we can skip the git-status subprocess
-    // entirely. Unmerged files were already filtered by build_checkpoint_files
-    // upstream. If any file has content: None (binary/unreadable), fall through
-    // to the status-based path which knows how to handle those cases.
-    let all_files_have_content = checkpoint_request
-        .map(|r| r.files.iter().all(|f| f.content.is_some()))
-        .unwrap_or(false);
-    if all_files_have_content && let Some(request) = checkpoint_request {
-        let content_by_path: HashMap<&str, Option<&str>> = request
-            .files
-            .iter()
-            .map(|f| (f.path.to_str().unwrap_or_default(), f.content.as_deref()))
-            .collect();
-
-        let mut files = Vec::new();
-        let mut resolved_dirty_files = HashMap::new();
-
-        for normalized_path in &candidate_paths {
-            let abs_path = if std::path::Path::new(normalized_path.as_str()).is_absolute() {
-                normalized_path.clone()
-            } else {
-                repo_workdir
-                    .join(normalized_path)
-                    .to_string_lossy()
-                    .to_string()
-            };
-
-            if let Some(maybe_content) = content_by_path.get(abs_path.as_str()) {
-                if let Some(content) = maybe_content
-                    && !content.chars().any(|c| c == '\0')
-                {
-                    resolved_dirty_files.insert(normalized_path.clone(), content.to_string());
-                    files.push(normalized_path.clone());
-                }
-            } else {
-                let explicit_dirty_content =
-                    explicit_dirty_file_content_if_text(working_log, normalized_path);
-                if let Some(content) = explicit_dirty_content {
-                    resolved_dirty_files.insert(normalized_path.clone(), content);
-                    files.push(normalized_path.clone());
-                }
-            }
-        }
-
-        return if files.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(ResolvedCheckpointExecution {
-                base_commit: base_commit.to_string(),
-                ts,
-                files,
-                dirty_files: resolved_dirty_files,
-            }))
-        };
-    }
-
-    let status_pathspecs = candidate_paths.iter().cloned().collect::<HashSet<_>>();
-    let explicit_statuses = repo
-        .status(Some(&status_pathspecs), false)?
-        .into_iter()
-        .map(|entry| (entry.path.clone(), entry))
-        .collect::<HashMap<_, _>>();
-    let preserve_unchanged_explicit_paths = false;
-
-    let mut files = Vec::new();
-    let mut resolved_dirty_files = HashMap::new();
-
-    for normalized_path in candidate_paths {
-        // Status output uses NFC paths; the normalized_path may be NFD on some
-        // filesystems, so look up with NFC to handle the mismatch.
-        let nfc_key: String = normalized_path.nfc().collect();
-        let status_entry = explicit_statuses.get(&nfc_key);
-        if matches!(status_entry, Some(entry) if entry.kind == EntryKind::Unmerged) {
-            continue;
-        }
-
-        let explicit_dirty_content =
-            explicit_dirty_file_content_if_text(working_log, &normalized_path);
-        if status_entry.is_none()
-            && explicit_dirty_content.is_none()
-            && !preserve_unchanged_explicit_paths
-        {
-            continue;
-        }
-
-        if let Some(content) = explicit_dirty_content {
-            resolved_dirty_files.insert(normalized_path.clone(), content);
-            files.push(normalized_path);
-            continue;
-        }
-
-        let is_deleted = matches!(
-            status_entry,
-            Some(entry)
-                if entry.staged == StatusCode::Deleted || entry.unstaged == StatusCode::Deleted
-        );
-
-        if is_text_file(working_log, &normalized_path)
-            || (is_deleted && is_text_file_in_head(repo, &normalized_path))
-        {
-            files.push(normalized_path);
-        }
-    }
-
-    if files.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(ResolvedCheckpointExecution {
-            base_commit: base_commit.to_string(),
-            ts,
-            files,
-            dirty_files: resolved_dirty_files,
-        }))
-    }
-}
-
-fn resolve_live_checkpoint_execution(
-    repo: &Repository,
-    kind: CheckpointKind,
-    checkpoint_request: Option<&CheckpointRequest>,
-    base_commit_override: Option<&str>,
-    base_override_resolution_policy: BaseOverrideResolutionPolicy,
-) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
-    let base_commit = if base_commit_override.is_none()
-        && let Some(request) = checkpoint_request
-        && let Some(first_file) = request.files.first()
-    {
-        match &first_file.base_commit {
-            BaseCommit::Sha(sha) => sha.clone(),
-            BaseCommit::Initial => "initial".to_string(),
-        }
-    } else {
-        resolve_base_commit(repo, base_commit_override)
-    };
-
-    if repo.workdir().is_err() {
-        eprintln!("Cannot run checkpoint on bare repositories");
-        return Err(GitAiError::Generic(
-            "Cannot run checkpoint on bare repositories".to_string(),
-        ));
-    }
-
-    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
-    let ignore_matcher = build_ignore_matcher(&ignore_patterns);
-
-    let storage_start = Instant::now();
-    let repo_storage = repo.storage.clone();
-    let mut working_log = repo_storage.working_log_for_base_commit(&base_commit)?;
-    tracing::debug!(
-        "[BENCHMARK] Storage initialization took {:?}",
-        storage_start.elapsed()
-    );
-
-    if let Some(request) = checkpoint_request {
-        let dirty_files: HashMap<String, String> = request
-            .files
-            .iter()
-            .filter_map(|f| {
-                f.content
-                    .as_ref()
-                    .map(|content| (f.path.to_string_lossy().to_string(), content.clone()))
-            })
-            .collect();
-        if !dirty_files.is_empty() {
-            working_log.set_dirty_files(Some(dirty_files));
-        }
-    }
-
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-
-    let has_explicit_target_paths =
-        explicit_capture_target_paths(kind, checkpoint_request).is_some();
-    let pathspec_start = Instant::now();
-    let filtered_pathspec =
-        filtered_pathspecs_for_checkpoint_request(repo, kind, checkpoint_request);
-    tracing::debug!(
-        "[BENCHMARK] Pathspec filtering took {:?}",
-        pathspec_start.elapsed()
-    );
-
-    // Base-override replays already provide the exact file list and content snapshot that
-    // should be checkpointed. Re-running git status here turns daemon commit replay into a
-    // full worktree scan on every commit, which is especially expensive on macOS runners.
-    if base_commit_override.is_some() {
-        let dirty_files_for_override = checkpoint_request
-            .map(|result| {
-                result
-                    .files
-                    .iter()
-                    .filter_map(|f| {
-                        f.content
-                            .as_ref()
-                            .map(|content| (f.path.to_string_lossy().to_string(), content.clone()))
-                    })
-                    .collect::<HashMap<_, _>>()
-            })
-            .filter(|m: &HashMap<_, _>| !m.is_empty());
-        match (
-            filtered_pathspec.as_ref(),
-            dirty_files_for_override.as_ref(),
-        ) {
-            (Some(explicit_paths), Some(dirty_files)) => {
-                match resolve_base_override_dirty_file_execution(
-                    &base_commit,
-                    ts,
-                    explicit_paths,
-                    dirty_files,
-                    &ignore_matcher,
-                ) {
-                    Ok(Some(resolved)) => {
-                        tracing::debug!(
-                            "[BENCHMARK] Reusing {} explicit dirty file(s) for base override checkpoint",
-                            resolved.files.len()
-                        );
-                        return Ok(Some(resolved));
-                    }
-                    Ok(None) => {
-                        if base_override_resolution_policy
-                            == BaseOverrideResolutionPolicy::RequireExplicitSnapshot
-                        {
-                            return Ok(None);
-                        }
-                    }
-                    Err(e) => {
-                        if base_override_resolution_policy
-                            == BaseOverrideResolutionPolicy::RequireExplicitSnapshot
-                        {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-            _ if base_override_resolution_policy
-                == BaseOverrideResolutionPolicy::RequireExplicitSnapshot =>
-            {
-                return Err(GitAiError::Generic(
-                    "base override replay requires explicit in-repository target paths and a matching dirty snapshot".to_string(),
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    if has_explicit_target_paths {
-        return if let Some(explicit_paths) = filtered_pathspec.as_ref() {
-            resolve_explicit_path_execution(
-                repo,
-                &working_log,
-                &base_commit,
-                ts,
-                explicit_paths,
-                &ignore_matcher,
-                kind,
-                checkpoint_request,
-            )
-        } else {
-            Ok(None)
-        };
-    }
-
-    let files_start = Instant::now();
-    let files = get_all_tracked_files(
-        repo,
-        &base_commit,
-        &working_log,
-        filtered_pathspec.as_ref(),
-        false,
-        false,
-        &ignore_matcher,
-    )?;
-    tracing::debug!(
-        "[BENCHMARK] get_all_tracked_files found {} files, took {:?}",
-        files.len(),
-        files_start.elapsed()
-    );
-
-    let dirty_files = files
-        .iter()
-        .filter_map(|file_path| {
-            working_log
-                .dirty_files
-                .as_ref()
-                .and_then(|map| map.get(file_path).cloned())
-                .map(|content| (file_path.clone(), content))
-        })
-        .collect::<HashMap<_, _>>();
-
-    Ok(Some(ResolvedCheckpointExecution {
-        base_commit,
-        ts,
-        files,
-        dirty_files,
-    }))
+    .map(|_| ())
 }
 
 fn execute_resolved_checkpoint(
@@ -703,7 +165,7 @@ fn execute_resolved_checkpoint(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    checkpoint_request: Option<CheckpointRequest>,
+    checkpoint_request: CheckpointRequest,
     resolved: ResolvedCheckpointExecution,
     checkpoint_start: Instant,
 ) -> Result<(usize, usize, usize), GitAiError> {
@@ -783,7 +245,7 @@ fn execute_resolved_checkpoint(
         &resolved.files,
         &file_content_hashes,
         &checkpoints,
-        checkpoint_request.as_ref(),
+        &checkpoint_request,
         resolved.ts,
         Some(resolved.base_commit.as_str()),
         trace_id.clone(),
@@ -807,25 +269,22 @@ fn execute_resolved_checkpoint(
         checkpoint.trace_id = Some(trace_id.clone());
 
         if kind.is_ai() {
-            if let Some(cr) = &checkpoint_request {
-                checkpoint.agent_id = cr.agent_id.clone();
-                checkpoint.agent_metadata = if cr.metadata.is_empty() {
-                    None
-                } else {
-                    Some(cr.metadata.clone())
-                };
-            }
+            checkpoint.agent_id = checkpoint_request.agent_id.clone();
+            checkpoint.agent_metadata = if checkpoint_request.metadata.is_empty() {
+                None
+            } else {
+                Some(checkpoint_request.metadata.clone())
+            };
         } else if kind == CheckpointKind::KnownHuman
-            && let Some(cr) = &checkpoint_request
-            && !cr.metadata.is_empty()
+            && !checkpoint_request.metadata.is_empty()
         {
-            let editor = cr.metadata.get("kh_editor").cloned().unwrap_or_default();
-            let editor_version = cr
+            let editor = checkpoint_request.metadata.get("kh_editor").cloned().unwrap_or_default();
+            let editor_version = checkpoint_request
                 .metadata
                 .get("kh_editor_version")
                 .cloned()
                 .unwrap_or_default();
-            let extension_version = cr
+            let extension_version = checkpoint_request
                 .metadata
                 .get("kh_extension_version")
                 .cloned()
@@ -864,8 +323,8 @@ fn execute_resolved_checkpoint(
         // tool_use_id tracks specific tool invocations (e.g., bash tool calls from AI agents)
         // Allows linking checkpoint events to the exact tool use that triggered them
         let tool_use_id = checkpoint_request
-            .as_ref()
-            .and_then(|cr| cr.metadata.get("tool_use_id"))
+            .metadata
+            .get("tool_use_id")
             .map(|s| s.as_str());
 
         for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
@@ -888,11 +347,8 @@ fn execute_resolved_checkpoint(
         }
     }
 
-    let agent_tool = if kind.is_ai()
-        && let Some(cr) = &checkpoint_request
-        && let Some(aid) = &cr.agent_id
-    {
-        Some(aid.tool.as_str())
+    let agent_tool = if kind.is_ai() {
+        checkpoint_request.agent_id.as_ref().map(|aid| aid.tool.as_str())
     } else {
         None
     };
@@ -936,231 +392,6 @@ fn execute_resolved_checkpoint(
     Ok((entries.len(), resolved.files.len(), checkpoints.len()))
 }
 
-// Gets tracked changes AND
-fn get_status_of_files(
-    repo: &Repository,
-    working_log: &PersistedWorkingLog,
-    edited_filepaths: HashSet<String>,
-    skip_untracked: bool,
-    ignore_matcher: &IgnoreMatcher,
-) -> Result<Vec<String>, GitAiError> {
-    let mut files = Vec::new();
-
-    // Use porcelain v2 format to get status
-
-    let edited_filepaths_option = if edited_filepaths.is_empty() {
-        None
-    } else {
-        Some(&edited_filepaths)
-    };
-
-    let status_start = Instant::now();
-    let statuses = repo.status(edited_filepaths_option, skip_untracked)?;
-    tracing::debug!(
-        "[BENCHMARK]   git status call took {:?}",
-        status_start.elapsed()
-    );
-
-    for entry in statuses {
-        // Skip ignored files
-        if entry.kind == EntryKind::Ignored {
-            continue;
-        }
-
-        if should_ignore_file_with_matcher(&entry.path, ignore_matcher) {
-            continue;
-        }
-
-        // Skip unmerged/conflicted files - we'll track them once the conflict is resolved
-        if entry.kind == EntryKind::Unmerged {
-            continue;
-        }
-
-        // Include files that have any change (staged or unstaged) or are untracked
-        let has_change = entry.staged != StatusCode::Unmodified
-            || entry.unstaged != StatusCode::Unmodified
-            || entry.kind == EntryKind::Untracked;
-
-        if has_change {
-            // For deleted files, check if they were text files in HEAD
-            let is_deleted =
-                entry.staged == StatusCode::Deleted || entry.unstaged == StatusCode::Deleted;
-
-            let is_text = if is_deleted {
-                is_text_file_in_head(repo, &entry.path)
-            } else {
-                is_text_file(working_log, &entry.path)
-            };
-
-            if is_text {
-                files.push(entry.path.clone());
-            }
-        }
-    }
-
-    Ok(files)
-}
-
-/// Get all files that should be tracked, including those from previous checkpoints and INITIAL attributions
-///
-fn get_all_tracked_files(
-    repo: &Repository,
-    _base_commit: &str,
-    working_log: &PersistedWorkingLog,
-    edited_filepaths: Option<&Vec<String>>,
-    is_pre_commit: bool,
-    preserve_explicit_pre_commit_paths: bool,
-    ignore_matcher: &IgnoreMatcher,
-) -> Result<Vec<String>, GitAiError> {
-    let explicit_pre_commit_paths: HashSet<String> = edited_filepaths
-        .map(|paths| {
-            paths
-                .iter()
-                .map(|path| normalize_to_posix(path))
-                .filter(|path| !should_ignore_file_with_matcher(path, ignore_matcher))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut files = explicit_pre_commit_paths.clone();
-
-    // Helper closure to check if a path is within the repository
-    // This prevents crashes when files outside the repo were tracked (e.g., opened in IDE but not in repo)
-    // Use ok() to gracefully handle cases where workdir() fails (e.g., bare repos, test scripts that use mock_ai, etc)
-    let repo_workdir = repo.workdir().ok();
-    let is_path_in_repo = |path: &str| -> bool {
-        // If we couldn't get workdir, skip filtering (allow all paths through)
-        let Some(ref workdir) = repo_workdir else {
-            return true;
-        };
-        let path_buf = if std::path::Path::new(path).is_absolute() {
-            std::path::PathBuf::from(path)
-        } else {
-            workdir.join(path)
-        };
-        repo.path_is_in_workdir(&path_buf)
-    };
-
-    let initial_read_start = Instant::now();
-    for file in working_log.read_initial_attributions().files.keys() {
-        // Normalize path separators to forward slashes
-        let normalized_path = normalize_to_posix(file);
-        // Filter out paths outside the repository to prevent git command failures
-        if !is_path_in_repo(&normalized_path) {
-            tracing::debug!(
-                "Skipping INITIAL file outside repository: {}",
-                normalized_path
-            );
-            continue;
-        }
-        if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-            continue;
-        }
-        if is_text_file(working_log, &normalized_path) {
-            files.insert(normalized_path);
-        }
-    }
-    tracing::debug!(
-        "[BENCHMARK]   Reading INITIAL attributions in get_all_tracked_files took {:?}",
-        initial_read_start.elapsed()
-    );
-
-    let checkpoints_read_start = Instant::now();
-    if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        for checkpoint in &working_log_data {
-            for entry in &checkpoint.entries {
-                // Normalize path separators to forward slashes
-                let normalized_path = normalize_to_posix(&entry.file);
-                // Filter out paths outside the repository to prevent git command failures
-                if !is_path_in_repo(&normalized_path) {
-                    tracing::debug!(
-                        "Skipping checkpoint file outside repository: {}",
-                        normalized_path
-                    );
-                    continue;
-                }
-                if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-                    continue;
-                }
-                if !files.contains(&normalized_path) {
-                    // Check if it's a text file before adding
-                    if is_text_file(working_log, &normalized_path) {
-                        files.insert(normalized_path);
-                    }
-                }
-            }
-        }
-    }
-    tracing::debug!(
-        "[BENCHMARK]   Reading checkpoints in get_all_tracked_files took {:?}",
-        checkpoints_read_start.elapsed()
-    );
-
-    let has_ai_checkpoints = if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        working_log_data.iter().any(|checkpoint| {
-            checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
-        })
-    } else {
-        false
-    };
-
-    let status_files_start = Instant::now();
-    let mut results_for_tracked_files = if is_pre_commit && !has_ai_checkpoints {
-        get_status_of_files(repo, working_log, files, true, ignore_matcher)?
-    } else {
-        get_status_of_files(repo, working_log, files, false, ignore_matcher)?
-    };
-    tracing::debug!(
-        "[BENCHMARK]   get_status_of_files in get_all_tracked_files took {:?}",
-        status_files_start.elapsed()
-    );
-
-    // Ensure to always include all dirty files
-    if let Some(ref dirty_files) = working_log.dirty_files {
-        for file_path in dirty_files.keys() {
-            // Normalize path separators to forward slashes
-            let normalized_path = normalize_to_posix(file_path);
-            // Filter out paths outside the repository to prevent git command failures
-            if !is_path_in_repo(&normalized_path) {
-                tracing::debug!(
-                    "Skipping dirty file outside repository: {}",
-                    normalized_path
-                );
-                continue;
-            }
-            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-                continue;
-            }
-            // Only add if not already in the files list
-            if !results_for_tracked_files.contains(&normalized_path) {
-                // Check if it's a text file before adding
-                if is_text_file(working_log, &normalized_path) {
-                    results_for_tracked_files.push(normalized_path);
-                }
-            }
-        }
-    }
-
-    if preserve_explicit_pre_commit_paths {
-        for normalized_path in explicit_pre_commit_paths {
-            if !is_path_in_repo(&normalized_path) {
-                continue;
-            }
-            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-                continue;
-            }
-            if results_for_tracked_files.contains(&normalized_path) {
-                continue;
-            }
-            if is_text_file(working_log, &normalized_path)
-                || is_text_file_in_head(repo, &normalized_path)
-            {
-                results_for_tracked_files.push(normalized_path);
-            }
-        }
-    }
-
-    Ok(results_for_tracked_files)
-}
 
 fn save_current_file_states(
     working_log: &PersistedWorkingLog,
@@ -1168,22 +399,17 @@ fn save_current_file_states(
 ) -> Result<HashMap<String, String>, GitAiError> {
     let _read_start = Instant::now();
 
-    // Extract only the data we need (no cloning the entire working_log)
     let blobs_dir = working_log.dir.join("blobs");
-    let repo_workdir = working_log.repo_workdir.clone();
     let dirty_files = working_log.dirty_files.clone();
 
-    // Process files concurrently with a semaphore limiting to 8 at a time
     let file_content_hashes = smol::block_on(async {
         let semaphore = Arc::new(smol::lock::Semaphore::new(8));
         let blobs_dir = Arc::new(blobs_dir);
-        let repo_workdir = Arc::new(repo_workdir);
         let dirty_files = Arc::new(dirty_files);
 
         let futures = files.iter().map(|file_path| {
             let file_path = file_path.clone();
             let blobs_dir = Arc::clone(&blobs_dir);
-            let repo_workdir = Arc::clone(&repo_workdir);
             let dirty_files = Arc::clone(&dirty_files);
             let semaphore = Arc::clone(&semaphore);
 
@@ -1197,16 +423,12 @@ fn save_current_file_states(
                 } else {
                     None
                 }
-                .unwrap_or_else(|| {
-                    // Construct absolute path
-                    let abs_path = if std::path::Path::new(&file_path).is_absolute() {
-                        file_path.clone()
-                    } else {
-                        repo_workdir.join(&file_path).to_string_lossy().to_string()
-                    };
-                    // Read from filesystem
-                    std::fs::read_to_string(&abs_path).unwrap_or_default()
-                });
+                .ok_or_else(|| {
+                    GitAiError::Generic(format!(
+                        "save_current_file_states: file '{}' not found in dirty_files snapshot (filesystem fallback is not allowed in checkpoint flow)",
+                        file_path
+                    ))
+                })?;
 
                 // Create SHA256 hash of the content
                 let mut hasher = Sha256::new();
@@ -1571,7 +793,7 @@ async fn get_checkpoint_entries(
     files: &[String],
     file_content_hashes: &HashMap<String, String>,
     previous_checkpoints: &[Checkpoint],
-    checkpoint_request: Option<&CheckpointRequest>,
+    checkpoint_request: &CheckpointRequest,
     ts: u128,
     head_commit_override: Option<&str>,
     trace_id: String,
@@ -1581,15 +803,15 @@ async fn get_checkpoint_entries(
     // Read INITIAL attributions from working log (empty if file doesn't exist)
     let initial_read_start = Instant::now();
     let initial_data = working_log.read_initial_attributions();
-    let initial_snapshot_contents: HashMap<String, String> = initial_data
-        .files
-        .keys()
-        .filter_map(|file_path| {
-            working_log
-                .initial_file_content_from(&initial_data, file_path)
-                .map(|content| (file_path.clone(), content))
-        })
-        .collect();
+    let initial_snapshot_contents: HashMap<String, String> = {
+        let mut map = HashMap::new();
+        for file_path in initial_data.files.keys() {
+            if let Some(content) = working_log.initial_file_content_from(&initial_data, file_path)? {
+                map.insert(file_path.clone(), content);
+            }
+        }
+        map
+    };
     let initial_attributions = initial_data.files;
     tracing::debug!(
         "[BENCHMARK] Reading initial attributions took {:?}",
@@ -1613,7 +835,8 @@ async fn get_checkpoint_entries(
         _ => {
             // AI kinds: compose session_id::trace_id
             checkpoint_request
-                .and_then(|result| result.agent_id.as_ref())
+                .agent_id
+                .as_ref()
                 .map(|aid| {
                     let session_id = generate_session_id(&aid.id, &aid.tool);
                     format!("{}::{}", session_id, trace_id)
@@ -1886,62 +1109,3 @@ fn compute_line_stats(
     Ok(stats)
 }
 
-fn is_text_file(working_log: &PersistedWorkingLog, path: &str) -> bool {
-    // Normalize path for dirty_files lookup
-    let normalized_path = normalize_to_posix(path);
-    let skip_metadata_check = working_log
-        .dirty_files
-        .as_ref()
-        .map(|m| m.contains_key(&normalized_path))
-        .unwrap_or(false);
-
-    if !skip_metadata_check {
-        if let Ok(metadata) = std::fs::metadata(working_log.to_repo_absolute_path(&normalized_path))
-        {
-            if !metadata.is_file() {
-                return false;
-            }
-        } else {
-            return false; // If metadata can't be read, treat as non-text
-        }
-    }
-
-    working_log
-        .read_current_file_content(&normalized_path)
-        .map(|content| !content.chars().any(|c| c == '\0'))
-        .unwrap_or(false)
-}
-
-fn is_text_file_in_head(repo: &Repository, path: &str) -> bool {
-    // For deleted files, check if they were text files in HEAD
-    let head_commit = match repo
-        .head()
-        .ok()
-        .and_then(|h| h.target().ok())
-        .and_then(|oid| repo.find_commit(oid).ok())
-    {
-        Some(commit) => commit,
-        None => return false,
-    };
-
-    let head_tree = match head_commit.tree().ok() {
-        Some(tree) => tree,
-        None => return false,
-    };
-
-    match head_tree.get_path(std::path::Path::new(path)) {
-        Ok(entry) => {
-            if let Ok(blob) = repo.find_blob(entry.id()) {
-                // Consider a file text if it contains no null bytes
-                let blob_content = match blob.content() {
-                    Ok(content) => content,
-                    Err(_) => return false,
-                };
-                !blob_content.contains(&0)
-            } else {
-                false
-            }
-        }
-        Err(_) => false,
-    }
-}

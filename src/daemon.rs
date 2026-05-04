@@ -31,7 +31,7 @@ use crate::{
         rewrite_authorship_if_needed,
     },
     authorship::working_log::CheckpointKind,
-    commands::checkpoint::PreparedPathRole,
+    daemon::checkpoint::PreparedPathRole,
     commands::checkpoint_agent::orchestrator::CheckpointRequest,
     commands::hooks::{push_hooks, stash_hooks},
 };
@@ -66,6 +66,7 @@ use tokio::time::Duration;
 
 pub mod analyzers;
 pub mod bash_sessions;
+pub mod checkpoint;
 pub mod control_api;
 pub mod coordinator;
 pub mod domain;
@@ -1359,7 +1360,7 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
 
     if request.checkpoint_kind.is_ai()
         && let Some(ref agent_id) = request.agent_id
-        && crate::commands::checkpoint::should_emit_agent_usage(agent_id)
+        && crate::daemon::checkpoint::should_emit_agent_usage(agent_id)
     {
         let prompt_id = crate::authorship::authorship_log_serialization::generate_short_hash(
             &agent_id.id,
@@ -1385,8 +1386,103 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
     let repo = discover_repository_in_path_no_git_exec(repo_work_dir)?;
     let author = repo.git_author_identity().formatted_or_unknown();
 
-    crate::commands::checkpoint::run(&repo, &author, request.checkpoint_kind, true, Some(request))?;
-    Ok(())
+    let resolved = resolve_checkpoint_request(&repo, &request)?;
+    let Some(resolved) = resolved else {
+        return Ok(());
+    };
+
+    crate::daemon::checkpoint::execute_resolved_checkpoint_from_daemon(
+        &repo,
+        &author,
+        request.checkpoint_kind,
+        request,
+        resolved,
+    )
+}
+
+fn resolve_checkpoint_request(
+    repo: &crate::git::repository::Repository,
+    request: &CheckpointRequest,
+) -> Result<Option<crate::daemon::checkpoint::ResolvedCheckpointExecution>, GitAiError> {
+    use crate::authorship::ignore::{build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher};
+    use crate::commands::checkpoint_agent::orchestrator::BaseCommit;
+    use crate::utils::normalize_to_posix;
+
+    let Some(first_file) = request.files.first() else {
+        return Ok(None);
+    };
+    let base_commit = match &first_file.base_commit {
+        BaseCommit::Sha(sha) => sha.clone(),
+        BaseCommit::Initial => "initial".to_string(),
+    };
+
+    let repo_workdir = repo.workdir()?;
+    let canonical_workdir = repo_workdir.canonicalize().unwrap_or(repo_workdir.clone());
+    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let ignore_matcher = build_ignore_matcher(&ignore_patterns);
+
+    let mut files = Vec::new();
+    let mut dirty_files = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for file in &request.files {
+        let path_str = file.path.to_string_lossy();
+        let path_str = path_str.trim();
+        if path_str.is_empty() {
+            continue;
+        }
+
+        let abs_path = if file.path.is_absolute() {
+            file.path.clone()
+        } else {
+            repo_workdir.join(&*file.path)
+        };
+        if !repo.path_is_in_workdir(&abs_path) {
+            continue;
+        }
+
+        let relative_path = abs_path
+            .canonicalize()
+            .unwrap_or(abs_path.clone())
+            .strip_prefix(&canonical_workdir)
+            .map(|p| normalize_to_posix(&p.to_string_lossy()))
+            .unwrap_or_else(|_| {
+                abs_path
+                    .strip_prefix(&repo_workdir)
+                    .map(|p| normalize_to_posix(&p.to_string_lossy()))
+                    .unwrap_or_else(|_| normalize_to_posix(path_str))
+            });
+
+        if !seen.insert(relative_path.clone()) {
+            continue;
+        }
+        if should_ignore_file_with_matcher(&relative_path, &ignore_matcher) {
+            continue;
+        }
+
+        if let Some(content) = &file.content
+            && !content.chars().any(|c| c == '\0')
+        {
+            dirty_files.insert(relative_path.clone(), content.clone());
+            files.push(relative_path);
+        }
+    }
+
+    if files.is_empty() {
+        return Ok(None);
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    Ok(Some(crate::daemon::checkpoint::ResolvedCheckpointExecution {
+        base_commit,
+        ts,
+        files,
+        dirty_files,
+    }))
 }
 
 fn compute_watermarks_from_stat(
@@ -1760,7 +1856,7 @@ fn filter_commit_replay_files(
     working_log: &crate::git::repo_storage::PersistedWorkingLog,
     files: Vec<String>,
     dirty_files: HashMap<String, String>,
-) -> (Vec<String>, HashMap<String, String>) {
+) -> Result<(Vec<String>, HashMap<String, String>), GitAiError> {
     let mut selected_files = Vec::new();
     let mut selected_dirty_files = HashMap::new();
     let initial_attributions = working_log.read_initial_attributions();
@@ -1771,7 +1867,7 @@ fn filter_commit_replay_files(
         };
 
         let should_replay =
-            match working_log.effective_tracked_file_content(&initial_attributions, &file_path) {
+            match working_log.effective_tracked_file_content(&initial_attributions, &file_path)? {
                 None => true,
                 Some(tracked_content) => tracked_content != target_content,
             };
@@ -1787,7 +1883,7 @@ fn filter_commit_replay_files(
         }
     }
 
-    (selected_files, selected_dirty_files)
+    Ok((selected_files, selected_dirty_files))
 }
 
 fn build_human_replay_checkpoint_request(
@@ -2544,13 +2640,13 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     }
     let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
     let (changed_files, dirty_files) =
-        filter_commit_replay_files(&working_log, changed_files, dirty_files);
+        filter_commit_replay_files(&working_log, changed_files, dirty_files)?;
     if changed_files.is_empty() {
         return Ok(());
     }
 
     let replay_checkpoint_request =
-        build_human_replay_checkpoint_request(&repo_workdir, changed_files, dirty_files);
+        build_human_replay_checkpoint_request(&repo_workdir, changed_files.clone(), dirty_files.clone());
 
     let checkpoint_kind = if active_bash.is_some() {
         CheckpointKind::AiAgent
@@ -2558,16 +2654,25 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         CheckpointKind::Human
     };
 
-    crate::commands::checkpoint::run_with_base_commit_override_with_policy(
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    let resolved = crate::daemon::checkpoint::ResolvedCheckpointExecution {
+        base_commit,
+        ts,
+        files: changed_files,
+        dirty_files,
+    };
+
+    crate::daemon::checkpoint::execute_resolved_checkpoint_from_daemon(
         repo,
         author,
         checkpoint_kind,
-        true,
-        Some(replay_checkpoint_request),
-        Some(base_commit.as_str()),
-        crate::commands::checkpoint::BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
+        replay_checkpoint_request,
+        resolved,
     )
-    .map(|_| ())
 }
 
 fn apply_rewrite_side_effect(

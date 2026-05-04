@@ -4,7 +4,6 @@ use crate::authorship::ignore::{
 use crate::authorship::stats::{CommitStats, stats_from_authorship_log, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::CheckpointKind;
-use crate::commands::checkpoint;
 use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::repo_storage::InitialAttributions;
@@ -52,8 +51,6 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
     let ignore_matcher = build_ignore_matcher(&ignore_patterns);
 
     let default_user_name = repo.git_author_identity().formatted_or_unknown();
-
-    let _ = checkpoint::run(&repo, &default_user_name, CheckpointKind::Human, true, None);
 
     let head = repo.head()?;
     let head_sha = head.target()?;
