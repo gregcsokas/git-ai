@@ -629,29 +629,6 @@ impl WorkdirRaceHarness {
         self.run_delegated_checkpoint(workdir, file_rel);
         self.run_traced_git(workdir, &["add", file_rel]);
     }
-
-    fn spawn_worktree_ai_stream(
-        &self,
-        workdir: PathBuf,
-        file_prefix: &str,
-        line_prefix: &str,
-        file_count: usize,
-        commit_message: &str,
-    ) -> thread::JoinHandle<()> {
-        let harness = self.clone();
-        let file_prefix = file_prefix.to_string();
-        let line_prefix = line_prefix.to_string();
-        let commit_message = commit_message.to_string();
-
-        thread::spawn(move || {
-            for idx in 0..file_count {
-                let file = format!("{file_prefix}-{idx}.txt");
-                let line = format!("{line_prefix}-{idx}");
-                harness.write_ai_line_checkpoint_and_add(&workdir, file.as_str(), line.as_str());
-            }
-            harness.run_traced_git(&workdir, &["commit", "-m", commit_message.as_str()]);
-        })
-    }
 }
 
 fn unique_worktree_path(repo: &TestRepo, prefix: &str) -> PathBuf {
@@ -948,11 +925,15 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     // Manually restart the daemon (production auto-start is disabled in test builds)
     start_daemon_for_repo(&repo);
 
+    let completion_baseline = repo.daemon_total_completion_count();
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", "delegate-fallback.txt"],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
     .expect("checkpoint should delegate to daemon and succeed");
+
+    // Wait for the fire-and-forget checkpoint to complete
+    repo.wait_for_next_daemon_checkpoint_completion(completion_baseline);
 
     let status = send_control_request(
         &daemon_control_socket_path(&repo),
@@ -1290,12 +1271,17 @@ fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_
             .expect("failed to open file for first append");
         writeln!(f, "test").expect("failed to append first ai line");
     }
-    expected_top_level_completions += 1;
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", file_rel],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
     .expect("first delegated ai checkpoint should succeed");
+    expected_top_level_completions += 1;
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
     traced_git_with_env(
         &repo,
@@ -1312,12 +1298,17 @@ fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_
             .expect("failed to open file for second append");
         writeln!(f, "test1").expect("failed to append second ai line");
     }
-    expected_top_level_completions += 1;
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", file_rel],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
     .expect("second delegated ai checkpoint should succeed");
+    expected_top_level_completions += 1;
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
     traced_git_with_env(
         &repo,
@@ -1411,12 +1402,17 @@ middle line 2
 omega body
 ";
     fs::write(&file_path, first_ai_hunk).expect("failed to write first hunk content");
-    expected_top_level_completions += 1;
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", file_rel],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
     .expect("first delegated checkpoint should succeed");
+    expected_top_level_completions += 1;
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
     traced_git_with_env(
         &repo,
@@ -1439,12 +1435,17 @@ middle line 2
 omega body
 ";
     fs::write(&file_path, both_hunks).expect("failed to write both hunks content");
-    expected_top_level_completions += 1;
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", file_rel],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
     .expect("second delegated checkpoint should succeed");
+    expected_top_level_completions += 1;
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
     traced_git_with_env(
         &repo,
@@ -2148,9 +2149,12 @@ fn daemon_commit_replay_recovers_same_head_pathspec_reset_when_working_log_is_mi
     keep.set_contents(lines!["keep base", ""]);
     drop.set_contents(lines!["drop base", ""]);
     repo.stage_all_and_commit("base").unwrap();
+    repo.sync_daemon_force();
 
     keep.insert_at(1, lines!["// keep ai".ai()]);
     drop.insert_at(1, lines!["// drop ai".ai()]);
+    // Wait for the fire-and-forget checkpoints from insert_at to complete
+    repo.sync_daemon_force();
     repo.git(&["add", "-A"])
         .expect("staging pathspec reset fixtures should succeed");
 
@@ -3185,6 +3189,8 @@ fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blam
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
 
     let file_count = 16usize;
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_completions = 0u64;
     for idx in 0..file_count {
         let file_rel = format!("daemon-race-file-{idx}.txt");
         let file_path = repo.path().join(file_rel.as_str());
@@ -3196,15 +3202,21 @@ fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blam
             &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
         )
         .expect("delegated ai checkpoint should succeed");
+        expected_completions += 1;
 
         repo.git_og_with_env(&["add", file_rel.as_str()], &env_refs)
             .expect("staging ai burst file should succeed");
+        expected_completions += 1;
     }
+
+    // Wait for all checkpoints and adds to complete before committing
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completions);
 
     repo.git_og_with_env(&["commit", "-m", "ai burst commit"], &env_refs)
         .expect("ai burst commit should succeed");
+    expected_completions += 1;
 
-    wait_for_expected_top_level_completions(&repo, 0, (file_count as u64 * 2) + 1);
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completions);
     let commit_events = wait_for_rewrite_event_count(&repo, "\"commit_sha\"", 1);
     assert_eq!(
         commit_events, 1,
@@ -3249,6 +3261,7 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
 
     let file_count = 10usize;
     let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_completions = 0u64;
     for idx in 0..file_count {
         let file_a = format!("daemon-race-a-{idx}.txt");
         harness.write_ai_line_checkpoint_and_add(
@@ -3256,6 +3269,7 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
             file_a.as_str(),
             format!("a-ai-line-{idx}").as_str(),
         );
+        expected_completions += 2; // checkpoint + add
 
         let file_b = format!("daemon-race-b-{idx}.txt");
         harness.write_ai_line_checkpoint_and_add(
@@ -3263,13 +3277,17 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
             file_b.as_str(),
             format!("b-ai-line-{idx}").as_str(),
         );
+        expected_completions += 2; // checkpoint + add
     }
+
+    // Wait for all checkpoints and adds to complete before committing
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completions);
 
     harness.run_traced_git(&worker_a_dir, &["commit", "-m", "worker-a burst commit"]);
     harness.run_traced_git(&worker_b_dir, &["commit", "-m", "worker-b burst commit"]);
+    expected_completions += 2; // both commits
 
-    let expected_completion_delta = (file_count as u64 * 4) + 2;
-    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completion_delta);
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completions);
 
     for idx in 0..file_count {
         let file_a = format!("daemon-race-a-{idx}.txt");
@@ -3342,16 +3360,22 @@ fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_a
         }
     }
 
+    // Wait for all concurrent checkpoints to complete before adding
+    let mut expected_completions = file_count as u64;
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completions);
+
     repo.git_og_with_env(&["add", "."], &env_refs)
         .expect("staging concurrent checkpoint files should succeed");
+    expected_completions += 1;
+
     repo.git_og_with_env(
         &["commit", "-m", "concurrent delegated checkpoint burst"],
         &env_refs,
     )
     .expect("commit for concurrent checkpoint files should succeed");
+    expected_completions += 1;
 
-    let expected_completion_delta = file_count as u64 + 2;
-    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completion_delta);
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completions);
 
     for (file_rel, line) in expected {
         let mut file = repo.filename(file_rel.as_str());
@@ -3395,21 +3419,34 @@ fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attrib
     let file_count = 8usize;
     let completion_baseline = repo.daemon_total_completion_count();
 
-    let worker_a = harness.spawn_worktree_ai_stream(
-        worker_a_dir.clone(),
-        "daemon-race-parallel-a",
-        "a-parallel-ai-line",
-        file_count,
-        "parallel worker-a commit",
-    );
+    // Spawn threads to do checkpoint+add in parallel, but WITHOUT committing yet
+    let worker_a_harness = harness.clone();
+    let worker_a_dir_clone = worker_a_dir.clone();
+    let worker_a = thread::spawn(move || {
+        for idx in 0..file_count {
+            let file = format!("daemon-race-parallel-a-{idx}.txt");
+            let line = format!("a-parallel-ai-line-{idx}");
+            worker_a_harness.write_ai_line_checkpoint_and_add(
+                &worker_a_dir_clone,
+                file.as_str(),
+                line.as_str(),
+            );
+        }
+    });
 
-    let worker_b = harness.spawn_worktree_ai_stream(
-        worker_b_dir.clone(),
-        "daemon-race-parallel-b",
-        "b-parallel-ai-line",
-        file_count,
-        "parallel worker-b commit",
-    );
+    let worker_b_harness = harness.clone();
+    let worker_b_dir_clone = worker_b_dir.clone();
+    let worker_b = thread::spawn(move || {
+        for idx in 0..file_count {
+            let file = format!("daemon-race-parallel-b-{idx}.txt");
+            let line = format!("b-parallel-ai-line-{idx}");
+            worker_b_harness.write_ai_line_checkpoint_and_add(
+                &worker_b_dir_clone,
+                file.as_str(),
+                line.as_str(),
+            );
+        }
+    });
 
     worker_a
         .join()
@@ -3418,8 +3455,16 @@ fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attrib
         .join()
         .expect("parallel worker-b thread should not panic");
 
-    let expected_completion_delta = ((file_count as u64) * 2 + 1) * 2;
-    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completion_delta);
+    // Wait for all checkpoints and adds to complete before committing
+    let mut expected_completions = (file_count as u64) * 2 * 2; // checkpoints + adds for both workers
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completions);
+
+    // Now do the commits after all checkpoints are processed
+    harness.run_traced_git(&worker_a_dir, &["commit", "-m", "parallel worker-a commit"]);
+    harness.run_traced_git(&worker_b_dir, &["commit", "-m", "parallel worker-b commit"]);
+    expected_completions += 2; // both commits
+
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completions);
 
     for idx in 0..file_count {
         let file_a = format!("daemon-race-parallel-a-{idx}.txt");

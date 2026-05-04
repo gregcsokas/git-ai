@@ -388,9 +388,13 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
 
     let file_paths: Vec<PathBuf> = match &bash_result {
         Ok(result) => match &result.action {
-            bash_tool::BashCheckpointAction::Checkpoint(paths) => {
-                paths.iter().map(|p| repo_work_dir.join(p)).collect()
-            }
+            bash_tool::BashCheckpointAction::Checkpoint(paths) => paths
+                .iter()
+                .map(|p| {
+                    let joined = repo_work_dir.join(p);
+                    fs::canonicalize(&joined).unwrap_or(joined)
+                })
+                .collect(),
             _ => vec![],
         },
         Err(err) => {

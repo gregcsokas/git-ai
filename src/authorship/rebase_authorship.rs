@@ -4505,7 +4505,6 @@ fn add_prompt_line_metrics_for_line_attributions(
     }
 }
 
-
 fn apply_prompt_line_metrics_to_prompts(
     prompts: &mut BTreeMap<
         String,

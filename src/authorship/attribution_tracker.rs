@@ -476,8 +476,6 @@ impl AttributionTracker {
             new_content,
             (old_start, old_end),
             (new_start, new_end),
-            old_start_line + 1,
-            new_start_line + 1,
         );
 
         computation.diffs.append(&mut hunk_diffs);
@@ -1311,11 +1309,7 @@ fn try_match_multi_char_op(ch: char, peek: Option<char>) -> Option<&'static str>
 }
 
 /// Code-optimized tokenizer that treats syntactic elements as meaningful units
-fn tokenize_non_whitespace(
-    content: &str,
-    range: (usize, usize),
-    starting_line: usize,
-) -> Vec<Token> {
+fn tokenize_non_whitespace(content: &str, range: (usize, usize)) -> Vec<Token> {
     let (start, end) = range;
     if start >= end {
         return Vec::new();
@@ -1559,8 +1553,6 @@ fn build_token_aligned_diffs(
     new_content: &str,
     old_range: (usize, usize),
     new_range: (usize, usize),
-    old_start_line: usize,
-    new_start_line: usize,
 ) -> (Vec<ByteDiff>, Vec<(usize, usize)>) {
     let (old_start, old_end) = old_range;
     let (new_start, new_end) = new_range;
@@ -1568,8 +1560,8 @@ fn build_token_aligned_diffs(
     let mut diffs = Vec::new();
     let mut substantive_ranges = Vec::new();
 
-    let old_tokens = tokenize_non_whitespace(old_content, old_range, old_start_line);
-    let new_tokens = tokenize_non_whitespace(new_content, new_range, new_start_line);
+    let old_tokens = tokenize_non_whitespace(old_content, old_range);
+    let new_tokens = tokenize_non_whitespace(new_content, new_range);
 
     if old_tokens.is_empty() && new_tokens.is_empty() {
         append_range_diffs(

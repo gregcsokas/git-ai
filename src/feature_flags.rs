@@ -149,7 +149,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_from_deserializable() {
         let deserializable = DeserializableFeatureFlags {

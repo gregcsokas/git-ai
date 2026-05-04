@@ -450,35 +450,31 @@ fn handle_checkpoint(args: &[String]) {
         );
     }
 
-    // In test builds, wait for the daemon response so checkpoints are
-    // persisted before the caller proceeds. Otherwise fire-and-forget.
-    let wait_for_response = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some();
-
+    let mut sent_count = 0u64;
     for request in requests {
         let t_send = std::time::Instant::now();
         let control_request = ControlRequest::CheckpointRun {
             request: Box::new(request),
         };
-        let send_result = if wait_for_response {
-            crate::daemon::send_control_request(&config.control_socket_path, &control_request)
-                .map(|_| ())
-        } else {
-            crate::daemon::send_control_request_fire_and_forget(
-                &config.control_socket_path,
-                &control_request,
-            )
-        };
+        let send_result = crate::daemon::send_control_request_fire_and_forget(
+            &config.control_socket_path,
+            &control_request,
+        );
         if perf {
             eprintln!(
-                "[perf] checkpoint: ipc_send={:.1}ms (fire_and_forget={})",
+                "[perf] checkpoint: ipc_send={:.1}ms",
                 t_send.elapsed().as_secs_f64() * 1000.0,
-                !wait_for_response,
             );
         }
         if let Err(e) = send_result {
             eprintln!("Failed to send checkpoint to background worker: {}", e);
             std::process::exit(0);
         }
+        sent_count += 1;
+    }
+
+    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some() {
+        println!("checkpoint_requests={}", sent_count);
     }
 
     if perf {

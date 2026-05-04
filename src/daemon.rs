@@ -1385,13 +1385,7 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
     let repo = discover_repository_in_path_no_git_exec(repo_work_dir)?;
     let author = repo.git_author_identity().formatted_or_unknown();
 
-    let _ = crate::commands::checkpoint::run(
-        &repo,
-        &author,
-        request.checkpoint_kind,
-        true,
-        Some(request),
-    )?;
+    crate::commands::checkpoint::run(&repo, &author, request.checkpoint_kind, true, Some(request))?;
     Ok(())
 }
 
