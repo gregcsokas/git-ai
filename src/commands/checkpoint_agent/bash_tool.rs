@@ -36,7 +36,7 @@ const MTIME_GRACE_WINDOW_SECS: u64 = 0;
 const WALK_TIMEOUT_MS: u64 = 1500;
 
 /// Hard limit for the entire post-hook execution.  If this is exceeded
-/// at any checkpoint, the hook returns Fallback immediately.
+/// at any checkpoint, the hook returns HookTimeout immediately.
 const HOOK_TIMEOUT_MS: u64 = 4000;
 
 // ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ fn effective_daemon_socket() -> Option<std::path::PathBuf> {
 const MTIME_GRACE_WINDOW_NS: u128 = (MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
 
 /// Maximum number of files to track in a snapshot.  Repos larger than this
-/// skip the stat-diff system entirely (returning Fallback) to avoid adding
+/// skip the stat-diff system entirely (returning SnapshotFailed) to avoid adding
 /// seconds of latency to every Bash tool call.
 const MAX_TRACKED_FILES: usize = 50_000;
 
@@ -263,13 +263,18 @@ impl StatDiffResult {
 }
 
 /// What the bash post-hook decided to do.
+#[derive(Debug)]
 pub enum BashCheckpointAction {
     /// Files changed — emit a checkpoint with these paths.
     Checkpoint(Vec<String>),
     /// Stat-diff ran but found nothing.
     NoChanges,
-    /// An error occurred; caller should fall back to a safe default.
-    Fallback,
+    /// The post-hook exceeded its time budget.
+    HookTimeout,
+    /// The post-snapshot filesystem walk failed (walk timeout, too many files, IO error).
+    SnapshotFailed,
+    /// The daemon had no pre-snapshot for this tool-use ID.
+    MissingPreSnapshot,
 }
 
 /// Result from `handle_bash_pre_tool_use_with_context`.
@@ -974,7 +979,7 @@ pub fn handle_bash_post_tool_use(
                 })),
             );
             return Ok(BashPostHookResult {
-                action: BashCheckpointAction::Fallback,
+                action: BashCheckpointAction::HookTimeout,
             });
         }};
     }
@@ -1021,9 +1026,9 @@ pub fn handle_bash_post_tool_use(
                     }
                 }
                 Err(e) => {
-                    tracing::debug!("Post-snapshot failed: {}; returning fallback", e);
+                    tracing::debug!("Post-snapshot failed: {}; returning SnapshotFailed", e);
                     Ok(BashPostHookResult {
-                        action: BashCheckpointAction::Fallback,
+                        action: BashCheckpointAction::SnapshotFailed,
                     })
                 }
             };
@@ -1034,11 +1039,11 @@ pub fn handle_bash_post_tool_use(
         }
         None => {
             tracing::debug!(
-                "Pre-snapshot not found in daemon for {}; returning fallback",
+                "Pre-snapshot not found in daemon for {}; returning MissingPreSnapshot",
                 invocation_key
             );
             Ok(BashPostHookResult {
-                action: BashCheckpointAction::Fallback,
+                action: BashCheckpointAction::MissingPreSnapshot,
             })
         }
     }

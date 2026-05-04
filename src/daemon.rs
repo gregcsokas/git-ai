@@ -31,9 +31,9 @@ use crate::{
         rewrite_authorship_if_needed,
     },
     authorship::working_log::CheckpointKind,
-    daemon::checkpoint::PreparedPathRole,
     commands::checkpoint_agent::orchestrator::CheckpointRequest,
     commands::hooks::{push_hooks, stash_hooks},
+    daemon::checkpoint::PreparedPathRole,
 };
 #[cfg(not(windows))]
 use interprocess::local_socket::ConnectOptions;
@@ -1404,7 +1404,9 @@ fn resolve_checkpoint_request(
     repo: &crate::git::repository::Repository,
     request: &CheckpointRequest,
 ) -> Result<Option<crate::daemon::checkpoint::ResolvedCheckpointExecution>, GitAiError> {
-    use crate::authorship::ignore::{build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher};
+    use crate::authorship::ignore::{
+        build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
+    };
     use crate::commands::checkpoint_agent::orchestrator::BaseCommit;
     use crate::utils::normalize_to_posix;
 
@@ -1477,12 +1479,14 @@ fn resolve_checkpoint_request(
         .unwrap_or_default()
         .as_millis();
 
-    Ok(Some(crate::daemon::checkpoint::ResolvedCheckpointExecution {
-        base_commit,
-        ts,
-        files,
-        dirty_files,
-    }))
+    Ok(Some(
+        crate::daemon::checkpoint::ResolvedCheckpointExecution {
+            base_commit,
+            ts,
+            files,
+            dirty_files,
+        },
+    ))
 }
 
 fn compute_watermarks_from_stat(
@@ -2645,8 +2649,11 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         return Ok(());
     }
 
-    let replay_checkpoint_request =
-        build_human_replay_checkpoint_request(&repo_workdir, changed_files.clone(), dirty_files.clone());
+    let replay_checkpoint_request = build_human_replay_checkpoint_request(
+        &repo_workdir,
+        changed_files.clone(),
+        dirty_files.clone(),
+    );
 
     let checkpoint_kind = if active_bash.is_some() {
         CheckpointKind::AiAgent

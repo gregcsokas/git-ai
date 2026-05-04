@@ -1,11 +1,11 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::working_log::{AgentId, Checkpoint, CheckpointKind, WorkingLogEntry};
+use git_ai::commands::checkpoint_agent::orchestrator::{
+    BaseCommit, CheckpointFile, CheckpointRequest,
+};
 use git_ai::daemon::checkpoint::{
     PreparedPathRole, ResolvedCheckpointExecution, compute_file_line_stats,
     execute_resolved_checkpoint_from_daemon, is_ai_author_id,
-};
-use git_ai::commands::checkpoint_agent::orchestrator::{
-    BaseCommit, CheckpointFile, CheckpointRequest,
 };
 use git_ai::git::repository::find_repository_in_path;
 use std::collections::HashMap;
@@ -30,7 +30,6 @@ fn setup_repo_with_base_commit() -> (TestRepo, String, String) {
 
     (repo, "lines.md".to_string(), "alphabet.md".to_string())
 }
-
 
 #[test]
 fn test_checkpoint_with_staged_changes() {
@@ -268,7 +267,6 @@ fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
     .unwrap();
 }
 
-
 #[test]
 fn test_checkpoint_skips_conflicted_files() {
     // Create a repo with an initial commit
@@ -354,11 +352,7 @@ fn test_checkpoint_with_paths_outside_repo() {
     repo.git(&["add", &lines_file]).unwrap();
 
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let base_commit = gitai_repo
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
+    let base_commit = gitai_repo.head().unwrap().target().unwrap();
 
     // Build a resolved checkpoint with only the valid file (outside paths filtered at resolution)
     let resolved = ResolvedCheckpointExecution {

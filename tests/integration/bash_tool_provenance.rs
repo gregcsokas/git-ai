@@ -97,8 +97,8 @@ fn assert_checkpoint_contains(result: &BashPostHookResult, expected_path: &str) 
                 expected_path
             );
         }
-        BashCheckpointAction::Fallback => {
-            panic!("Expected Checkpoint, got Fallback");
+        other => {
+            panic!("Expected Checkpoint, got {:?}", other);
         }
     }
 }
@@ -119,11 +119,8 @@ fn assert_checkpoint_excludes(result: &BashPostHookResult, excluded_path: &str) 
 fn assert_no_changes(result: &BashPostHookResult) {
     match &result.action {
         BashCheckpointAction::NoChanges => {}
-        BashCheckpointAction::Checkpoint(p) => {
-            panic!("Expected NoChanges, got Checkpoint({:?})", p);
-        }
-        BashCheckpointAction::Fallback => {
-            panic!("Expected NoChanges, got Fallback");
+        other => {
+            panic!("Expected NoChanges, got {:?}", other);
         }
     }
 }
@@ -132,14 +129,7 @@ fn assert_no_changes(result: &BashPostHookResult) {
 fn checkpoint_paths(result: &BashPostHookResult) -> &[String] {
     match &result.action {
         BashCheckpointAction::Checkpoint(paths) => paths,
-        other => panic!(
-            "Expected Checkpoint, got {:?}",
-            match other {
-                BashCheckpointAction::NoChanges => "NoChanges",
-                BashCheckpointAction::Fallback => "Fallback",
-                BashCheckpointAction::Checkpoint(_) => unreachable!(),
-            }
-        ),
+        other => panic!("Expected Checkpoint, got {:?}", other),
     }
 }
 

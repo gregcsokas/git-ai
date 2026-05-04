@@ -368,11 +368,7 @@ fn test_bash_tool_post_hook_no_changes() {
     assert!(
         matches!(post_action.action, BashCheckpointAction::NoChanges),
         "PostToolUse with no changes should return NoChanges; got {:?}",
-        match &post_action.action {
-            BashCheckpointAction::Checkpoint(_) => "Checkpoint",
-            BashCheckpointAction::NoChanges => "NoChanges",
-            BashCheckpointAction::Fallback => "Fallback",
-        }
+        &post_action.action
     );
 }
 
@@ -400,14 +396,7 @@ fn test_bash_tool_post_hook_detects_changes() {
                 paths
             );
         }
-        other => panic!(
-            "Expected Checkpoint, got {:?}",
-            match other {
-                BashCheckpointAction::NoChanges => "NoChanges",
-                BashCheckpointAction::Fallback => "Fallback",
-                BashCheckpointAction::Checkpoint(_) => unreachable!(),
-            }
-        ),
+        other => panic!("Expected Checkpoint, got {:?}", other),
     }
 }
 
@@ -423,20 +412,21 @@ fn test_bash_tool_post_hook_without_pre_uses_fallback() {
 
     let post_action = post_hook(&root, "sess", "missing-pre");
 
-    // Should be Checkpoint (from git status) or NoChanges, but not panic
+    // Without a pre-snapshot, expect MissingPreSnapshot (or possibly Checkpoint
+    // if the daemon happens to have state from a prior run).
     match &post_action.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
                 paths.iter().any(|p| p.contains("changed.txt")),
-                "Fallback should detect changed.txt via git status; got {:?}",
+                "Should detect changed.txt; got {:?}",
                 paths
             );
         }
-        BashCheckpointAction::NoChanges => {
-            // Acceptable if git status does not report changes (unlikely but possible)
-        }
-        BashCheckpointAction::Fallback => {
-            // Also acceptable — means git status itself failed
+        BashCheckpointAction::NoChanges
+        | BashCheckpointAction::MissingPreSnapshot
+        | BashCheckpointAction::HookTimeout
+        | BashCheckpointAction::SnapshotFailed => {
+            // Acceptable — no pre-snapshot was stored or other failure
         }
     }
 }
@@ -1343,16 +1333,16 @@ fn test_post_hook_without_pre_clean_repo_returns_no_changes() {
     let root = repo_root(&repo);
 
     add_and_commit(&repo, "clean.txt", "clean", "initial");
-    // No PreToolUse, no modifications — git status fallback should find nothing
+    // No PreToolUse, no modifications — should get MissingPreSnapshot or NoChanges
 
     let action = post_hook(&root, "sess", "missing");
 
     assert!(
         matches!(
             action.action,
-            BashCheckpointAction::NoChanges | BashCheckpointAction::Fallback
+            BashCheckpointAction::NoChanges | BashCheckpointAction::MissingPreSnapshot
         ),
-        "Clean repo without pre-snapshot should return NoChanges or Fallback"
+        "Clean repo without pre-snapshot should return NoChanges or MissingPreSnapshot"
     );
 }
 

@@ -1,10 +1,10 @@
 use crate::authorship::authorship_log_serialization::generate_trace_id;
 use crate::authorship::working_log::{AgentId, CheckpointKind};
-use crate::daemon::checkpoint::PreparedPathRole;
 use crate::commands::checkpoint_agent::presets::{
     KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     TranscriptSource, UntrackedEdit,
 };
+use crate::daemon::checkpoint::PreparedPathRole;
 use crate::error::GitAiError;
 use crate::git::repo_state::{
     git_dir_for_worktree, read_head_state_for_worktree, worktree_root_for_path,

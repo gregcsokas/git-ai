@@ -3,8 +3,8 @@
 //! Verifies that:
 //! - A snapshot walk that exceeds WALK_TIMEOUT returns `Err` immediately.
 //! - A pre-hook walk timeout propagates as `Err` (orchestrator handles gracefully).
-//! - A post-hook walk timeout returns `BashCheckpointAction::Fallback`.
-//! - A hook-level timeout (the 4 s hard limit) returns `Fallback` on the post-hook.
+//! - A post-hook walk timeout returns `BashCheckpointAction::SnapshotFailed`.
+//! - A hook-level timeout (the 4 s hard limit) returns `HookTimeout` on the post-hook.
 //!
 //! Timeouts are injected via thread-local overrides so parallel tests in other
 //! modules are never affected.
@@ -94,9 +94,9 @@ fn test_pre_hook_walk_timeout_returns_err() {
     );
 }
 
-/// A walk timeout during the post-hook must return Fallback, not Err.
+/// A walk timeout during the post-hook must return SnapshotFailed, not Err.
 #[test]
-fn test_post_hook_walk_timeout_returns_fallback() {
+fn test_post_hook_walk_timeout_returns_snapshot_failed() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
@@ -119,13 +119,9 @@ fn test_post_hook_walk_timeout_returns_fallback() {
 
     let r = result.expect("post-hook must not return Err on walk timeout");
     assert!(
-        matches!(r.action, BashCheckpointAction::Fallback),
-        "post-hook walk timeout should yield Fallback; got action: {:?}",
-        match r.action {
-            BashCheckpointAction::NoChanges => "NoChanges",
-            BashCheckpointAction::Checkpoint(_) => "Checkpoint",
-            BashCheckpointAction::Fallback => "Fallback",
-        }
+        matches!(r.action, BashCheckpointAction::SnapshotFailed),
+        "post-hook walk timeout should yield SnapshotFailed; got {:?}",
+        r.action
     );
 }
 
@@ -134,9 +130,9 @@ fn test_post_hook_walk_timeout_returns_fallback() {
 // ---------------------------------------------------------------------------
 
 /// A hook-level timeout during the post-hook (fires after load + before
-/// snapshot) must return Fallback.
+/// snapshot) must return HookTimeout.
 #[test]
-fn test_post_hook_hook_timeout_returns_fallback() {
+fn test_post_hook_hook_timeout_returns_hook_timeout() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
@@ -152,8 +148,9 @@ fn test_post_hook_hook_timeout_returns_fallback() {
 
     let r = result.expect("post-hook must not return Err on hook timeout");
     assert!(
-        matches!(r.action, BashCheckpointAction::Fallback),
-        "post-hook hook timeout should yield Fallback"
+        matches!(r.action, BashCheckpointAction::HookTimeout),
+        "post-hook hook timeout should yield HookTimeout; got {:?}",
+        r.action
     );
 }
 
@@ -183,6 +180,6 @@ fn test_timeout_override_reset_restores_normal_operation() {
             result.action,
             BashCheckpointAction::Checkpoint(_) | BashCheckpointAction::NoChanges
         ),
-        "normal round-trip after reset should not return Fallback"
+        "normal round-trip after reset should return Checkpoint or NoChanges"
     );
 }

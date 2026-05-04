@@ -11,7 +11,7 @@ use crate::authorship::imara_diff_utils::{
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
-use crate::commands::checkpoint_agent::orchestrator::{CheckpointRequest};
+use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
@@ -275,10 +275,12 @@ fn execute_resolved_checkpoint(
             } else {
                 Some(checkpoint_request.metadata.clone())
             };
-        } else if kind == CheckpointKind::KnownHuman
-            && !checkpoint_request.metadata.is_empty()
-        {
-            let editor = checkpoint_request.metadata.get("kh_editor").cloned().unwrap_or_default();
+        } else if kind == CheckpointKind::KnownHuman && !checkpoint_request.metadata.is_empty() {
+            let editor = checkpoint_request
+                .metadata
+                .get("kh_editor")
+                .cloned()
+                .unwrap_or_default();
             let editor_version = checkpoint_request
                 .metadata
                 .get("kh_editor_version")
@@ -348,7 +350,10 @@ fn execute_resolved_checkpoint(
     }
 
     let agent_tool = if kind.is_ai() {
-        checkpoint_request.agent_id.as_ref().map(|aid| aid.tool.as_str())
+        checkpoint_request
+            .agent_id
+            .as_ref()
+            .map(|aid| aid.tool.as_str())
     } else {
         None
     };
@@ -391,7 +396,6 @@ fn execute_resolved_checkpoint(
     );
     Ok((entries.len(), resolved.files.len(), checkpoints.len()))
 }
-
 
 fn save_current_file_states(
     working_log: &PersistedWorkingLog,
@@ -806,7 +810,9 @@ async fn get_checkpoint_entries(
     let initial_snapshot_contents: HashMap<String, String> = {
         let mut map = HashMap::new();
         for file_path in initial_data.files.keys() {
-            if let Some(content) = working_log.initial_file_content_from(&initial_data, file_path)? {
+            if let Some(content) =
+                working_log.initial_file_content_from(&initial_data, file_path)?
+            {
                 map.insert(file_path.clone(), content);
             }
         }
@@ -1108,4 +1114,3 @@ fn compute_line_stats(
 
     Ok(stats)
 }
-
