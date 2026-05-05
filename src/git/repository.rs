@@ -20,7 +20,9 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use crate::utils::CREATE_NO_WINDOW;
@@ -1091,6 +1093,11 @@ impl<'a> Iterator for References<'a> {
     }
 }
 
+const AUTHOR_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(300);
+
+static AUTHOR_IDENTITY_CACHE: Mutex<Option<HashMap<PathBuf, (GitAuthorIdentity, Instant)>>> =
+    Mutex::new(None);
+
 /// The effective git author identity (name + email) for the current repository.
 ///
 /// Resolved via `git var GIT_COMMITTER_IDENT` which respects the full git precedence
@@ -1453,13 +1460,31 @@ impl Repository {
     /// system defaults.
     ///
     /// Falls back to `git config user.name` / `user.email` if `git var` fails.
-    /// The result is cached per Repository instance for performance.
+    /// The result is cached globally for up to 5 minutes (keyed by git dir) and
+    /// per Repository instance for the instance's lifetime.
     ///
     /// Use this for "who is the current user" lookups (blame, status, prompts, etc.).
     /// For commit authorship specifically, use [`Self::git_commit_author_identity`] instead.
     pub fn git_author_identity(&self) -> &GitAuthorIdentity {
-        self.cached_author_identity
-            .get_or_init(|| self.resolve_git_var_identity("GIT_COMMITTER_IDENT"))
+        self.cached_author_identity.get_or_init(|| {
+            let git_dir = self.path();
+            if let Ok(cache) = AUTHOR_IDENTITY_CACHE.lock()
+                && let Some(map) = cache.as_ref()
+                && let Some((identity, cached_at)) = map.get(git_dir)
+                && cached_at.elapsed() < AUTHOR_IDENTITY_CACHE_TTL
+            {
+                return identity.clone();
+            }
+
+            let identity = self.resolve_git_var_identity("GIT_COMMITTER_IDENT");
+
+            if let Ok(mut cache) = AUTHOR_IDENTITY_CACHE.lock() {
+                let map = cache.get_or_insert_with(HashMap::new);
+                map.insert(git_dir.to_path_buf(), (identity.clone(), Instant::now()));
+            }
+
+            identity
+        })
     }
 
     /// Get the effective git commit author identity for this repository.
