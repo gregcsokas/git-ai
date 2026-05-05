@@ -140,10 +140,14 @@ pub fn post_commit_with_final_state(
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
-    // No-hooks background agents (Devin, Codex Cloud, etc.) never fire checkpoints,
-    // so the working log is empty and every line would be "untracked." Detect this
-    // and blanket-attribute all committed lines to the agent.
-    if authorship_log.attestations.is_empty() {
+    // No-hooks background agents (Devin, Codex Cloud, etc.) may not fire checkpoints
+    // for all edits. Attribute any committed lines that have no existing attestation
+    // ("holes") to the detected agent, preserving explicit attributions.
+    if !matches!(
+        crate::authorship::background_agent::detect(),
+        crate::authorship::background_agent::BackgroundAgent::None
+            | crate::authorship::background_agent::BackgroundAgent::WithHooks { .. }
+    ) {
         let diff_base = if parent_sha == "initial" {
             "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         } else {
@@ -163,7 +167,7 @@ pub fn post_commit_with_final_state(
                     )
                 })
                 .collect();
-            crate::authorship::background_agent::apply_blanket_attribution(
+            crate::authorship::background_agent::fill_unattributed_lines(
                 &mut authorship_log,
                 &committed_hunks,
                 &human_author,
