@@ -1,9 +1,9 @@
 use crate::authorship::attribution_tracker::{
     Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
-use crate::authorship::authorship_log_serialization::{
-    generate_session_id, generate_short_hash, generate_trace_id,
-};
+#[cfg(not(any(test, feature = "test-support")))]
+use crate::authorship::authorship_log_serialization::generate_short_hash;
+use crate::authorship::authorship_log_serialization::{generate_session_id, generate_trace_id};
 use crate::authorship::imara_diff_utils::{
     LineChangeTag, compute_line_changes, normalize_line_endings,
 };
@@ -89,19 +89,17 @@ pub struct ResolvedCheckpointExecution {
 
 /// Build EventAttributes for AgentUsage events.
 /// When repo is available, includes repo_url and branch. Always includes tool, model,
-/// session_id, prompt_id, and custom attributes.
+/// session_id, and custom attributes.
 pub fn build_agent_usage_attrs(
     repo: Option<&Repository>,
     agent_id: &AgentId,
 ) -> crate::metrics::EventAttributes {
-    let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
     let session_id = generate_session_id(&agent_id.id, &agent_id.tool);
 
     let mut attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
         .session_id(session_id)
         .tool(&agent_id.tool)
         .model(&agent_id.model)
-        .prompt_id(prompt_id)
         .external_prompt_id(&agent_id.id)
         .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
@@ -143,11 +141,9 @@ fn build_checkpoint_attrs(
 
     // Add AI-specific attributes
     if let Some(agent_id) = agent_id {
-        let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
         attrs = attrs
             .tool(&agent_id.tool)
             .model(&agent_id.model)
-            .prompt_id(prompt_id)
             .external_prompt_id(&agent_id.id);
     }
 

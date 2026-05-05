@@ -166,17 +166,7 @@ impl EventAttributes {
         self
     }
 
-    // Builder methods for prompt_id
-    pub fn prompt_id(mut self, value: impl Into<String>) -> Self {
-        self.prompt_id = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn prompt_id_null(mut self) -> Self {
-        self.prompt_id = Some(None);
-        self
-    }
+    // Position 22 (prompt_id) is TOMBSTONED - setters removed, field kept for reading legacy data.
 
     // Builder methods for external_prompt_id
     pub fn external_prompt_id(mut self, value: impl Into<String>) -> Self {
@@ -261,11 +251,7 @@ impl PosEncoded for EventAttributes {
         sparse_set(&mut map, attr_pos::BRANCH, string_to_json(&self.branch));
         sparse_set(&mut map, attr_pos::TOOL, string_to_json(&self.tool));
         sparse_set(&mut map, attr_pos::MODEL, string_to_json(&self.model));
-        sparse_set(
-            &mut map,
-            attr_pos::PROMPT_ID,
-            string_to_json(&self.prompt_id),
-        );
+        // Position 22 (PROMPT_ID) is TOMBSTONED - no longer written, only read for legacy data
         sparse_set(
             &mut map,
             attr_pos::EXTERNAL_PROMPT_ID,
@@ -318,8 +304,7 @@ mod tests {
             .base_commit_sha("base-commit-123")
             .branch("main")
             .tool("claude-code")
-            .model_null()
-            .prompt_id("prompt-123");
+            .model_null();
 
         assert_eq!(attrs.git_ai_version, Some(Some("1.0.0".to_string())));
         assert_eq!(
@@ -335,15 +320,14 @@ mod tests {
         assert_eq!(attrs.branch, Some(Some("main".to_string())));
         assert_eq!(attrs.tool, Some(Some("claude-code".to_string())));
         assert_eq!(attrs.model, Some(None)); // explicitly null
-        assert_eq!(attrs.prompt_id, Some(Some("prompt-123".to_string())));
+        assert_eq!(attrs.prompt_id, None); // tombstoned - never written
     }
 
     #[test]
     fn test_event_attributes_to_sparse() {
         let attrs = EventAttributes::with_version("1.0.0")
             .tool("test-tool")
-            .model_null()
-            .prompt_id("prompt-123");
+            .model_null();
 
         let sparse = attrs.to_sparse();
 
@@ -358,10 +342,7 @@ mod tests {
             Some(&Value::String("test-tool".to_string()))
         );
         assert_eq!(sparse.get("21"), Some(&Value::Null)); // explicitly null
-        assert_eq!(
-            sparse.get("22"),
-            Some(&Value::String("prompt-123".to_string()))
-        );
+        assert_eq!(sparse.get("22"), None); // tombstoned - never written
     }
 
     #[test]
@@ -392,7 +373,6 @@ mod tests {
             .branch("feature-branch")
             .tool("cursor")
             .model("gpt-4")
-            .prompt_id("prompt-456")
             .external_prompt_id("ext-789");
 
         assert_eq!(attrs.git_ai_version, Some(Some("1.2.3".to_string())));
@@ -406,7 +386,7 @@ mod tests {
         assert_eq!(attrs.branch, Some(Some("feature-branch".to_string())));
         assert_eq!(attrs.tool, Some(Some("cursor".to_string())));
         assert_eq!(attrs.model, Some(Some("gpt-4".to_string())));
-        assert_eq!(attrs.prompt_id, Some(Some("prompt-456".to_string())));
+        assert_eq!(attrs.prompt_id, None); // tombstoned
         assert_eq!(attrs.external_prompt_id, Some(Some("ext-789".to_string())));
     }
 
@@ -421,7 +401,6 @@ mod tests {
             .branch_null()
             .tool_null()
             .model_null()
-            .prompt_id_null()
             .external_prompt_id_null();
 
         assert_eq!(attrs.git_ai_version, Some(None));
@@ -432,7 +411,7 @@ mod tests {
         assert_eq!(attrs.branch, Some(None));
         assert_eq!(attrs.tool, Some(None));
         assert_eq!(attrs.model, Some(None));
-        assert_eq!(attrs.prompt_id, Some(None));
+        assert_eq!(attrs.prompt_id, None); // tombstoned - no setter available
         assert_eq!(attrs.external_prompt_id, Some(None));
     }
 
@@ -446,7 +425,6 @@ mod tests {
             .branch("main")
             .tool("test-tool")
             .model("test-model")
-            .prompt_id("prompt-id")
             .external_prompt_id("ext-id");
 
         let sparse = attrs.to_sparse();
@@ -477,10 +455,7 @@ mod tests {
             sparse.get("21"),
             Some(&Value::String("test-model".to_string()))
         );
-        assert_eq!(
-            sparse.get("22"),
-            Some(&Value::String("prompt-id".to_string()))
-        );
+        assert_eq!(sparse.get("22"), None); // tombstoned - never written
         assert_eq!(sparse.get("23"), Some(&Value::String("ext-id".to_string())));
     }
 

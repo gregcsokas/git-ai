@@ -55,8 +55,8 @@ fn test_agent_usage_attrs_include_repo_url_when_remote_exists() {
         attrs.session_id
     );
     assert!(
-        matches!(&attrs.prompt_id, Some(Some(p)) if !p.is_empty()),
-        "attrs.prompt_id should be set, got: {:?}",
+        attrs.prompt_id.is_none(),
+        "attrs.prompt_id should not be set (tombstoned), got: {:?}",
         attrs.prompt_id
     );
     assert!(
@@ -162,6 +162,39 @@ fn test_agent_usage_attrs_no_remote_still_works() {
     assert!(
         matches!(&attrs.model, Some(Some(m)) if m == "claude-opus-4-20250514"),
         "attrs.model should be set"
+    );
+}
+
+/// Verifies that credentials in the remote URL are stripped from repo_url.
+#[test]
+fn test_agent_usage_attrs_strips_credentials_from_repo_url() {
+    let repo = TestRepo::new();
+
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://oauth2:ghp_secret_token_123@github.com/private-org/secret-repo.git",
+    ])
+    .unwrap();
+
+    let gitai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("should open repo");
+
+    let agent_id = AgentId {
+        id: "session-creds".to_string(),
+        tool: "cursor".to_string(),
+        model: "gpt-4".to_string(),
+    };
+
+    let attrs = build_agent_usage_attrs(Some(&gitai_repo), &agent_id);
+
+    assert_eq!(
+        attrs.repo_url,
+        Some(Some(
+            "https://github.com/private-org/secret-repo".to_string()
+        )),
+        "repo_url must never contain credentials"
     );
 }
 
