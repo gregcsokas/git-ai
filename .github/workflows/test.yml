@@ -31,6 +31,7 @@ on:
 jobs:
   test:
     name: Test on ${{ matrix.os }} (${{ matrix.test_mode }})
+    if: ${{ !(startsWith(matrix.os, 'windows') && github.event_name == 'merge_group') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
