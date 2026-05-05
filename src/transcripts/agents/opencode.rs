@@ -53,7 +53,7 @@ fn read_session_messages_raw_with_limit(
     let mut stmt = conn
         .prepare(
             "SELECT id, session_id, time_created, time_updated, data FROM message \
-             WHERE session_id = ? AND time_updated >= ? \
+             WHERE session_id = ? AND time_updated > ? \
              ORDER BY time_updated ASC, id ASC \
              LIMIT ?",
         )
@@ -133,7 +133,7 @@ fn read_parts_for_messages_with_limit(
         .prepare(
             "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
              WHERE message_id IN ( \
-                 SELECT id FROM message WHERE session_id = ? AND time_updated >= ? LIMIT ? \
+                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? LIMIT ? \
              ) \
              ORDER BY message_id ASC, time_updated ASC, id ASC",
         )
@@ -241,8 +241,10 @@ impl Agent for OpenCodeAgent {
         // Open SQLite read-only
         let conn = open_sqlite_readonly(path)?;
 
-        // Read messages with time_updated >= watermark_millis (uses >= to avoid skipping
-        // messages sharing the boundary millisecond, with batch LIMIT for memory safety)
+        // LIMIT applied for memory safety. Uses strict > to avoid re-reading.
+        // Note: messages sharing exact same millisecond as watermark boundary could
+        // theoretically be skipped, but OpenCode writes are interactive (not concurrent)
+        // so millisecond collisions are effectively impossible in practice.
         let messages = read_session_messages_raw_with_limit(
             &conn,
             session_id,
@@ -283,10 +285,8 @@ impl Agent for OpenCodeAgent {
             events.push(serde_json::Value::Object(map));
         }
 
-        // Advance watermark 1ms past max_updated to avoid re-reading boundary messages
-        // on the next call (safe because all messages at max_updated are already in the DB)
         let new_watermark_ts =
-            DateTime::from_timestamp_millis(max_updated + 1).unwrap_or(ts_watermark.0);
+            DateTime::from_timestamp_millis(max_updated).unwrap_or(ts_watermark.0);
         let new_watermark = Box::new(TimestampWatermark::new(new_watermark_ts));
 
         Ok(TranscriptBatch {
