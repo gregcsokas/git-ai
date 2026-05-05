@@ -88,9 +88,10 @@ pub struct ResolvedCheckpointExecution {
 }
 
 /// Build EventAttributes for AgentUsage events.
-/// Includes repo_url, branch, tool, model, session_id, prompt_id, and custom attributes.
+/// When repo is available, includes repo_url and branch. Always includes tool, model,
+/// session_id, prompt_id, and custom attributes.
 pub fn build_agent_usage_attrs(
-    repo: &Repository,
+    repo: Option<&Repository>,
     agent_id: &AgentId,
 ) -> crate::metrics::EventAttributes {
     let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
@@ -104,18 +105,20 @@ pub fn build_agent_usage_attrs(
         .external_prompt_id(&agent_id.id)
         .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
-    if let Ok(Some(remote_name)) = repo.get_default_remote()
-        && let Ok(remotes) = repo.remotes_with_urls()
-        && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
-        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-    {
-        attrs = attrs.repo_url(normalized);
-    }
+    if let Some(repo) = repo {
+        if let Ok(Some(remote_name)) = repo.get_default_remote()
+            && let Ok(remotes) = repo.remotes_with_urls()
+            && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
+            && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
+        {
+            attrs = attrs.repo_url(normalized);
+        }
 
-    if let Ok(head_ref) = repo.head()
-        && let Ok(short_branch) = head_ref.shorthand()
-    {
-        attrs = attrs.branch(short_branch);
+        if let Ok(head_ref) = repo.head()
+            && let Ok(short_branch) = head_ref.shorthand()
+        {
+            attrs = attrs.branch(short_branch);
+        }
     }
 
     attrs

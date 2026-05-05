@@ -29,7 +29,7 @@ fn test_agent_usage_attrs_include_repo_url_when_remote_exists() {
         model: "claude-sonnet-4-20250514".to_string(),
     };
 
-    let attrs = build_agent_usage_attrs(&gitai_repo, &agent_id);
+    let attrs = build_agent_usage_attrs(Some(&gitai_repo), &agent_id);
 
     // repo_url should be normalized to HTTPS
     assert_eq!(
@@ -88,7 +88,7 @@ fn test_agent_usage_attrs_normalizes_https_remote_url() {
         model: "gpt-4".to_string(),
     };
 
-    let attrs = build_agent_usage_attrs(&gitai_repo, &agent_id);
+    let attrs = build_agent_usage_attrs(Some(&gitai_repo), &agent_id);
 
     // Should strip .git suffix
     assert_eq!(
@@ -121,7 +121,7 @@ fn test_agent_usage_attrs_include_branch() {
         model: "gpt-4".to_string(),
     };
 
-    let attrs = build_agent_usage_attrs(&gitai_repo, &agent_id);
+    let attrs = build_agent_usage_attrs(Some(&gitai_repo), &agent_id);
 
     // branch should be "main"
     assert_eq!(
@@ -145,7 +145,7 @@ fn test_agent_usage_attrs_no_remote_still_works() {
         model: "claude-opus-4-20250514".to_string(),
     };
 
-    let attrs = build_agent_usage_attrs(&gitai_repo, &agent_id);
+    let attrs = build_agent_usage_attrs(Some(&gitai_repo), &agent_id);
 
     // repo_url should NOT be set (no remote configured)
     assert!(
@@ -180,7 +180,7 @@ fn test_agent_usage_attrs_local_path_remote_no_repo_url() {
         model: "claude-sonnet-4-20250514".to_string(),
     };
 
-    let attrs = build_agent_usage_attrs(&gitai_repo, &agent_id);
+    let attrs = build_agent_usage_attrs(Some(&gitai_repo), &agent_id);
 
     // Local path remotes (like /tmp/...) cannot be normalized, so repo_url should be absent
     assert!(

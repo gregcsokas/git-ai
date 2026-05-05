@@ -1359,14 +1359,27 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
     }
 
     let repo_work_dir = &request.files[0].repo_work_dir;
-    let repo = discover_repository_in_path_no_git_exec(repo_work_dir)?;
+    let repo = match discover_repository_in_path_no_git_exec(repo_work_dir) {
+        Ok(repo) => repo,
+        Err(e) => {
+            if request.checkpoint_kind.is_ai()
+                && let Some(ref agent_id) = request.agent_id
+                && crate::daemon::checkpoint::should_emit_agent_usage(agent_id)
+            {
+                let attrs = crate::daemon::checkpoint::build_agent_usage_attrs(None, agent_id);
+                let values = crate::metrics::AgentUsageValues::new();
+                crate::metrics::record(values, attrs);
+            }
+            return Err(e);
+        }
+    };
     let author = repo.git_author_identity().formatted_or_unknown();
 
     if request.checkpoint_kind.is_ai()
         && let Some(ref agent_id) = request.agent_id
         && crate::daemon::checkpoint::should_emit_agent_usage(agent_id)
     {
-        let attrs = crate::daemon::checkpoint::build_agent_usage_attrs(&repo, agent_id);
+        let attrs = crate::daemon::checkpoint::build_agent_usage_attrs(Some(&repo), agent_id);
         let values = crate::metrics::AgentUsageValues::new();
         crate::metrics::record(values, attrs);
     }
