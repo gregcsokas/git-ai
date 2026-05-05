@@ -435,12 +435,23 @@ impl AuthorshipLog {
                     continue;
                 }
 
-                let prompt_record = self
-                    .metadata
-                    .prompts
-                    .get(session_hash)
-                    .ok_or_else(|| format!("Missing prompt record for hash: {}", session_hash))?
-                    .clone();
+                // s_-prefixed hashes are session attestations — look up in sessions map
+                let prompt_record = if session_hash.starts_with("s_") {
+                    let session_key = session_hash.split("::").next().unwrap_or(session_hash);
+                    self.metadata
+                        .sessions
+                        .get(session_key)
+                        .ok_or_else(|| {
+                            format!("Missing session record for hash: {}", session_hash)
+                        })?
+                        .to_prompt_record()
+                } else {
+                    self.metadata
+                        .prompts
+                        .get(session_hash)
+                        .ok_or_else(|| format!("Missing prompt record for hash: {}", session_hash))?
+                        .clone()
+                };
 
                 // Expand ranges to individual lines, then compress to working log format
                 let mut all_lines: Vec<u32> = Vec::new();
@@ -1532,6 +1543,63 @@ mod tests {
         // Only 1 AI checkpoint — the human entry has no corresponding prompt record
         assert_eq!(checkpoints.len(), 1);
         assert_eq!(checkpoints[0].author, "ai");
+    }
+
+    /// Test that `convert_to_checkpoints_for_squash` correctly handles s_ session attestations
+    /// by looking them up in the sessions map rather than the prompts map.
+    #[test]
+    fn test_convert_to_checkpoints_handles_s_session_entries() {
+        use crate::authorship::working_log::AgentId;
+        use std::collections::HashMap;
+
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = "base456".to_string();
+
+        let agent_id = AgentId {
+            tool: "claude".to_string(),
+            id: "conv_abc123".to_string(),
+            model: "claude-sonnet-4-5-20250514".to_string(),
+        };
+
+        // Generate session ID the same way production code does
+        let session_key = generate_session_id(&agent_id.id, &agent_id.tool);
+        let trace_id = generate_trace_id();
+        let attestation_hash = format!("{}::{}", session_key, trace_id);
+
+        // Insert into sessions map (NOT prompts map)
+        log.metadata.sessions.insert(
+            session_key.clone(),
+            crate::authorship::authorship_log::SessionRecord {
+                agent_id: agent_id.clone(),
+                human_author: Some("dev@example.com".to_string()),
+                custom_attributes: None,
+            },
+        );
+
+        // File with session-format attestation
+        let mut file1 = FileAttestation::new("src/main.rs".to_string());
+        file1.add_entry(AttestationEntry::new(
+            attestation_hash.clone(),
+            vec![LineRange::Range(1, 3)],
+        ));
+        log.attestations.push(file1);
+
+        let mut file_contents = HashMap::new();
+        file_contents.insert(
+            "src/main.rs".to_string(),
+            "line1\nline2\nline3\n".to_string(),
+        );
+
+        let result = log.convert_to_checkpoints_for_squash(&file_contents);
+        assert!(
+            result.is_ok(),
+            "convert_to_checkpoints_for_squash must handle s_ session entries: {:?}",
+            result.err()
+        );
+        let checkpoints = result.unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().tool, "claude");
+        assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().id, "conv_abc123");
     }
 
     // TODO: `get_line_attribution` routing for h_ hashes requires a live `Repository` instance

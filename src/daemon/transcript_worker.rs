@@ -483,8 +483,14 @@ impl TranscriptWorker {
 
             self.in_flight.remove(&task.canonical_path);
 
-            if let Err(e) = result {
-                tracing::error!(error = %e, session_id = %task.session_id, "failed to drain task");
+            match result {
+                Err(e) => {
+                    tracing::error!(error = %e, session_id = %task.session_id, "drain task panicked");
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, session_id = %task.session_id, "drain task processing error");
+                }
+                Ok(Ok(())) => {}
             }
         }
     }

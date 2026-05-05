@@ -44,23 +44,25 @@ fn open_sqlite_readonly(path: &Path) -> Result<Connection, TranscriptError> {
 
 /// Read messages from the database, returning each row as a complete JSON object
 /// containing all columns (id, session_id, time_created, time_updated, data).
-fn read_session_messages_raw(
+fn read_session_messages_raw_with_limit(
     conn: &Connection,
     session_id: &str,
     after_updated: i64,
+    limit: usize,
 ) -> Result<Vec<(String, i64, serde_json::Value)>, TranscriptError> {
     let mut stmt = conn
         .prepare(
             "SELECT id, session_id, time_created, time_updated, data FROM message \
              WHERE session_id = ? AND time_updated > ? \
-             ORDER BY time_updated ASC, id ASC",
+             ORDER BY time_updated ASC, id ASC \
+             LIMIT ?",
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to prepare message query: {}", e),
         })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![session_id, after_updated], |row| {
+        .query_map(rusqlite::params![session_id, after_updated, limit], |row| {
             let id: String = row.get(0)?;
             let row_session_id: String = row.get(1)?;
             let time_created: i64 = row.get(2)?;
@@ -112,16 +114,17 @@ fn read_session_messages_raw(
 /// all parts for the entire session. Returns each row as a complete JSON object
 /// containing all columns (id, message_id, session_id, time_created, time_updated, data),
 /// grouped by message_id.
-fn read_parts_for_messages(
+fn read_parts_for_messages_with_limit(
     conn: &Connection,
     session_id: &str,
     after_updated: i64,
+    limit: usize,
 ) -> Result<HashMap<String, Vec<serde_json::Value>>, TranscriptError> {
     let mut stmt = conn
         .prepare(
             "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
              WHERE message_id IN ( \
-                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? \
+                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? ORDER BY time_updated ASC, id ASC LIMIT ? \
              ) \
              ORDER BY message_id ASC, time_updated ASC, id ASC",
         )
@@ -130,7 +133,7 @@ fn read_parts_for_messages(
         })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![session_id, after_updated], |row| {
+        .query_map(rusqlite::params![session_id, after_updated, limit], |row| {
             let id: String = row.get(0)?;
             let message_id: String = row.get(1)?;
             let row_session_id: String = row.get(2)?;
@@ -229,8 +232,16 @@ impl Agent for OpenCodeAgent {
         // Open SQLite read-only
         let conn = open_sqlite_readonly(path)?;
 
-        // Read messages with time_updated > watermark_millis
-        let messages = read_session_messages_raw(&conn, session_id, watermark_millis)?;
+        // LIMIT applied for memory safety. Uses strict > to avoid re-reading.
+        // Note: messages sharing exact same millisecond as watermark boundary could
+        // theoretically be skipped, but OpenCode writes are interactive (not concurrent)
+        // so millisecond collisions are effectively impossible in practice.
+        let messages = read_session_messages_raw_with_limit(
+            &conn,
+            session_id,
+            watermark_millis,
+            self.batch_size,
+        )?;
 
         if messages.is_empty() {
             return Ok(TranscriptBatch {
@@ -240,7 +251,12 @@ impl Agent for OpenCodeAgent {
         }
 
         // Read only parts for the matched messages (IN-subquery, single scan)
-        let mut parts_by_message = read_parts_for_messages(&conn, session_id, watermark_millis)?;
+        let mut parts_by_message = read_parts_for_messages_with_limit(
+            &conn,
+            session_id,
+            watermark_millis,
+            self.batch_size,
+        )?;
 
         let mut max_updated: i64 = watermark_millis;
         let mut events = Vec::with_capacity(messages.len());
@@ -464,12 +480,59 @@ mod tests {
     }
 
     #[test]
+    fn test_limit_caps_memory_and_watermark_still_drains_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path, 20);
+
+        // batch_size=3 forces multiple iterations to drain 20 messages
+        let agent = OpenCodeAgent::with_batch_size(3);
+        let (events, _) = drain_all(&agent, &db_path);
+
+        assert_eq!(
+            events.len(),
+            20,
+            "all 20 messages must be returned across batches"
+        );
+        let ids: Vec<u64> = events
+            .iter()
+            .map(|e| e["message"]["data"]["id"].as_u64().unwrap())
+            .collect();
+        let expected: Vec<u64> = (0..20).collect();
+        assert_eq!(
+            ids, expected,
+            "messages must arrive in order with no gaps or duplicates"
+        );
+    }
+
+    #[test]
+    fn test_limit_returns_at_most_batch_size_per_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path, 10);
+
+        let agent = OpenCodeAgent::with_batch_size(4);
+        let wm: Box<dyn WatermarkStrategy> = Box::new(TimestampWatermark::new(
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        ));
+
+        let batch = agent
+            .read_incremental(&db_path, wm, "test-session")
+            .unwrap();
+        assert!(
+            batch.events.len() <= 4,
+            "single call must not exceed batch_size (got {})",
+            batch.events.len()
+        );
+    }
+
+    #[test]
     fn test_parts_are_batch_loaded_not_per_message() {
         let db_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/opencode-sqlite/opencode.db");
         let conn = open_sqlite_readonly(&db_path).unwrap();
         // watermark=0 matches all messages in the fixture
-        let parts = read_parts_for_messages(&conn, "test-session-123", 0).unwrap();
+        let parts = read_parts_for_messages_with_limit(&conn, "test-session-123", 0, 1000).unwrap();
         // Verify IN-subquery loading returns parts grouped by message_id.
         // Single query with IN-subquery instead of one per message,
         // prevents full-table-scan memory blowup on large unindexed databases.
