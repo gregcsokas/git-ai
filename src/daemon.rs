@@ -5881,6 +5881,15 @@ impl ActorDaemonCoordinator {
                         }
                     }
 
+                    // Recompute file paths after potential KnownHuman filtering so
+                    // watermark computation and clear_pending_ai_edits use the actual
+                    // files that will be checkpointed.
+                    let checkpoint_file_paths: Vec<String> = request
+                        .files
+                        .iter()
+                        .map(|f| f.path.to_string_lossy().to_string())
+                        .collect();
+
                     let should_log_completion = true; // Always log for test sync
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
                     let checkpoint_start = std::time::Instant::now();
