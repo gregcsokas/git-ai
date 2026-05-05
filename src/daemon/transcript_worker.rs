@@ -168,7 +168,9 @@ impl TranscriptWorker {
 
     /// Run a sweep across all agents to discover new/behind sessions.
     async fn run_sweep(&mut self) -> Result<(), String> {
-        let sessions = tokio::task::block_in_place(|| self.sweep_coordinator.run_sweep())
+        let sessions = self
+            .sweep_coordinator
+            .run_sweep()
             .map_err(|e| e.to_string())?;
 
         tracing::info!(discovered = sessions.len(), "sweep completed");
