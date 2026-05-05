@@ -38,6 +38,11 @@ pub struct CheckpointRequest {
     pub path_role: PreparedPathRole,
     pub transcript_source: Option<TranscriptSource>,
     pub metadata: HashMap<String, String>,
+    /// True when this WillEdit checkpoint is a pre-edit snapshot for an upcoming
+    /// AI PostFileEdit. Used to suppress spurious KnownHuman checkpoints that
+    /// arrive between pre/post-edit.
+    #[serde(default)]
+    pub is_ai_pre_edit: bool,
 }
 
 struct RepoContext {
@@ -232,6 +237,7 @@ fn execute_event(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn split_files_into_requests(
     all_files: Vec<CheckpointFile>,
     trace_id: String,
@@ -240,6 +246,7 @@ fn split_files_into_requests(
     path_role: PreparedPathRole,
     transcript_source: Option<TranscriptSource>,
     metadata: HashMap<String, String>,
+    is_ai_pre_edit: bool,
 ) -> Vec<CheckpointRequest> {
     let mut by_repo: HashMap<PathBuf, Vec<CheckpointFile>> = HashMap::new();
     for f in all_files {
@@ -256,6 +263,7 @@ fn split_files_into_requests(
             path_role,
             transcript_source: transcript_source.clone(),
             metadata: metadata.clone(),
+            is_ai_pre_edit,
         })
         .collect()
 }
@@ -281,6 +289,7 @@ fn execute_pre_file_edit(e: PreFileEdit) -> Result<Vec<CheckpointRequest>, GitAi
         PreparedPathRole::WillEdit,
         None,
         metadata,
+        true,
     ))
 }
 
@@ -312,6 +321,7 @@ fn execute_post_file_edit(
         PreparedPathRole::Edited,
         e.transcript_source,
         metadata,
+        false,
     ))
 }
 
@@ -332,6 +342,7 @@ fn execute_known_human_edit(e: KnownHumanEdit) -> Result<Vec<CheckpointRequest>,
         PreparedPathRole::Edited,
         None,
         e.editor_metadata,
+        false,
     ))
 }
 
@@ -345,6 +356,7 @@ fn execute_untracked_edit(e: UntrackedEdit) -> Result<Vec<CheckpointRequest>, Gi
         PreparedPathRole::WillEdit,
         None,
         HashMap::new(),
+        false,
     ))
 }
 
@@ -390,6 +402,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
         PreparedPathRole::WillEdit,
         None,
         metadata,
+        true,
     ))
 }
 
@@ -432,5 +445,6 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
         PreparedPathRole::Edited,
         e.transcript_source,
         metadata,
+        false,
     ))
 }
