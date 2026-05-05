@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
@@ -35,16 +35,17 @@ impl AgentPreset for ContinueCliPreset {
                     .unwrap_or("unknown")
                     .to_string(),
             },
-            session_id,
+            session_id: session_id.clone(),
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
         };
 
-        let transcript_source = Some(TranscriptSource::Path {
+        let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(transcript_path),
             format: TranscriptFormat::ContinueJson,
-            session_id: None,
+            session_id: session_id.clone(),
+            external_thread_id: Some(session_id.clone()),
         });
 
         let is_pre = hook_event == Some("PreToolUse");
@@ -53,7 +54,6 @@ impl AgentPreset for ContinueCliPreset {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id.to_string(),
-                strategy: BashPreHookStrategy::EmitHumanCheckpoint,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -124,13 +124,11 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "continue-cli");
-                assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource::Path {
-                        format: TranscriptFormat::ContinueJson,
-                        ..
-                    })
-                ));
+                assert!(e.transcript_source.is_some());
+                if let Some(ts) = &e.transcript_source {
+                    assert_eq!(ts.format, TranscriptFormat::ContinueJson);
+                    assert_eq!(ts.session_id, "cont-sess-1");
+                }
             }
             _ => panic!("Expected PostFileEdit"),
         }
@@ -145,7 +143,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "continue-cli");
                 assert_eq!(e.tool_use_id, "tu-1");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }

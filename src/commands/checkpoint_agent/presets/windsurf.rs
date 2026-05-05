@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::error::GitAiError;
@@ -109,10 +109,11 @@ impl AgentPreset for WindsurfPreset {
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.clone())]),
         };
 
-        let transcript_source = Some(TranscriptSource::Path {
+        let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(&transcript_path),
             format: TranscriptFormat::WindsurfJsonl,
-            session_id: None,
+            session_id: context.session_id.clone(),
+            external_thread_id: None,
         });
 
         let is_bash = matches!(
@@ -134,7 +135,6 @@ impl AgentPreset for WindsurfPreset {
                 ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
                     tool_use_id: execution_id,
-                    strategy: BashPreHookStrategy::EmitHumanCheckpoint,
                 })
             } else {
                 ParsedHookEvent::PostBashCall(PostBashCall {
@@ -234,7 +234,7 @@ mod tests {
                 );
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::WindsurfJsonl,
                         ..
                     })
@@ -259,7 +259,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "windsurf");
                 assert_eq!(e.tool_use_id, "exec-bash-1");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }

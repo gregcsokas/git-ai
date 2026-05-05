@@ -1,6 +1,6 @@
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
@@ -29,12 +29,6 @@ struct PiHookInput {
     dirty_files: Option<HashMap<String, String>>,
     #[serde(default)]
     tool_use_id: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    tool_input: Option<serde_json::Value>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    tool_result: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -98,8 +92,6 @@ impl AgentPreset for PiPreset {
             edited_filepaths,
             dirty_files,
             tool_use_id,
-            tool_input: _,
-            tool_result: _,
         } = hook_input;
 
         let hook_event = PiHookEvent::parse(&hook_event_name)?;
@@ -128,9 +120,6 @@ impl AgentPreset for PiPreset {
             model_stripped
         };
 
-        let dirty =
-            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
-
         // Build agent metadata
         let mut metadata = HashMap::new();
         metadata.insert("session_path".to_string(), session_path.clone());
@@ -157,12 +146,16 @@ impl AgentPreset for PiPreset {
 
         let transcript_source = {
             let path = PathBuf::from(&session_path);
-            Some(TranscriptSource::Path {
+            Some(TranscriptSource {
                 path,
                 format: TranscriptFormat::PiJsonl,
-                session_id: None,
+                session_id: context.session_id.clone(),
+                external_thread_id: None,
             })
         };
+
+        let dirty =
+            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
 
         let event = match hook_event {
             PiHookEvent::BeforeEdit => {
@@ -193,7 +186,6 @@ impl AgentPreset for PiPreset {
             PiHookEvent::BeforeCommand => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
-                strategy: BashPreHookStrategy::EmitHumanCheckpoint,
             }),
             PiHookEvent::AfterCommand => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -283,7 +275,7 @@ mod tests {
                 );
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::PiJsonl,
                         ..
                     })
@@ -312,7 +304,6 @@ mod tests {
                 assert_eq!(e.context.agent_id.tool, "pi");
                 assert_eq!(e.context.session_id, "pi-sess-789");
                 assert_eq!(e.tool_use_id, "tu-abc123");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }
@@ -338,7 +329,7 @@ mod tests {
                 assert_eq!(e.tool_use_id, "tu-def456");
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::PiJsonl,
                         ..
                     })

@@ -1,13 +1,13 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct GeminiPreset;
 
@@ -31,7 +31,14 @@ impl AgentPreset for GeminiPreset {
             agent_id: AgentId {
                 tool: "gemini".to_string(),
                 id: session_id.clone(),
-                model: "unknown".to_string(),
+                model: crate::transcripts::model_extraction::extract_model(
+                    Path::new(transcript_path),
+                    crate::transcripts::sweep::TranscriptFormat::GeminiJsonl,
+                    None,
+                )
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "unknown".to_string()),
             },
             session_id,
             trace_id: trace_id.to_string(),
@@ -39,10 +46,11 @@ impl AgentPreset for GeminiPreset {
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
         };
 
-        let transcript_source = Some(TranscriptSource::Path {
+        let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(transcript_path),
-            format: TranscriptFormat::GeminiJson,
-            session_id: None,
+            format: TranscriptFormat::GeminiJsonl,
+            session_id: context.session_id.clone(),
+            external_thread_id: None,
         });
 
         // Gemini uses "BeforeTool" instead of "PreToolUse"
@@ -52,7 +60,6 @@ impl AgentPreset for GeminiPreset {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id.to_string(),
-                strategy: BashPreHookStrategy::EmitHumanCheckpoint,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -110,7 +117,6 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_none());
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -130,8 +136,8 @@ mod tests {
                 );
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
-                        format: TranscriptFormat::GeminiJson,
+                    Some(TranscriptSource {
+                        format: TranscriptFormat::GeminiJsonl,
                         ..
                     })
                 ));
@@ -149,7 +155,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "gemini");
                 assert_eq!(e.tool_use_id, "tu-1");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }

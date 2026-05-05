@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
@@ -301,7 +301,18 @@ impl AgentPreset for AmpPreset {
             agent_id: AgentId {
                 tool: "amp".to_string(),
                 id: session_id.clone(),
-                model: "unknown".to_string(), // model resolved later from transcript
+                model: resolved_transcript_path
+                    .as_ref()
+                    .and_then(|tp| {
+                        crate::transcripts::model_extraction::extract_model(
+                            tp,
+                            crate::transcripts::sweep::TranscriptFormat::AmpThreadJson,
+                            None,
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .unwrap_or_else(|| "unknown".to_string()),
             },
             session_id,
             trace_id: trace_id.to_string(),
@@ -309,17 +320,17 @@ impl AgentPreset for AmpPreset {
             metadata,
         };
 
-        let transcript_source = resolved_transcript_path.map(|path| TranscriptSource::Path {
+        let transcript_source = resolved_transcript_path.map(|path| TranscriptSource {
             path,
             format: TranscriptFormat::AmpThreadJson,
-            session_id: None,
+            session_id: context.session_id.clone(),
+            external_thread_id: None,
         });
 
         let event = match (is_pre, is_bash) {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
-                strategy: BashPreHookStrategy::EmitHumanCheckpoint,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -416,7 +427,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "amp");
                 assert_eq!(e.tool_use_id, "tu-abc");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }
