@@ -255,3 +255,62 @@ fn test_multi_file_pre_edit_suppresses_all_files() {
     let mut fb = repo.filename("b.txt");
     fb.assert_committed_lines(lines!["b base".unattributed_human(), "b ai line".ai(),]);
 }
+
+/// A single multi-file KnownHuman checkpoint that bundles files where only
+/// SOME have pending AI edits. The pending-AI files should be filtered out
+/// (suppressed) while the non-pending files still get KnownHuman attribution.
+/// Uses stats --json to verify human_additions (KnownHuman) vs unknown_additions.
+#[test]
+fn test_multi_file_known_human_partial_suppression() {
+    let repo = TestRepo::new();
+    let ai_file = repo.path().join("ai_file.txt");
+    let human_file = repo.path().join("human_file.txt");
+
+    fs::write(&ai_file, "ai base\n").unwrap();
+    fs::write(&human_file, "human base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // Only ai_file.txt gets a pre-edit checkpoint (pending AI edit)
+    fire_pre_edit_checkpoint(&repo, &["ai_file.txt"]);
+
+    // Both files are edited
+    fs::write(&ai_file, "ai base\nai new line\n").unwrap();
+    fs::write(&human_file, "human base\nhuman new line\n").unwrap();
+
+    // Single KnownHuman checkpoint for BOTH files at once
+    repo.git_ai(&[
+        "checkpoint",
+        "mock_known_human",
+        "ai_file.txt",
+        "human_file.txt",
+    ])
+    .unwrap();
+
+    // AI post-edit only for ai_file.txt
+    fire_post_edit_checkpoint(&repo, &["ai_file.txt"]);
+
+    repo.stage_all_and_commit("Mixed multi-file checkpoint")
+        .unwrap();
+
+    // ai_file.txt: KnownHuman was suppressed for this file, AI post-edit attributed it
+    let mut ai_f = repo.filename("ai_file.txt");
+    ai_f.assert_committed_lines(lines!["ai base".unattributed_human(), "ai new line".ai(),]);
+
+    // Verify via stats that human_file.txt's line is KnownHuman (not unattributed).
+    // human_additions counts lines with KnownHuman attestation;
+    // unknown_additions counts unattributed lines.
+    let raw = repo
+        .git_ai(&["stats", "--json"])
+        .expect("stats should succeed");
+    let json_start = raw.find('{').unwrap_or(0);
+    let json_end = raw.rfind('}').unwrap_or(raw.len().saturating_sub(1));
+    let stats: serde_json::Value =
+        serde_json::from_str(&raw[json_start..=json_end]).expect("valid stats json");
+
+    assert_eq!(
+        stats["human_additions"],
+        1,
+        "human_file.txt's new line should be KnownHuman-attributed (not suppressed). Stats: {}",
+        serde_json::to_string_pretty(&stats).unwrap()
+    );
+}

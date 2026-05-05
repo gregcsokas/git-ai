@@ -4155,16 +4155,14 @@ impl ActorDaemonCoordinator {
         }
     }
 
-    fn has_pending_ai_edit_for_files(&self, family: &str, file_paths: &[String]) -> bool {
+    fn file_has_pending_ai_edit(&self, family: &str, file_path: &str) -> bool {
         const PENDING_AI_EDIT_TIMEOUT_NS: u128 = 10_000_000_000; // 10 seconds
         let now_ns = now_unix_nanos();
         if let Ok(map) = self.pending_ai_edits_by_family.lock()
             && let Some(family_map) = map.get(family)
         {
-            return file_paths.iter().any(|f| {
-                family_map.get(f).is_some_and(|registered_at| {
-                    now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
-                })
+            return family_map.get(file_path).is_some_and(|registered_at| {
+                now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
             });
         }
         false
@@ -5818,7 +5816,7 @@ impl ActorDaemonCoordinator {
                     }
                 }
                 FamilySequencerEntry::Checkpoint {
-                    request,
+                    mut request,
                     respond_to,
                 } => {
                     let repo_wd = request
@@ -5845,30 +5843,42 @@ impl ActorDaemonCoordinator {
                         self.register_pending_ai_edits(family, &checkpoint_file_paths);
                     }
 
-                    // Suppress KnownHuman checkpoints for files with pending AI edits.
+                    // Filter out files with pending AI edits from KnownHuman checkpoints.
                     // These are spurious IDE save events that fire between pre/post-edit.
-                    if checkpoint_kind == CheckpointKind::KnownHuman
-                        && self.has_pending_ai_edit_for_files(family, &checkpoint_file_paths)
-                    {
-                        tracing::debug!(
-                            "[KnownHuman] Suppressed: files have pending AI edit in-flight"
-                        );
-                        let log_entry = TestCompletionLogEntry {
-                            seq: 0,
-                            family_key: family.to_string(),
-                            kind: "checkpoint".to_string(),
-                            primary_command: Some("checkpoint".to_string()),
-                            test_sync_session: None,
-                            exit_code: None,
-                            sync_tracked: true,
-                            status: "suppressed".to_string(),
-                            error: None,
-                        };
-                        let _ = self.maybe_append_test_completion_log(family, &log_entry);
-                        if let Some(respond_to) = respond_to {
-                            let _ = respond_to.send(Ok(0));
+                    if checkpoint_kind == CheckpointKind::KnownHuman {
+                        let pending_files: Vec<String> = checkpoint_file_paths
+                            .iter()
+                            .filter(|f| self.file_has_pending_ai_edit(family, f))
+                            .cloned()
+                            .collect();
+                        if !pending_files.is_empty() {
+                            request.files.retain(|f| {
+                                let path_str = f.path.to_string_lossy().to_string();
+                                !pending_files.contains(&path_str)
+                            });
+                            tracing::debug!(
+                                "[KnownHuman] Filtered {} file(s) with pending AI edits",
+                                pending_files.len()
+                            );
+                            if request.files.is_empty() {
+                                let log_entry = TestCompletionLogEntry {
+                                    seq: 0,
+                                    family_key: family.to_string(),
+                                    kind: "checkpoint".to_string(),
+                                    primary_command: Some("checkpoint".to_string()),
+                                    test_sync_session: None,
+                                    exit_code: None,
+                                    sync_tracked: true,
+                                    status: "suppressed".to_string(),
+                                    error: None,
+                                };
+                                let _ = self.maybe_append_test_completion_log(family, &log_entry);
+                                if let Some(respond_to) = respond_to {
+                                    let _ = respond_to.send(Ok(0));
+                                }
+                                continue;
+                            }
                         }
-                        continue;
                     }
 
                     let should_log_completion = true; // Always log for test sync
