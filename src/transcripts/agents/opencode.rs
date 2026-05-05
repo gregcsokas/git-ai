@@ -125,7 +125,7 @@ fn read_parts_for_messages_with_limit(
         .prepare(
             "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
              WHERE message_id IN ( \
-                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? LIMIT ? \
+                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? ORDER BY time_updated ASC, id ASC LIMIT ? \
              ) \
              ORDER BY message_id ASC, time_updated ASC, id ASC",
         )
