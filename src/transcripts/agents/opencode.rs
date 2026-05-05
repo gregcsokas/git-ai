@@ -111,18 +111,10 @@ fn read_session_messages_raw_with_limit(
 }
 
 /// Read parts for the matched messages only, using an IN-subquery to avoid loading
+/// Read parts for the matched messages only, using an IN-subquery to avoid loading
 /// all parts for the entire session. Returns each row as a complete JSON object
 /// containing all columns (id, message_id, session_id, time_created, time_updated, data),
 /// grouped by message_id.
-#[cfg(test)]
-fn read_parts_for_messages(
-    conn: &Connection,
-    session_id: &str,
-    after_updated: i64,
-) -> Result<HashMap<String, Vec<serde_json::Value>>, TranscriptError> {
-    read_parts_for_messages_with_limit(conn, session_id, after_updated, 1000)
-}
-
 fn read_parts_for_messages_with_limit(
     conn: &Connection,
     session_id: &str,
@@ -494,7 +486,7 @@ mod tests {
             .join("tests/fixtures/opencode-sqlite/opencode.db");
         let conn = open_sqlite_readonly(&db_path).unwrap();
         // watermark=0 matches all messages in the fixture
-        let parts = read_parts_for_messages(&conn, "test-session-123", 0).unwrap();
+        let parts = read_parts_for_messages_with_limit(&conn, "test-session-123", 0, 1000).unwrap();
         // Verify IN-subquery loading returns parts grouped by message_id.
         // Single query with IN-subquery instead of one per message,
         // prevents full-table-scan memory blowup on large unindexed databases.
