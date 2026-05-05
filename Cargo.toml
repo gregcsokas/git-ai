@@ -18,7 +18,6 @@ futures = "0.3"
 tokio = { version = "1.52", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-interprocess = "2.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
 libc = "0.2"
 jsonc-parser = { version = "0.32", features = ["cst"] }
@@ -45,8 +44,12 @@ unicode-normalization = "0.1"
 openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(windows)'.dependencies]
-named_pipe = "0.4.1"
 winreg = "0.55"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+] }
 
 [features]
 test-support = []

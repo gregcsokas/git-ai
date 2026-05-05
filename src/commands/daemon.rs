@@ -4,17 +4,11 @@ use crate::daemon::{
     send_control_request,
 };
 use crate::utils::LockFile;
-#[cfg(windows)]
-use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-#[cfg(windows)]
-use std::{ffi::OsStr, path::Path};
 
 pub fn handle_daemon(args: &[String]) {
     if args.is_empty() || is_help(args[0].as_str()) {
@@ -76,30 +70,18 @@ fn handle_start(args: &[String]) -> Result<(), String> {
 }
 
 fn daemon_startup_timeout() -> Duration {
-    #[cfg(windows)]
+    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+        || std::env::var_os("CI").is_some()
     {
-        if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
-            || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
-            || std::env::var_os("CI").is_some()
-        {
-            return Duration::from_secs(12);
-        }
-
+        Duration::from_secs(12)
+    } else {
         Duration::from_secs(5)
-    }
-
-    #[cfg(not(windows))]
-    {
-        Duration::from_secs(2)
     }
 }
 
 /// Spawn a daemon and wait for it to become healthy. Used by explicit CLI
 /// commands (`bg start`, `bg restart`) — NOT guarded for test builds.
-///
-/// On Unix, spawns with piped stderr so startup failures are surfaced to the
-/// user. On Windows, spawns fully detached (null stdio) because piped handles
-/// cause the parent to hang when the daemon outlives it.
 fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, String> {
     let config = daemon_config_from_env_or_default_paths()?;
     if daemon_is_up(&config) {
@@ -113,57 +95,40 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
         ));
     }
 
-    #[cfg(not(windows))]
-    {
-        let mut child = spawn_daemon_run_with_piped_stderr(&config)?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            if daemon_is_up(&config) {
-                return Ok(config);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) if !status.success() => {
-                    let mut stderr_buf = String::new();
-                    if let Some(mut stderr) = child.stderr.take() {
-                        use std::io::Read;
-                        let _ = stderr.read_to_string(&mut stderr_buf);
-                    }
-                    let detail = if stderr_buf.trim().is_empty() {
-                        format!("daemon process exited with {}", status)
-                    } else {
-                        stderr_buf.trim().to_string()
-                    };
-                    return Err(format!("daemon failed to start: {}", detail));
-                }
-                Ok(Some(_)) => {
-                    return Err("daemon process exited before sockets were ready".to_string());
-                }
-                _ => {}
-            }
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "timed out after {:?} waiting for daemon sockets {} and {}",
-                    timeout,
-                    config.control_socket_path.display(),
-                    config.trace_socket_path.display()
-                ));
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        spawn_daemon_run_detached(&config)?;
-        if wait_for_daemon_up(&config, timeout) {
+    let mut child = spawn_daemon_run_with_piped_stderr(&config)?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if daemon_is_up(&config) {
             return Ok(config);
         }
-        Err(format!(
-            "timed out after {:?} waiting for daemon sockets {} and {}",
-            timeout,
-            config.control_socket_path.display(),
-            config.trace_socket_path.display()
-        ))
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                let mut stderr_buf = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = stderr.read_to_string(&mut stderr_buf);
+                }
+                let detail = if stderr_buf.trim().is_empty() {
+                    format!("daemon process exited with {}", status)
+                } else {
+                    stderr_buf.trim().to_string()
+                };
+                return Err(format!("daemon failed to start: {}", detail));
+            }
+            Ok(Some(_)) => {
+                return Err("daemon process exited before sockets were ready".to_string());
+            }
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out after {:?} waiting for daemon sockets {} and {}",
+                timeout,
+                config.control_socket_path.display(),
+                config.trace_socket_path.display()
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -329,11 +294,6 @@ fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
         .ok_or_else(|| "daemon lock path has no parent".to_string())
 }
 
-#[cfg(windows)]
-fn powershell_single_quote_literal(value: &OsStr) -> String {
-    format!("'{}'", value.to_string_lossy().replace('\'', "''"))
-}
-
 #[cfg(any(windows, not(any(test, feature = "test-support"))))]
 fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     // Use current_git_ai_exe() instead of current_exe() to resolve through
@@ -343,29 +303,29 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     let exe = crate::utils::current_git_ai_exe().map_err(|e| e.to_string())?;
     let runtime_dir = daemon_runtime_dir(config)?;
 
+    let mut child = Command::new(exe);
+    child
+        .arg("bg")
+        .arg("run")
+        .current_dir(&runtime_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Remove git environment variables that must not leak into the daemon.
+    // The daemon is repository-agnostic; variables like GIT_DIR override
+    // the -C flag and cause repository resolution failures.
+    for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
+        child.env_remove(var);
+    }
+    // GIT_AI controls debug routing in the binary (GIT_AI=git → handle_git).
+    // A daemon that inherits this would route "bg run" to the git proxy instead
+    // of starting as a daemon.
+    child.env_remove("GIT_AI");
+
     #[cfg(windows)]
     {
-        let script = format!(
-            "Start-Process -FilePath {} -ArgumentList @('bg','run') -WorkingDirectory {} -WindowStyle Hidden",
-            powershell_single_quote_literal(exe.as_os_str()),
-            powershell_single_quote_literal(Path::new(&runtime_dir).as_os_str())
-        );
-        let mut child = Command::new("powershell.exe");
-        child
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-WindowStyle")
-            .arg("Hidden")
-            .arg("-Command")
-            .arg(script)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        // Remove git environment variables that must not leak into the daemon.
-        for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
-            child.env_remove(var);
-        }
-        child.env_remove("GIT_AI");
+        use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+        use std::os::windows::process::CommandExt;
 
         let preferred_flags =
             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
@@ -390,29 +350,10 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
 
     #[cfg(not(windows))]
     {
-        let mut child = Command::new(exe);
-        child
-            .arg("bg")
-            .arg("run")
-            .current_dir(&runtime_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        // Remove git environment variables that must not leak into the daemon.
-        // The daemon is repository-agnostic; variables like GIT_DIR override
-        // the -C flag and cause repository resolution failures.
-        for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
-            child.env_remove(var);
-        }
-        // GIT_AI controls debug routing in the binary (GIT_AI=git → handle_git).
-        // A daemon that inherits this would route "bg run" to the git proxy instead
-        // of starting as a daemon.
-        child.env_remove("GIT_AI");
         child.spawn().map(|_| ()).map_err(|e| e.to_string())
     }
 }
 
-#[cfg(not(windows))]
 fn spawn_daemon_run_with_piped_stderr(
     config: &DaemonConfig,
 ) -> Result<std::process::Child, String> {

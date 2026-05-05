@@ -21,6 +21,7 @@ use crate::git::rewrite_log::{
     RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
 };
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
+use crate::os_sockets::{UnixListener, UnixStream};
 use crate::utils::LockFile;
 use crate::{
     authorship::post_commit::post_commit_with_final_state,
@@ -35,25 +36,11 @@ use crate::{
     commands::hooks::{push_hooks, stash_hooks},
     daemon::checkpoint::PreparedPathRole,
 };
-#[cfg(not(windows))]
-use interprocess::local_socket::ConnectOptions;
-#[cfg(not(windows))]
-use interprocess::{
-    ConnectWaitMode,
-    local_socket::{GenericFilePath, ListenerOptions, Name, prelude::*},
-};
-#[cfg(windows)]
-use named_pipe::{
-    ConnectingServer as WindowsConnectingServer, OpenMode as WindowsPipeOpenMode,
-    PipeClient as WindowsPipeClient, PipeOptions as WindowsPipeOptions,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-#[cfg(windows)]
-use std::io;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
@@ -94,10 +81,6 @@ const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
 const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(windows)]
-const WINDOWS_TRACE_PIPE_WORKERS: usize = 16;
-#[cfg(windows)]
-const WINDOWS_CONTROL_PIPE_WORKERS: usize = 8;
-#[cfg(windows)]
 const WINDOWS_STDOUT_HANDLE: u32 = (-11i32) as u32;
 #[cfg(windows)]
 const WINDOWS_STDERR_HANDLE: u32 = (-12i32) as u32;
@@ -108,37 +91,7 @@ unsafe extern "system" {
     fn SetStdHandle(nstdhandle: u32, hhandle: *mut std::ffi::c_void) -> i32;
 }
 
-#[cfg(not(windows))]
-pub type DaemonClientStream = LocalSocketStream;
-
-#[cfg(windows)]
-pub enum DaemonClientStream {
-    WindowsPipe(WindowsPipeClient),
-}
-
-#[cfg(windows)]
-impl Read for DaemonClientStream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::WindowsPipe(stream) => stream.read(buf),
-        }
-    }
-}
-
-#[cfg(windows)]
-impl Write for DaemonClientStream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::WindowsPipe(stream) => stream.write(buf),
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::WindowsPipe(stream) => stream.flush(),
-        }
-    }
-}
+pub type DaemonClientStream = UnixStream;
 
 pub fn daemon_process_active() -> bool {
     DAEMON_PROCESS_ACTIVE.load(Ordering::SeqCst)
@@ -170,39 +123,21 @@ pub struct DaemonConfig {
 impl DaemonConfig {
     fn from_internal_dir(internal_dir: PathBuf) -> Self {
         let daemon_dir = internal_dir.join("daemon");
-        #[cfg(unix)]
-        let (lock_path, trace_socket_path, control_socket_path) = {
-            let mut lock_path = daemon_dir.join("daemon.lock");
-            let mut trace_socket_path = daemon_dir.join("trace2.sock");
-            let mut control_socket_path = daemon_dir.join("control.sock");
-            let too_long = |path: &Path| path.to_string_lossy().len() >= 100;
+        let mut lock_path = daemon_dir.join("daemon.lock");
+        let mut trace_socket_path = daemon_dir.join("trace2.sock");
+        let mut control_socket_path = daemon_dir.join("control.sock");
+        let too_long = |path: &Path| path.to_string_lossy().len() >= 100;
 
-            if too_long(&trace_socket_path) || too_long(&control_socket_path) {
-                let mut hasher = Sha256::new();
-                hasher.update(internal_dir.to_string_lossy().as_bytes());
-                let digest = format!("{:x}", hasher.finalize());
-                let short = &digest[..16];
-                let short_dir = std::env::temp_dir().join(format!("git-ai-d-{}", short));
-                lock_path = short_dir.join("daemon.lock");
-                trace_socket_path = short_dir.join("trace.sock");
-                control_socket_path = short_dir.join("control.sock");
-            }
-
-            (lock_path, trace_socket_path, control_socket_path)
-        };
-
-        #[cfg(not(unix))]
-        let (lock_path, trace_socket_path, control_socket_path) = {
+        if too_long(&trace_socket_path) || too_long(&control_socket_path) {
             let mut hasher = Sha256::new();
             hasher.update(internal_dir.to_string_lossy().as_bytes());
             let digest = format!("{:x}", hasher.finalize());
             let short = &digest[..16];
-            (
-                daemon_dir.join("daemon.lock"),
-                PathBuf::from(format!(r"\\.\pipe\git-ai-{}-trace2", short)),
-                PathBuf::from(format!(r"\\.\pipe\git-ai-{}-control", short)),
-            )
-        };
+            let short_dir = std::env::temp_dir().join(format!("git-ai-d-{}", short));
+            lock_path = short_dir.join("daemon.lock");
+            trace_socket_path = short_dir.join("trace.sock");
+            control_socket_path = short_dir.join("control.sock");
+        }
 
         Self {
             internal_dir,
@@ -275,14 +210,7 @@ impl DaemonConfig {
     }
 
     pub fn trace2_event_target_for_path(path: &Path) -> String {
-        #[cfg(unix)]
-        {
-            format!("af_unix:stream:{}", path.to_string_lossy())
-        }
-        #[cfg(not(unix))]
-        {
-            path.to_string_lossy().to_string()
-        }
+        format!("af_unix:stream:{}", path.to_string_lossy())
     }
 }
 
@@ -3443,24 +3371,24 @@ fn now_unix_nanos() -> u128 {
 }
 
 fn remove_socket_if_exists(path: &Path) -> Result<(), GitAiError> {
-    #[cfg(unix)]
     if path.exists() {
         fs::remove_file(path)?;
     }
-    #[cfg(not(unix))]
-    let _ = path;
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn set_socket_owner_only(path: &Path) -> Result<(), GitAiError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
+        // On Windows, AF_UNIX socket security is handled through file system ACLs.
+        // The default ACLs inherited from the parent directory should be sufficient
+        // for daemon socket security. If more restrictive permissions are needed,
+        // we could use Windows ACL APIs here.
         let _ = path;
     }
     Ok(())
@@ -7779,161 +7707,36 @@ fn control_listener_loop_actor(
     coordinator: Arc<ActorDaemonCoordinator>,
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
-    #[cfg(not(windows))]
-    {
-        remove_socket_if_exists(&control_socket_path)?;
-        let listener = ListenerOptions::new()
-            .name(local_socket_name(&control_socket_path)?)
-            .create_sync()
-            .map_err(|e| GitAiError::Generic(format!("failed binding control socket: {}", e)))?;
-        set_socket_owner_only(&control_socket_path)?;
-        for stream in listener.incoming() {
-            if coordinator.is_shutting_down() {
-                break;
-            }
-            let Ok(stream) = stream else {
-                continue;
-            };
-            let coord = coordinator.clone();
-            let handle = runtime_handle.clone();
-            if std::thread::Builder::new()
-                .spawn(move || {
-                    if let Err(e) = handle_control_connection_actor(stream, coord, handle) {
-                        tracing::debug!(%e, "control connection error");
-                    }
-                })
-                .is_err()
-            {
-                tracing::error!("control listener: failed to spawn handler thread");
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    {
-        let mut workers = Vec::new();
-        let first_connecting = windows_pipe_connecting_server(&control_socket_path, true)?;
-        {
-            let path = control_socket_path.clone();
-            let coord = coordinator.clone();
-            let handle = runtime_handle.clone();
-            workers.push(std::thread::spawn(move || {
-                let result =
-                    windows_control_pipe_worker_loop(path, first_connecting, coord.clone(), handle);
-                if let Err(error) = &result {
-                    tracing::error!(%error, "control worker error");
-                    coord.request_shutdown();
-                }
-                result
-            }));
-        }
-        for _ in 1..WINDOWS_CONTROL_PIPE_WORKERS {
-            let path = control_socket_path.clone();
-            let coord = coordinator.clone();
-            let handle = runtime_handle.clone();
-            let connecting = windows_pipe_connecting_server(&path, false)?;
-            workers.push(std::thread::spawn(move || {
-                let result =
-                    windows_control_pipe_worker_loop(path, connecting, coord.clone(), handle);
-                if let Err(error) = &result {
-                    tracing::error!(%error, "control worker error");
-                    coord.request_shutdown();
-                }
-                result
-            }));
-        }
-
-        while !coordinator.is_shutting_down() {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-
-        wake_windows_pipe_workers(&control_socket_path, WINDOWS_CONTROL_PIPE_WORKERS);
-
-        for worker in workers {
-            let result = worker
-                .join()
-                .map_err(|_| GitAiError::Generic("daemon control worker panicked".to_string()))?;
-            result?;
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-fn windows_pipe_connecting_server(
-    pipe_path: &Path,
-    first_instance: bool,
-) -> Result<WindowsConnectingServer, GitAiError> {
-    let mut options = WindowsPipeOptions::new(pipe_path.as_os_str());
-    options
-        .first(first_instance)
-        .open_mode(WindowsPipeOpenMode::Duplex);
-    options.single().map_err(|e| {
-        GitAiError::Generic(format!(
-            "failed binding windows daemon pipe {}: {}",
-            pipe_path.display(),
-            e
-        ))
-    })
-}
-
-#[cfg(windows)]
-fn wake_windows_pipe_workers(pipe_path: &Path, worker_count: usize) {
-    for _ in 0..worker_count {
-        let _ = WindowsPipeClient::connect_ms(pipe_path.as_os_str(), 100);
-    }
-}
-
-#[cfg(windows)]
-fn windows_control_pipe_worker_loop(
-    control_socket_path: PathBuf,
-    mut connecting: WindowsConnectingServer,
-    coordinator: Arc<ActorDaemonCoordinator>,
-    runtime_handle: tokio::runtime::Handle,
-) -> Result<(), GitAiError> {
-    loop {
-        let mut server = connecting.wait().map_err(|e| {
-            GitAiError::Generic(format!(
-                "failed accepting control pipe {}: {}",
-                control_socket_path.display(),
-                e
-            ))
-        })?;
-
+    remove_socket_if_exists(&control_socket_path)?;
+    let listener = UnixListener::bind(&control_socket_path)
+        .map_err(|e| GitAiError::Generic(format!("failed binding control socket: {}", e)))?;
+    set_socket_owner_only(&control_socket_path)?;
+    for stream in listener.incoming() {
         if coordinator.is_shutting_down() {
-            let _ = server.disconnect();
             break;
         }
-
+        let Ok(stream) = stream else {
+            continue;
+        };
+        let coord = coordinator.clone();
+        let handle = runtime_handle.clone();
+        if std::thread::Builder::new()
+            .spawn(move || {
+                if let Err(e) = handle_control_connection_actor(stream, coord, handle) {
+                    tracing::debug!(%e, "control connection error");
+                }
+            })
+            .is_err()
         {
-            let mut reader = BufReader::new(&mut server);
-            if let Err(e) = handle_control_connection_actor_reader(
-                &mut reader,
-                coordinator.clone(),
-                runtime_handle.clone(),
-            ) {
-                tracing::debug!(%e, "control connection error");
-            }
+            tracing::error!("control listener: failed to spawn handler thread");
+            break;
         }
-
-        connecting = server.disconnect().map_err(|e| {
-            GitAiError::Generic(format!(
-                "failed recycling control pipe {}: {}",
-                control_socket_path.display(),
-                e
-            ))
-        })?;
     }
-
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn handle_control_connection_actor(
-    stream: LocalSocketStream,
+    stream: UnixStream,
     coordinator: Arc<ActorDaemonCoordinator>,
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
@@ -7975,126 +7778,35 @@ fn trace_listener_loop_actor(
     trace_socket_path: PathBuf,
     coordinator: Arc<ActorDaemonCoordinator>,
 ) -> Result<(), GitAiError> {
-    #[cfg(not(windows))]
-    {
-        remove_socket_if_exists(&trace_socket_path)?;
-        let listener = ListenerOptions::new()
-            .name(local_socket_name(&trace_socket_path)?)
-            .create_sync()
-            .map_err(|e| GitAiError::Generic(format!("failed binding trace socket: {}", e)))?;
-        set_socket_owner_only(&trace_socket_path)?;
-        for stream in listener.incoming() {
-            if coordinator.is_shutting_down() {
-                break;
-            }
-            let Ok(stream) = stream else {
-                continue;
-            };
-            let coord = coordinator.clone();
-            if std::thread::Builder::new()
-                .spawn(move || {
-                    if let Err(e) = handle_trace_connection_actor(stream, coord) {
-                        tracing::debug!(%e, "trace connection error");
-                    }
-                })
-                .is_err()
-            {
-                tracing::error!("trace listener: failed to spawn handler thread");
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    {
-        let mut workers = Vec::new();
-        let first_connecting = windows_pipe_connecting_server(&trace_socket_path, true)?;
-        {
-            let path = trace_socket_path.clone();
-            let coord = coordinator.clone();
-            workers.push(std::thread::spawn(move || {
-                let result = windows_trace_pipe_worker_loop(path, first_connecting, coord.clone());
-                if let Err(error) = &result {
-                    tracing::error!(%error, "trace worker error");
-                    coord.request_shutdown();
-                }
-                result
-            }));
-        }
-        for _ in 1..WINDOWS_TRACE_PIPE_WORKERS {
-            let path = trace_socket_path.clone();
-            let coord = coordinator.clone();
-            let connecting = windows_pipe_connecting_server(&path, false)?;
-            workers.push(std::thread::spawn(move || {
-                let result = windows_trace_pipe_worker_loop(path, connecting, coord.clone());
-                if let Err(error) = &result {
-                    tracing::error!(%error, "trace worker error");
-                    coord.request_shutdown();
-                }
-                result
-            }));
-        }
-
-        while !coordinator.is_shutting_down() {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-
-        wake_windows_pipe_workers(&trace_socket_path, WINDOWS_TRACE_PIPE_WORKERS);
-
-        for worker in workers {
-            let result = worker
-                .join()
-                .map_err(|_| GitAiError::Generic("daemon trace worker panicked".to_string()))?;
-            result?;
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-fn windows_trace_pipe_worker_loop(
-    trace_socket_path: PathBuf,
-    mut connecting: WindowsConnectingServer,
-    coordinator: Arc<ActorDaemonCoordinator>,
-) -> Result<(), GitAiError> {
-    loop {
-        let mut server = connecting.wait().map_err(|e| {
-            GitAiError::Generic(format!(
-                "failed accepting trace pipe {}: {}",
-                trace_socket_path.display(),
-                e
-            ))
-        })?;
-
+    remove_socket_if_exists(&trace_socket_path)?;
+    let listener = UnixListener::bind(&trace_socket_path)
+        .map_err(|e| GitAiError::Generic(format!("failed binding trace socket: {}", e)))?;
+    set_socket_owner_only(&trace_socket_path)?;
+    for stream in listener.incoming() {
         if coordinator.is_shutting_down() {
-            let _ = server.disconnect();
             break;
         }
-
+        let Ok(stream) = stream else {
+            continue;
+        };
+        let coord = coordinator.clone();
+        if std::thread::Builder::new()
+            .spawn(move || {
+                if let Err(e) = handle_trace_connection_actor(stream, coord) {
+                    tracing::debug!(%e, "trace connection error");
+                }
+            })
+            .is_err()
         {
-            let mut reader = BufReader::new(&mut server);
-            if let Err(e) = handle_trace_connection_actor_reader(&mut reader, coordinator.clone()) {
-                tracing::debug!(%e, "trace connection error");
-            }
+            tracing::error!("trace listener: failed to spawn handler thread");
+            break;
         }
-
-        connecting = server.disconnect().map_err(|e| {
-            GitAiError::Generic(format!(
-                "failed recycling trace pipe {}: {}",
-                trace_socket_path.display(),
-                e
-            ))
-        })?;
     }
-
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn handle_trace_connection_actor(
-    stream: LocalSocketStream,
+    stream: UnixStream,
     coordinator: Arc<ActorDaemonCoordinator>,
 ) -> Result<(), GitAiError> {
     let mut reader = BufReader::new(stream);
@@ -8661,47 +8373,11 @@ fn control_request_response_timeout(request: &ControlRequest) -> Duration {
     )
 }
 
-#[cfg(not(windows))]
-fn local_socket_name<'a>(socket_path: &'a Path) -> Result<Name<'a>, GitAiError> {
-    socket_path
-        .to_fs_name::<GenericFilePath>()
-        .map_err(|e| GitAiError::Generic(format!("invalid daemon socket path: {}", e)))
-}
-
 pub fn open_local_socket_stream_with_timeout(
     socket_path: &Path,
     timeout: Duration,
 ) -> Result<DaemonClientStream, GitAiError> {
-    #[cfg(windows)]
-    {
-        let stream = open_windows_named_pipe_client_with_timeout(socket_path, timeout)?;
-        Ok(DaemonClientStream::WindowsPipe(stream))
-    }
-
-    #[cfg(not(windows))]
-    {
-        ConnectOptions::new()
-            .name(local_socket_name(socket_path)?)
-            .wait_mode(ConnectWaitMode::Timeout(timeout))
-            .connect_sync()
-            .map_err(|e| {
-                GitAiError::Generic(format!(
-                    "timed out after {:?} connecting daemon socket {}: {}",
-                    timeout,
-                    socket_path.display(),
-                    e
-                ))
-            })
-    }
-}
-
-#[cfg(windows)]
-fn open_windows_named_pipe_client_with_timeout(
-    socket_path: &Path,
-    timeout: Duration,
-) -> Result<WindowsPipeClient, GitAiError> {
-    let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
-    WindowsPipeClient::connect_ms(socket_path.as_os_str(), timeout_ms).map_err(|e| {
+    UnixStream::connect_timeout(socket_path, timeout).map_err(|e| {
         GitAiError::Generic(format!(
             "timed out after {:?} connecting daemon socket {}: {}",
             timeout,
@@ -8716,35 +8392,20 @@ fn set_daemon_client_stream_timeouts(
     socket_path: &Path,
     timeout: Duration,
 ) -> Result<(), GitAiError> {
-    #[cfg(windows)]
-    {
-        let _ = socket_path;
-        match stream {
-            DaemonClientStream::WindowsPipe(pipe) => {
-                pipe.set_read_timeout(Some(timeout));
-                pipe.set_write_timeout(Some(timeout));
-                Ok(())
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        stream.set_recv_timeout(Some(timeout)).map_err(|e| {
-            GitAiError::Generic(format!(
-                "failed to set daemon socket {} recv timeout: {}",
-                socket_path.display(),
-                e
-            ))
-        })?;
-        stream.set_send_timeout(Some(timeout)).map_err(|e| {
-            GitAiError::Generic(format!(
-                "failed to set daemon socket {} send timeout: {}",
-                socket_path.display(),
-                e
-            ))
-        })
-    }
+    stream.set_read_timeout(Some(timeout)).map_err(|e| {
+        GitAiError::Generic(format!(
+            "failed to set daemon socket {} read timeout: {}",
+            socket_path.display(),
+            e
+        ))
+    })?;
+    stream.set_write_timeout(Some(timeout)).map_err(|e| {
+        GitAiError::Generic(format!(
+            "failed to set daemon socket {} write timeout: {}",
+            socket_path.display(),
+            e
+        ))
+    })
 }
 
 fn write_all_daemon_client_stream(
@@ -8790,52 +8451,6 @@ fn read_daemon_client_line(
     Ok(line)
 }
 
-#[cfg(windows)]
-fn send_control_request_with_timeouts_windows(
-    socket_path: &Path,
-    request: &ControlRequest,
-    connect_timeout: Duration,
-    response_timeout: Duration,
-) -> Result<ControlResponse, GitAiError> {
-    let mut stream = open_local_socket_stream_with_timeout(socket_path, connect_timeout)?;
-    set_daemon_client_stream_timeouts(&mut stream, socket_path, response_timeout)?;
-    let mut body = serde_json::to_vec(request)?;
-    body.push(b'\n');
-    write_all_daemon_client_stream(&mut stream, socket_path, &body)?;
-
-    let mut response_reader = BufReader::new(stream);
-    let line = read_daemon_client_line(&mut response_reader, socket_path)?;
-    if line.trim().is_empty() {
-        return Err(GitAiError::Generic(
-            "empty daemon control response".to_string(),
-        ));
-    }
-    serde_json::from_str(line.trim()).map_err(GitAiError::from)
-}
-
-#[cfg(not(windows))]
-fn send_control_request_with_timeouts_unix(
-    socket_path: &Path,
-    request: &ControlRequest,
-    connect_timeout: Duration,
-    response_timeout: Duration,
-) -> Result<ControlResponse, GitAiError> {
-    let mut stream = open_local_socket_stream_with_timeout(socket_path, connect_timeout)?;
-    set_daemon_client_stream_timeouts(&mut stream, socket_path, response_timeout)?;
-    let mut body = serde_json::to_vec(request)?;
-    body.push(b'\n');
-    write_all_daemon_client_stream(&mut stream, socket_path, &body)?;
-
-    let mut response_reader = BufReader::new(stream);
-    let line = read_daemon_client_line(&mut response_reader, socket_path)?;
-    if line.trim().is_empty() {
-        return Err(GitAiError::Generic(
-            "empty daemon control response".to_string(),
-        ));
-    }
-    serde_json::from_str(line.trim()).map_err(GitAiError::from)
-}
-
 pub fn local_socket_connects_with_timeout(
     socket_path: &Path,
     timeout: Duration,
@@ -8858,25 +8473,20 @@ fn send_control_request_with_timeouts(
     connect_timeout: Duration,
     response_timeout: Duration,
 ) -> Result<ControlResponse, GitAiError> {
-    #[cfg(windows)]
-    {
-        send_control_request_with_timeouts_windows(
-            socket_path,
-            request,
-            connect_timeout,
-            response_timeout,
-        )
-    }
+    let mut stream = open_local_socket_stream_with_timeout(socket_path, connect_timeout)?;
+    set_daemon_client_stream_timeouts(&mut stream, socket_path, response_timeout)?;
+    let mut body = serde_json::to_vec(request)?;
+    body.push(b'\n');
+    write_all_daemon_client_stream(&mut stream, socket_path, &body)?;
 
-    #[cfg(not(windows))]
-    {
-        send_control_request_with_timeouts_unix(
-            socket_path,
-            request,
-            connect_timeout,
-            response_timeout,
-        )
+    let mut response_reader = BufReader::new(stream);
+    let line = read_daemon_client_line(&mut response_reader, socket_path)?;
+    if line.trim().is_empty() {
+        return Err(GitAiError::Generic(
+            "empty daemon control response".to_string(),
+        ));
     }
+    serde_json::from_str(line.trim()).map_err(GitAiError::from)
 }
 
 pub fn send_control_request(
