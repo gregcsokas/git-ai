@@ -3,11 +3,11 @@
 <img src="https://github.com/git-ai-project/git-ai/raw/main/assets/docs/git-ai.png" align="right"
      alt="Git AI Logo" width="200" height="200">
 
-Git AI is an open source git extension that tracks AI-generated code in your repositories.
+Git AI est extensio git fontis aperti quae codicem ab Intelligentia Artificiali generatum in repositoriis tuis persequitur.
 
-Once installed, it automatically links every AI-written line to the agent, model, and transcripts that generated it — so you never lose the intent, requirements, and architecture decisions behind your code.
+Post installationem, automatice omnem lineam ab IA scriptam cum agente, modello, et transcriptis quae eam generaverunt coniungit — ut numquam intentionem, requisita, et decisiones architecturae post codicem tuum amittas.
 
-**AI attribution on every commit:**
+**Attributio IA in omni commissione:**
 
 `git commit`
 ```
@@ -17,7 +17,7 @@ you  ██░░░░░░░░░░░░░░░░░░░░░░░
      6%             mixed   2%             92%
 ```
 
-**AI Blame shows the model, agent, and session behind every line:**
+**IA Blame ostendit modellum, agentem, et sessionem post omnem lineam:**
 
 `git-ai blame /src/log_fmt/authorship_log.rs`
 ```bash
@@ -35,7 +35,7 @@ fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let fro
 ```
 
 
-### Supported Agents
+### Agentes Sustentati
 
 <table>
 <tr>
@@ -57,12 +57,12 @@ fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let fro
 <td align="center"><img src="assets/docs/agents/gray/junie_white.png" alt="Junie" width="160" /></td>
 <td align="center"><img src="assets/docs/agents/gray/rovodev.png" alt="Rovo Dev" width="160" /></td>
 <td align="center"><img src="assets/docs/agents/gray/firebender.png" alt="Firebender" width="160" /></td>
-<td align="center"><a href="https://usegitai.com/docs/cli/add-your-agent">+ Add an Agent</a></td>
+<td align="center"><a href="https://usegitai.com/docs/cli/add-your-agent">+ Adde Agentem</a></td>
 </tr>
 </table>
 
 
-## Install
+## Installatio
 
 **Mac, Linux, Windows (WSL)**
 
@@ -72,47 +72,47 @@ curl -sSL https://usegitai.com/install.sh | bash
 
 **Windows (non-WSL)**
 
-Non-WSL Windows support is currently experimental and under active development. We would love to hear your feedback while we work to get non-WSL Windows support production-ready.
+Sustentatio Windows non-WSL nunc experimentalis est et sub activa evolutione. Libenter sententias tuas audiemus dum laboramus ut sustentationem Windows non-WSL ad productionem paratam reddamus.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com/install.ps1 | iex"
 ```
 
-That's it — **no per-repo setup required.** Prompt and commit as normal. Git AI tracks attribution automatically.
+Id est — **nulla configuratio per repositorium requiritur.** Manda et committe ut soles. Git AI attributionem automatice persequitur.
 
-### Our Choices
-- **No workflow changes** — Just prompt and commit. Git AI tracks AI code accurately without cluttering your git history.
-- **"Detecting" AI code is an anti-pattern** — Git AI does not guess whether a hunk is AI-generated. Supported agents report exactly which lines they wrote, giving you the most accurate attribution possible.
-- **Local-first** — Works 100% offline, no login required.
-- **Git native and open standard** — Git AI built the [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
-- **Secure Prompt Storage** — Git AI links each line of AI-code to the prompt that generated it. Since v1.0.0 Agent Sessions are stored outside of Git and can optionally be synced to your team's [cloud](https://usegitai.com/docs/platform/overview) or [self-hosted](https://usegitai.com/docs/platform/self-hosting) prompt store -- keeping repos lean, enabling fine-grained access control, and preventing PII or secrets from leaking into Git.
+### Electiones Nostrae
+- **Nullae mutationes operis** — Tantum manda et committe. Git AI codicem IA accurate persequitur sine historiam git tuam inquinando.
+- **"Detegere" codicem IA est anti-exemplar** — Git AI non coniicit utrum fragmentum ab IA generatum sit. Agentes sustentati exacte referunt quas lineas scripserunt, tibi attributionem quam accuratissimam praebentes.
+- **Locale primum** — Plene sine conexione operatur, nullum initium sessionis requiritur.
+- **Git nativum et norma aperta** — Git AI [normam apertam](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) aedificavit ad codicem ab IA generatum cum Git Notis persequendum.
+- **Repositio Mandatorum Secura** — Git AI omnem lineam codicis IA cum mandato quod eam generavit coniungit. Ab v1.0.0 Sessiones Agentium extra Git reponuntur et optionaliter cum [nube](https://usegitai.com/docs/platform/overview) tuae turmae vel repositorio mandatorum [auto-hospite](https://usegitai.com/docs/platform/self-hosting) synchronizari possunt — repositoria levia servantes, accessum granularem permittentes, et impedientes ne PII vel secreta in Git effluant.
 
 
 <table style="table-layout:fixed; width:100%">
 <tr>
-<th align="center" width="50%">Solo</th>
-<th align="center" width="50%">For Teams</th>
+<th align="center" width="50%">Solus</th>
+<th align="center" width="50%">Pro Turmis</th>
 </tr>
 <tr>
-<td align="center"><img src="https://github.com/git-ai-project/git-ai/blob/main/assets/docs/solo-player.svg" alt="Solo — everything stays on your machine" width="400"></td>
-<td align="center"><img src="https://github.com/git-ai-project/git-ai/blob/main/assets/docs/for-teams.svg" alt="For teams — shared context across your team" width="400"></td>
+<td align="center"><img src="https://github.com/git-ai-project/git-ai/blob/main/assets/docs/solo-player.svg" alt="Solus — omnia in machina tua manent" width="400"></td>
+<td align="center"><img src="https://github.com/git-ai-project/git-ai/blob/main/assets/docs/for-teams.svg" alt="Pro turmis — contextus communis per turmam tuam" width="400"></td>
 </tr>
 <tr>
 <td valign="top">
 
-- AI Authorship stored in Git Notes, with pointers to transcripts stored in local SQLite
-- Transcripts only stored locally, on computer
-- Measure AI authorship across commits with `git-ai stats`
+- Auctoritas IA in Git Notis reposita, cum indicibus ad transcripta in SQLite locali reposita
+- Transcripta solum localiter, in computatro, reposita
+- Metire auctoritatem IA per commissiones cum `git-ai stats`
 
 </td>
 <td valign="top">
 
-- AI Authorship stored in Git Notes
-- Pointers to cloud or self-hosted transcript store with built-in access control, secret redaction, and PII filtering
-- Agents and engineers can read transcripts and summaries for any block of AI-generated code
-- Advanced cross-agent dashboards to measure AI adoption, code durability, and compare agents across your team 
+- Auctoritas IA in Git Notis reposita
+- Indices ad repositorium transcriptorum nubis vel auto-hospitis cum accessu integrali, redactione secretorum, et filtratione PII
+- Agentes et fabri transcripta et summas pro quolibet segmento codicis ab IA generati legere possunt
+- Tabulae progredientes trans-agentes ad metiendum adoptionem IA, durabilitatem codicis, et comparandos agentes per turmam tuam
 
-**[Click here to get early access](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors)**
+**[Hic preme ut accessum praematurum obtineas](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors)**
 
 </td>
 </tr>
@@ -120,20 +120,20 @@ That's it — **no per-repo setup required.** Prompt and commit as normal. Git A
 
 
 
-## Attribution Stats
+## Statisticae Attributionis
 
-Line-level AI-attribution let you track AI-code through the full SDLC. Track how much AI code gets accepted, committed, through code review, and into production — to identify which tools and practices work best.
+Attributio IA ad lineam permittit te codicem IA per totum SDLC persequi. Persequere quantum codicis IA acceptum, commissum, per recognitionem codicis, et in productionem pervenerit — ut instrumenta et consuetudines optimas identifies.
 
 ```bash
 git-ai stats --json
 git ai stats <start_sha>..<end_sha> --json
 ```
 
-Calculates % AI-code, AI-lines generated vs committed, accepted rates, human overrides broken down by tool and model. Learn more: [Stats command reference docs](https://usegitai.com/docs/cli/reference#stats). 
+Calculat % codicis IA, lineas IA generatas contra commissas, rates acceptationis, correctiones humanas per instrumentum et modellum divisas. Plura disce: [Documentatio referentiae mandati Stats](https://usegitai.com/docs/cli/reference#stats).
 
 
 <details>
-<summary>Example JSON output</summary>
+<summary>Exemplum exitus JSON</summary>
 
 ```json
 {
@@ -153,9 +153,9 @@ Calculates % AI-code, AI-lines generated vs committed, accepted rates, human ove
 
 </details>
 
-## AI Blame
+## IA Blame
 
-Git AI blame is a drop-in replacement for `git blame` that shows AI attribution for each line. It supports [all standard `git blame` flags](https://git-scm.com/docs/git-blame).
+Git AI blame est substitutum directum pro `git blame` quod attributionem IA pro omni linea ostendit. Omnes [vexilla normalia `git blame`](https://git-scm.com/docs/git-blame) sustinet.
 
 ```bash
 git-ai blame /src/log_fmt/authorship_log.rs
@@ -177,11 +177,11 @@ fe2c4c8 (claude         2025-12-02 19:25:13 -0500  144)             (from, to)
 fe2c4c8 (claude         2025-12-02 19:25:13 -0500  145)         }
 ```
 
-There are community plugins that display AI-attribution in popular IDEs, color-coded by agent session. Hover over a line to see the raw prompt or summary.
+Supplementa communitatis exstant quae attributionem IA in editoribus popularibus ostendunt, coloribus per sessionem agentis distincta. Supra lineam vola ut mandatum originale vel summam videas.
 
 <table style="table-layout:fixed; width:100%">
 <tr>
-<th width="35%">Supported Editors</th>
+<th width="35%">Editores Sustentati</th>
 <th width="65%"></th>
 </tr>
 <tr>
@@ -192,35 +192,35 @@ There are community plugins that display AI-attribution in popular IDEs, color-c
 - [Windsurf](https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode)
 - [Antigravity](https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode)
 - [Emacs magit](https://github.com/jwiegley/magit-ai)
-- *Built support for another editor? [Open a PR](https://github.com/git-ai-project/git-ai/pulls)*
+- *Sustentationem pro alio editore aedificavisti? [Aperi PR](https://github.com/git-ai-project/git-ai/pulls)*
 
 </td>
 <td>
-<img width="100%" alt="Git AI VS Code extension showing color-coded AI blame in the gutter" src="https://github.com/user-attachments/assets/94e332e7-5d96-4e5c-8757-63ac0e2f88e0" />
+<img width="100%" alt="Extensio Git AI VS Code ostendens attributionem IA coloribus distinctam in margine" src="https://github.com/user-attachments/assets/94e332e7-5d96-4e5c-8757-63ac0e2f88e0" />
 </td>
 </tr>
 </table>
 
 
-## Understand Why with the `/ask` Skill
+## Intellege Cur cum Arte `/ask`
 
-See something you don't understand? The `/ask` skill lets you talk to the agent that wrote the code about its instructions, decisions, and the intent of the engineer who assigned the task. Git AI adds the `/ask` skill to `~/.agents/skills/` at install time so you can talk to it from any agent. 
+Aliquid vides quod non intellegis? Ars `/ask` tibi permittit cum agente qui codicem scripsit de instructionibus, decisionibus, et intentione fabri qui opus assignavit colloqui. Git AI artem `/ask` ad `~/.agents/skills/` tempore installationis addit ut ex quolibet agente cum ea colloqui possis.
 
 ```
 /ask Why didn't we use the SDK here?
 ```
 
-Agents with access to the original intent and source code understand the "why." Agents that can only read the code can tell you what it does, but not why:
+Agentes cum accessu ad intentionem originalem et codicem fontem "cur" intellegunt. Agentes qui solum codicem legere possunt tibi dicere possunt quid faciat, sed non cur:
 
-| Reading Code + Transcript (`/ask`) | Only Reading Code (not using Git AI) |
+| Legens Codicem + Transcriptum (`/ask`) | Solum Legens Codicem (sine Git AI) |
 |---|---|
-| When Aidan was building telemetry, he instructed the agent not to block the exit of our CLI flushing telemetry. Instead of using the Sentry SDK directly, we came up with a pattern that writes events locally first via `append_envelope()`, then flushes them in the background via a detached subprocess. This keeps the hot path fast and ships telemetry async after the fact. | `src/commands/flush_logs.rs` is a 5-line wrapper that delegates to `src/observability/flush.rs` (~700 lines). The `commands/` layer handles CLI dispatch; `observability/` handles Sentry, PostHog, metrics upload, and log processing. Parallel modules like `flush_cas`, `flush_logs`, `flush_metrics_db` follow the same thin-dispatch pattern. |
+| Cum Aidan telemetriam aedificabat, agenti mandavit ne exitum CLI nostri telemetriam purgando impediat. Loco SDK Sentry directe utendi, exemplar excogitavimus quod eventus localiter primum per `append_envelope()` scribit, deinde eos in fundo per subprocessum separatum purgat. Hoc viam calidam celerem servat et telemetriam asynchrone post factum mittit. | `src/commands/flush_logs.rs` est involucrum 5 linearum quod ad `src/observability/flush.rs` (~700 lineae) delegat. Stratum `commands/` dispatchium CLI tractat; `observability/` Sentry, PostHog, metricas, et processationem diariorum tractat. Moduli paralleli ut `flush_cas`, `flush_logs`, `flush_metrics_db` idem exemplar tenuis-dispatchii sequuntur. |
 
 
 <details>
-<summary>Make Your Agents Smarter</summary>
+<summary>Fac Agentes Tuos Sapientiores</summary>
 
-Agents make fewer mistakes and produce more maintainable code when they understand the requirements and decisions behind the code they build on. The best way to provide this context is to give agents the same `/ask` tool you use yourself. Tell your agents to use `/ask` in plan mode:
+Agentes pauciores errores faciunt et codicem magis sustentabilem producunt cum requisita et decisiones post codicem quem aedificant intellegunt. Optimus modus hunc contextum praebendi est agentibus idem instrumentum `/ask` quod tu ipse uteris dare. Iube agentes tuos `/ask` in modo planificandi uti:
 
 `Claude|AGENTS.md`
 ```markdown
@@ -230,13 +230,13 @@ Agents make fewer mistakes and produce more maintainable code when they understa
 </details>
 
 
-### How Git AI works
-1. **`Edit|Write|Bash` Hooks** get triggered as Agents make changes to a repository
-2. **Hooks call `git-ai checkpoint`** to link each line of AI-Code to the model, Agent and prompt that generated it.
-3. **Post Commit** a Git Note with AI-attributions in it is attached to the commit
-4. **On `merge --squash`, `rebase`, `cherry-pick`, `stash`, `pop`, `commit --amend`, etc** AI-attributions are automatically moved 
+### Quomodo Git AI Operatur
+1. **Hami `Edit|Write|Bash`** activantur cum Agentes mutationes in repositorio faciunt
+2. **Hami `git-ai checkpoint` vocant** ut omnem lineam Codicis IA cum modello, Agente, et mandato quod eam generavit coniungant.
+3. **Post Commissionem** Nota Git cum attributionibus IA commissioni adiungitur
+4. **In `merge --squash`, `rebase`, `cherry-pick`, `stash`, `pop`, `commit --amend`, etc** Attributiones IA automatice transferuntur
 
-#### Example Note
+#### Exemplum Notae
 `refs/notes/ai/commit_sha`
 ```
 hooks/post_clone_hook.rs
@@ -245,38 +245,38 @@ hooks/post_clone_hook.rs
 main.rs
   prompt_id_123 12-199,215,311
 ---
-...Prompt metadata including agent, model, and a link to the full session transcript
+...Metadata mandati includens agentem, modellum, et nexum ad transcriptum plenum sessionis
 ```
 
-For more information [review Git AI's open standard for attributing AI-code with Git Notes](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md).
+Pro pluribus informationibus [recense normam apertam Git AI ad attribuendum codicem IA cum Git Notis](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md).
 
-## Resources
+## Subsidia
 
-- [Config Options](https://usegitai.com/docs/cli/configuration)
-- [CLI Reference](https://usegitai.com/docs/cli/reference)
-- [How to measure the impact of coding agents](https://usegitai.com/how-to-measure-ai-code) 
+- [Optiones Configurationis](https://usegitai.com/docs/cli/configuration)
+- [Referentia CLI](https://usegitai.com/docs/cli/reference)
+- [Quomodo impactum agentium codificantium metiaris](https://usegitai.com/how-to-measure-ai-code)
 
 
-## For Teams
+## Pro Turmis
 
-[Git AI For Teams](https://usegitai.com/enterprise) aggregates attribution data at the PR, contributor, team repository, and organization level:
+[Git AI Pro Turmis](https://usegitai.com/enterprise) data attributionis ad gradum PR, contributoris, turmae repositorii, et organizationis aggregat:
 
-- **Full lifecycle tracking** — See how much AI code is accepted, committed, rewritten in review, and deployed — and whether it causes alerts or incidents once shipped.  
-- **Team and contributor stats** — Identify who uses background agents effectively and what high-leverage teams do differently.  
-- **Agent readiness** — Measure the impact of skills, rules, MCPs, test harnesses, and `AGENTS.md` changes across repos and task types.  
+- **Persequutio pleni cycli vitae** — Vide quantum codicis IA acceptum, commissum, in recognitione rescriptum, et dispositum sit — et utrum alarmas vel incidentes post deploymentum causet.
+- **Statisticae turmae et contributorum** — Identifica qui agentes in fundo efficaciter utantur et quid turmae magni ponderis aliter faciant.
+- **Paratio agentium** — Metire impactum artium, regularum, MCP, testium, et mutationum `AGENTS.md` per repositoria et genera operum.
 
-### Deployment Options
+### Optiones Dispositionis
 
-Git AI is designed to run wherever your engineering organization operates:
+Git AI designatum est ut ubicumque organizatio tua fabricandi operatur currat:
 
-- **Self-hosted (recommended for enterprises)** — Deploy Git AI within your own infrastructure (AWS, VPC, on-prem). Full control over data, access, and integrations. Ideal for organizations with strict security, compliance, or data residency requirements.
-- **Git AI Cloud** — Fully managed hosting by Git AI. Faster setup, no infrastructure overhead, and automatic updates — best for teams that want to get started quickly.
+- **Auto-hospite (commendatum pro magnis organizationibus)** — Dispone Git AI intra infrastructuram tuam (AWS, VPC, in loco). Plenum imperium datorum, accessus, et integrationum. Optimum pro organizationibus cum strictis requisitis securitatis, conformitatis, vel residentiae datorum.
+- **Git AI Nubes** — Hospitium plene administratum a Git AI. Celerior configuratio, nullum onus infrastructurae, et actualizationes automaticae — optimum pro turmis quae celeriter incipere volunt.
 
-Both options support the same attribution model, dashboards, and integrations — choose based on your security and operational preferences.
+Ambae optiones idem modellum attributionis, tabulas, et integrationes sustinent — elige secundum praeferentias securitatis et operationis tuas.
 
-**[Get early access](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors)**
+**[Obtine accessum praematurum](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors)**
 
 ![new-graphic-dashboards](https://github.com/user-attachments/assets/1e2aec73-4e96-4531-ab5f-fe4deef2bbab)
 
-## License
+## Licentia
 Apache 2.0
