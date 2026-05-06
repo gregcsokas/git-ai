@@ -277,7 +277,7 @@ fn execute_pre_file_edit(e: PreFileEdit) -> Result<Vec<CheckpointRequest>, GitAi
         files,
         e.context.trace_id,
         CheckpointKind::Human,
-        None,
+        Some(e.context.agent_id),
         PreparedPathRole::WillEdit,
         None,
         metadata,

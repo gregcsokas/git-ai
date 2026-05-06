@@ -3854,6 +3854,9 @@ pub struct ActorDaemonCoordinator {
     pending_rebase_original_head_by_worktree: Mutex<HashMap<String, String>>,
     pending_cherry_pick_sources_by_worktree: Mutex<HashMap<String, Vec<String>>>,
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
+    /// Files with an in-flight AI edit (PreFileEdit received, PostFileEdit not yet completed).
+    /// Outer key: family. Inner key: absolute file path string. Value: registration timestamp (nanos).
+    pending_ai_edits_by_family: Mutex<HashMap<String, HashMap<String, u128>>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     recent_replay_prerequisites_by_family:
@@ -3946,6 +3949,7 @@ impl ActorDaemonCoordinator {
             pending_rebase_original_head_by_worktree: Mutex::new(HashMap::new()),
             pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
+            pending_ai_edits_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
@@ -4106,6 +4110,19 @@ impl ActorDaemonCoordinator {
         if let Ok(mut map) = self.queued_trace_payloads_by_root.lock() {
             map.retain(|_, count| *count > 0);
         }
+        // Clean expired pending AI edit entries (older than 10s).
+        {
+            const PENDING_AI_EDIT_TIMEOUT_NS: u128 = 10_000_000_000;
+            let gc_now_ns = now_unix_nanos();
+            if let Ok(mut map) = self.pending_ai_edits_by_family.lock() {
+                for family_map in map.values_mut() {
+                    family_map.retain(|_, registered_at| {
+                        gc_now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
+                    });
+                }
+                map.retain(|_, family_map| !family_map.is_empty());
+            }
+        }
         // Clean wrapper_states entries older than 60s — these represent wrapper
         // pre/post states that were never consumed by a matching trace2 event.
         let stale_threshold_ns = 60_000_000_000u128; // 60 seconds in nanoseconds
@@ -4113,6 +4130,49 @@ impl ActorDaemonCoordinator {
         if let Ok(mut map) = self.wrapper_states.lock() {
             map.retain(|_, entry| now_ns.saturating_sub(entry.received_at_ns) < stale_threshold_ns);
         }
+    }
+
+    fn canonicalize_path(path: &str) -> String {
+        std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string())
+    }
+
+    fn register_pending_ai_edits(&self, family: &str, file_paths: &[String]) {
+        let now_ns = now_unix_nanos();
+        if let Ok(mut map) = self.pending_ai_edits_by_family.lock() {
+            let family_map = map.entry(family.to_string()).or_default();
+            for file in file_paths {
+                family_map.insert(Self::canonicalize_path(file), now_ns);
+            }
+        }
+    }
+
+    fn clear_pending_ai_edits(&self, family: &str, file_paths: &[String]) {
+        if let Ok(mut map) = self.pending_ai_edits_by_family.lock()
+            && let Some(family_map) = map.get_mut(family)
+        {
+            for file in file_paths {
+                family_map.remove(&Self::canonicalize_path(file));
+            }
+            if family_map.is_empty() {
+                map.remove(family);
+            }
+        }
+    }
+
+    fn file_has_pending_ai_edit(&self, family: &str, file_path: &str) -> bool {
+        const PENDING_AI_EDIT_TIMEOUT_NS: u128 = 10_000_000_000; // 10 seconds
+        let now_ns = now_unix_nanos();
+        let canonical = Self::canonicalize_path(file_path);
+        if let Ok(map) = self.pending_ai_edits_by_family.lock()
+            && let Some(family_map) = map.get(family)
+        {
+            return family_map.get(&canonical).is_some_and(|registered_at| {
+                now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
+            });
+        }
+        false
     }
 
     fn trace_command_participates_in_family_sequencer(primary_command: Option<&str>) -> bool {
@@ -5763,7 +5823,7 @@ impl ActorDaemonCoordinator {
                     }
                 }
                 FamilySequencerEntry::Checkpoint {
-                    request,
+                    mut request,
                     respond_to,
                 } => {
                     let repo_wd = request
@@ -5776,8 +5836,67 @@ impl ActorDaemonCoordinator {
                         .iter()
                         .map(|f| f.path.to_string_lossy().to_string())
                         .collect();
-                    let checkpoint_kind_str = format!("{:?}", request.checkpoint_kind);
-                    let is_human_checkpoint = request.checkpoint_kind == CheckpointKind::Human;
+                    let checkpoint_kind = request.checkpoint_kind;
+                    let checkpoint_path_role = request.path_role;
+                    let checkpoint_has_agent = request.agent_id.is_some();
+                    let checkpoint_kind_str = format!("{:?}", checkpoint_kind);
+                    let is_human_checkpoint = checkpoint_kind == CheckpointKind::Human;
+
+                    // Register pending AI edit state when an AI agent fires its
+                    // pre-edit snapshot. This signals that an AI edit is in-flight.
+                    // Identified by: WillEdit path_role + agent_id present (only AI
+                    // agent presets have an agent_id on their pre-edit checkpoints).
+                    if checkpoint_path_role == PreparedPathRole::WillEdit && checkpoint_has_agent {
+                        self.register_pending_ai_edits(family, &checkpoint_file_paths);
+                    }
+
+                    // Filter out files with pending AI edits from KnownHuman checkpoints.
+                    // These are spurious IDE save events that fire between pre/post-edit.
+                    if checkpoint_kind == CheckpointKind::KnownHuman {
+                        let pending_files: Vec<String> = checkpoint_file_paths
+                            .iter()
+                            .filter(|f| self.file_has_pending_ai_edit(family, f))
+                            .cloned()
+                            .collect();
+                        if !pending_files.is_empty() {
+                            request.files.retain(|f| {
+                                let path_str = f.path.to_string_lossy().to_string();
+                                !pending_files.contains(&path_str)
+                            });
+                            tracing::debug!(
+                                "[KnownHuman] Filtered {} file(s) with pending AI edits",
+                                pending_files.len()
+                            );
+                            if request.files.is_empty() {
+                                let log_entry = TestCompletionLogEntry {
+                                    seq: 0,
+                                    family_key: family.to_string(),
+                                    kind: "checkpoint".to_string(),
+                                    primary_command: Some("checkpoint".to_string()),
+                                    test_sync_session: None,
+                                    exit_code: None,
+                                    sync_tracked: true,
+                                    status: "suppressed".to_string(),
+                                    error: None,
+                                };
+                                let _ = self.maybe_append_test_completion_log(family, &log_entry);
+                                if let Some(respond_to) = respond_to {
+                                    let _ = respond_to.send(Ok(0));
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Recompute file paths after potential KnownHuman filtering so
+                    // watermark computation and clear_pending_ai_edits use the actual
+                    // files that will be checkpointed.
+                    let checkpoint_file_paths: Vec<String> = request
+                        .files
+                        .iter()
+                        .map(|f| f.path.to_string_lossy().to_string())
+                        .collect();
+
                     let should_log_completion = true; // Always log for test sync
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
                     let checkpoint_start = std::time::Instant::now();
@@ -5842,6 +5961,12 @@ impl ActorDaemonCoordinator {
                         );
                     }
                     if result.is_ok() {
+                        // Clear pending AI edit state once the PostFileEdit completes.
+                        if checkpoint_kind.is_ai()
+                            && checkpoint_path_role == PreparedPathRole::Edited
+                        {
+                            self.clear_pending_ai_edits(family, &checkpoint_file_paths);
+                        }
                         let per_file = if !checkpoint_file_paths.is_empty() {
                             compute_watermarks_from_stat(&repo_wd, &checkpoint_file_paths)
                         } else {
