@@ -1233,8 +1233,7 @@ impl Repository {
         let mut remotes = Vec::new();
 
         for section in config.sections() {
-            if !section.header().name().eq_ignore_ascii_case("remote") {
-
+            if !section.header().name().eq_ignore_ascii_case(b"remote") {
                 continue;
             }
             let Some(name) = section.header().subsection_name() else {
