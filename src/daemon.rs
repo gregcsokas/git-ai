@@ -4132,12 +4132,18 @@ impl ActorDaemonCoordinator {
         }
     }
 
+    fn canonicalize_path(path: &str) -> String {
+        std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string())
+    }
+
     fn register_pending_ai_edits(&self, family: &str, file_paths: &[String]) {
         let now_ns = now_unix_nanos();
         if let Ok(mut map) = self.pending_ai_edits_by_family.lock() {
             let family_map = map.entry(family.to_string()).or_default();
             for file in file_paths {
-                family_map.insert(file.clone(), now_ns);
+                family_map.insert(Self::canonicalize_path(file), now_ns);
             }
         }
     }
@@ -4147,7 +4153,7 @@ impl ActorDaemonCoordinator {
             && let Some(family_map) = map.get_mut(family)
         {
             for file in file_paths {
-                family_map.remove(file);
+                family_map.remove(&Self::canonicalize_path(file));
             }
             if family_map.is_empty() {
                 map.remove(family);
@@ -4158,10 +4164,11 @@ impl ActorDaemonCoordinator {
     fn file_has_pending_ai_edit(&self, family: &str, file_path: &str) -> bool {
         const PENDING_AI_EDIT_TIMEOUT_NS: u128 = 10_000_000_000; // 10 seconds
         let now_ns = now_unix_nanos();
+        let canonical = Self::canonicalize_path(file_path);
         if let Ok(map) = self.pending_ai_edits_by_family.lock()
             && let Some(family_map) = map.get(family)
         {
-            return family_map.get(file_path).is_some_and(|registered_at| {
+            return family_map.get(&canonical).is_some_and(|registered_at| {
                 now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
             });
         }
