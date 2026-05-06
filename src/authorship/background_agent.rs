@@ -25,9 +25,12 @@ pub fn detect() -> BackgroundAgent {
         };
     }
 
-    if std::env::var("CURSOR_AGENT")
-        .map(|v| v == "1")
+    if std::env::var("HOSTNAME")
+        .map(|v| v == "cursor")
         .unwrap_or(false)
+        && std::env::var("CURSOR_AGENT")
+            .map(|v| v == "1")
+            .unwrap_or(false)
     {
         return BackgroundAgent::WithHooks {
             tool: "cursor-agent".to_string(),
