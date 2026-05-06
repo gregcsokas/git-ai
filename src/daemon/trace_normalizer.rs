@@ -53,7 +53,6 @@ pub struct TraceNormalizerState {
     pub sid_to_worktree: HashMap<String, PathBuf>,
     pub sid_to_family: HashMap<String, FamilyKey>,
     pub prestart_root_cmd_names: HashMap<String, String>,
-    pub root_wrapper_invocation_id: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -543,18 +542,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
     fn handle_def_param(
         &mut self,
-        payload: &Value,
-        root_sid: &str,
+        _payload: &Value,
+        _root_sid: &str,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
-        if let Some(param) = payload.get("param").and_then(Value::as_str)
-            && param == "GIT_AI_WRAPPER_INVOCATION_ID"
-            && let Some(value) = payload.get("value").and_then(Value::as_str)
-            && !value.is_empty()
-        {
-            self.state
-                .root_wrapper_invocation_id
-                .insert(root_sid.to_string(), value.to_string());
-        }
         Ok(None)
     }
 
@@ -1025,7 +1015,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             stash_target_oid: pending.stash_target_oid,
             ref_changes,
             confidence,
-            wrapper_invocation_id: self.state.root_wrapper_invocation_id.remove(root_sid),
         };
 
         trace_debug_lifecycle(&format!(

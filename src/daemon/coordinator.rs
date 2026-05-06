@@ -192,7 +192,6 @@ mod tests {
             stash_target_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
     }
 
@@ -218,7 +217,6 @@ mod tests {
             stash_target_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
     }
 

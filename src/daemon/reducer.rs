@@ -204,7 +204,6 @@ mod tests {
                 new: "abc".to_string(),
             }],
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
     }
 

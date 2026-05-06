@@ -567,7 +567,6 @@ mod tests {
                 new: "b".to_string(),
             }],
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
     }
 
