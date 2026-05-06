@@ -125,13 +125,10 @@ pub(super) fn parse_cli_hooks(
 
 fn classify_cli_tool(tool: &str) -> ToolClass {
     match tool {
-        "bash" => ToolClass::Bash,
-        "create" | "str_replace" | "apply_patch" => ToolClass::FileEdit,
-        // Skip:
-        //   report_intent — intent logging only, no file changes.
-        //   read_bash / write_bash / stop_bash — control ops on an already-running async shell;
-        //   the originating `bash` Pre/Post brackets the file changes.
-        //   view — read-only file viewing, no changes.
+        "bash" | "powershell" => ToolClass::Bash,
+        "create" | "edit" | "str_replace" | "str_replace_editor" | "apply_patch" => {
+            ToolClass::FileEdit
+        }
         _ => ToolClass::Skip,
     }
 }
@@ -371,16 +368,25 @@ mod tests {
     #[test]
     fn classify_cli_tool_matrix() {
         assert_eq!(classify_cli_tool("bash"), ToolClass::Bash);
+        assert_eq!(classify_cli_tool("powershell"), ToolClass::Bash);
         assert_eq!(classify_cli_tool("create"), ToolClass::FileEdit);
+        assert_eq!(classify_cli_tool("edit"), ToolClass::FileEdit);
         assert_eq!(classify_cli_tool("str_replace"), ToolClass::FileEdit);
+        assert_eq!(classify_cli_tool("str_replace_editor"), ToolClass::FileEdit);
         assert_eq!(classify_cli_tool("apply_patch"), ToolClass::FileEdit);
         assert_eq!(classify_cli_tool("report_intent"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("read_bash"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("write_bash"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("stop_bash"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("list_bash"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("view"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("glob"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("grep"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("grep_search"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("file_search"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("read_file"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("think"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("ask_user"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("nonsense"), ToolClass::Skip);
     }
 

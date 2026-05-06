@@ -42,16 +42,27 @@ fn is_cli_tool_name(tool: &str) -> bool {
     matches!(
         tool,
         "bash"
+            | "powershell"
             | "read_bash"
             | "write_bash"
             | "stop_bash"
+            | "list_bash"
             | "create"
+            | "edit"
             | "str_replace"
+            | "str_replace_editor"
             | "report_intent"
             | "apply_patch"
             | "view"
             | "glob"
             | "grep"
+            | "grep_search"
+            | "file_search"
+            | "read_file"
+            | "think"
+            | "ask_user"
+            | "web_fetch"
+            | "task"
     )
 }
 

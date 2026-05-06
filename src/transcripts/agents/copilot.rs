@@ -128,12 +128,20 @@ impl Agent for CopilotAgent {
                 None => continue,
             };
             let external_session_id = if stem == "events" {
-                match path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) {
+                match path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                {
                     Some(parent) => parent.to_string(),
                     None => continue,
                 }
             } else if stem.starts_with("partition") {
-                match path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) {
+                match path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                {
                     Some(parent) => format!("{}:{}", parent, stem),
                     None => continue,
                 }
