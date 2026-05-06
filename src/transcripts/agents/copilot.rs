@@ -32,15 +32,13 @@ impl CopilotAgent {
     fn scan_transcript_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        // Standard locations for Copilot transcripts
-        let search_dirs = vec![
-            // Session JSON files
+        // Standard flat directories for Copilot transcripts (legacy locations)
+        let flat_dirs = vec![
             dirs::config_dir().map(|p| p.join("github-copilot/sessions")),
-            // Event stream JSONL files
             dirs::config_dir().map(|p| p.join("github-copilot/events")),
         ];
 
-        for dir_opt in search_dirs {
+        for dir_opt in flat_dirs {
             if let Some(dir) = dir_opt
                 && dir.exists()
                 && let Ok(entries) = fs::read_dir(&dir)
@@ -49,9 +47,38 @@ impl CopilotAgent {
                     let path = entry.path();
                     if path.is_file() {
                         let ext = path.extension().and_then(|s| s.to_str());
-                        // Accept both .json (session files) and .jsonl (event streams)
                         if ext == Some("json") || ext == Some("jsonl") {
                             paths.push(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Copilot CLI and JetBrains session directories under ~/.copilot/
+        // CLI: ~/.copilot/session-state/<uuid>/events.jsonl
+        // JetBrains: ~/.copilot/jb/<uuid>/partition-1.jsonl (and partition-N.jsonl)
+        if let Some(home) = dirs::home_dir() {
+            let copilot_root = home.join(".copilot");
+            let session_dirs = ["session-state", "jb"];
+            for subdir in session_dirs {
+                let dir = copilot_root.join(subdir);
+                if dir.exists()
+                    && let Ok(entries) = fs::read_dir(&dir)
+                {
+                    for entry in entries.flatten() {
+                        let session_dir = entry.path();
+                        if session_dir.is_dir()
+                            && let Ok(files) = fs::read_dir(&session_dir)
+                        {
+                            for file_entry in files.flatten() {
+                                let path = file_entry.path();
+                                if path.is_file()
+                                    && path.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                                {
+                                    paths.push(path);
+                                }
+                            }
                         }
                     }
                 }
@@ -92,13 +119,26 @@ impl Agent for CopilotAgent {
         let mut sessions = Vec::new();
 
         for path in paths {
-            // Copilot chat_session_id from the hook payload matches the file stem
-            let Some(external_session_id) = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-            else {
-                continue;
+            // Derive external_session_id based on path structure:
+            // - Flat files (abc-123.json): use file stem
+            // - Session-state (session-state/<uuid>/events.jsonl): use parent dir name
+            // - JetBrains (jb/<uuid>/partition-N.jsonl): use parent dir + partition stem
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let external_session_id = if stem == "events" {
+                match path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) {
+                    Some(parent) => parent.to_string(),
+                    None => continue,
+                }
+            } else if stem.starts_with("partition") {
+                match path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) {
+                    Some(parent) => format!("{}:{}", parent, stem),
+                    None => continue,
+                }
+            } else {
+                stem
             };
             let session_id = generate_session_id(&external_session_id, "github-copilot");
 

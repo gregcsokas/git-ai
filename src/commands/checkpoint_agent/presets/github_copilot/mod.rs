@@ -48,6 +48,10 @@ fn is_cli_tool_name(tool: &str) -> bool {
             | "create"
             | "str_replace"
             | "report_intent"
+            | "apply_patch"
+            | "view"
+            | "glob"
+            | "grep"
     )
 }
 
@@ -324,5 +328,35 @@ mod tests {
             .parse(&input, "t_test123456789a")
             .unwrap();
         assert!(matches!(events[0], ParsedHookEvent::PreFileEdit(_)));
+    }
+
+    /// apply_patch routes to CLI handler (not IDE) — the primary file-edit tool in Copilot CLI.
+    #[test]
+    fn dispatches_cli_for_apply_patch() {
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": "/home/user/project",
+            "tool_name": "apply_patch",
+            "session_id": "sess-cli",
+            "tool_input": "*** Begin Patch\n*** Update File: /home/user/project/main.py\n@@\n-old\n+new\n*** End Patch\n",
+            "tool_result": {"result_type": "success", "text_result_for_llm": "Modified 1 file(s)"}
+        })
+        .to_string();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(
+                    e.context.metadata.get("source"),
+                    Some(&"copilot-cli".to_string())
+                );
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/main.py")]
+                );
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
     }
 }

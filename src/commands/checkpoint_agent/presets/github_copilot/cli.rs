@@ -126,11 +126,12 @@ pub(super) fn parse_cli_hooks(
 fn classify_cli_tool(tool: &str) -> ToolClass {
     match tool {
         "bash" => ToolClass::Bash,
-        "create" | "str_replace" => ToolClass::FileEdit,
+        "create" | "str_replace" | "apply_patch" => ToolClass::FileEdit,
         // Skip:
         //   report_intent — intent logging only, no file changes.
         //   read_bash / write_bash / stop_bash — control ops on an already-running async shell;
         //   the originating `bash` Pre/Post brackets the file changes.
+        //   view — read-only file viewing, no changes.
         _ => ToolClass::Skip,
     }
 }
@@ -372,10 +373,91 @@ mod tests {
         assert_eq!(classify_cli_tool("bash"), ToolClass::Bash);
         assert_eq!(classify_cli_tool("create"), ToolClass::FileEdit);
         assert_eq!(classify_cli_tool("str_replace"), ToolClass::FileEdit);
+        assert_eq!(classify_cli_tool("apply_patch"), ToolClass::FileEdit);
         assert_eq!(classify_cli_tool("report_intent"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("read_bash"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("write_bash"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("stop_bash"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("view"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("glob"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("grep"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("nonsense"), ToolClass::Skip);
+    }
+
+    #[test]
+    fn cli_apply_patch_pre_post() {
+        let patch = "*** Begin Patch\n*** Update File: /Users/a/project/hello.py\n@@\n def greet(name: str) -> None:\n+    \"\"\"Docstring.\"\"\"\n     print(f\"Hello, {name}!\")\n*** End Patch\n";
+        let pre = json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "sess-cli",
+            "cwd": "/Users/a/project",
+            "tool_name": "apply_patch",
+            "tool_input": patch
+        })
+        .to_string();
+        let pre_events = GithubCopilotPreset.parse(&pre, "t_test123456789a").unwrap();
+        match &pre_events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/Users/a/project/hello.py")]
+                );
+                assert_eq!(
+                    e.context.metadata.get("source"),
+                    Some(&"copilot-cli".to_string())
+                );
+            }
+            other => panic!("Expected PreFileEdit, got {:?}", other),
+        }
+
+        let post = json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "sess-cli",
+            "cwd": "/Users/a/project",
+            "tool_name": "apply_patch",
+            "tool_input": patch,
+            "tool_result": {"result_type": "success", "text_result_for_llm": "Modified 1 file(s): /Users/a/project/hello.py"}
+        })
+        .to_string();
+        let post_events = GithubCopilotPreset
+            .parse(&post, "t_test123456789a")
+            .unwrap();
+        match &post_events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/Users/a/project/hello.py")]
+                );
+            }
+            other => panic!("Expected PostFileEdit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cli_view_skipped() {
+        let input = json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "sess-cli",
+            "cwd": "/Users/a/project",
+            "tool_name": "view",
+            "tool_input": {"path": "/Users/a/project/hello.py"}
+        })
+        .to_string();
+        let result = GithubCopilotPreset.parse(&input, "t_test123456789a");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cli_glob_skipped() {
+        let input = json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "sess-cli",
+            "cwd": "/Users/a/project",
+            "tool_name": "glob",
+            "tool_input": {"pattern": "*.py", "paths": ["/Users/a/project"]}
+        })
+        .to_string();
+        let result = GithubCopilotPreset.parse(&input, "t_test123456789a");
+        assert!(result.is_err());
     }
 }

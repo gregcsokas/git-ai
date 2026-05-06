@@ -79,7 +79,19 @@ fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, Transcri
             .get("message")
             .and_then(|m| m.get("model"))
             .and_then(|v| v.as_str())
-            .or_else(|| json.get("model").and_then(|v| v.as_str()));
+            .or_else(|| json.get("model").and_then(|v| v.as_str()))
+            // Copilot CLI event stream: tool.execution_complete has data.model
+            .or_else(|| {
+                json.get("data")
+                    .and_then(|d| d.get("model"))
+                    .and_then(|v| v.as_str())
+            })
+            // Copilot CLI event stream: session.model_change has data.newModel
+            .or_else(|| {
+                json.get("data")
+                    .and_then(|d| d.get("newModel"))
+                    .and_then(|v| v.as_str())
+            });
 
         if let Some(model) = candidate
             && model != "<synthetic>"
