@@ -82,7 +82,7 @@ define_feature_flags!(
     auth_keyring: auth_keyring, debug = false, release = false,
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
-    transcript_streaming: transcript_streaming, debug = true, release = false,
+    transcript_streaming: transcript_streaming, debug = true, release = true,
 );
 
 impl FeatureFlags {
@@ -145,7 +145,7 @@ mod tests {
             assert!(!flags.auth_keyring);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
-            assert!(!flags.transcript_streaming);
+            assert!(flags.transcript_streaming);
         }
     }
 
