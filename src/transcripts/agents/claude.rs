@@ -240,6 +240,37 @@ impl Agent for ClaudeAgent {
             new_watermark,
         })
     }
+
+    fn extract_event_ids(
+        &self,
+        event: &serde_json::Value,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let event_id = event.get("uuid").and_then(|v| v.as_str()).map(String::from);
+        let parent_id = event
+            .get("parentUuid")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let tool_use_id = event
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find_map(|block| match block.get("type").and_then(|t| t.as_str()) {
+                        Some("tool_use") => {
+                            block.get("id").and_then(|v| v.as_str()).map(String::from)
+                        }
+                        Some("tool_result") => block
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        _ => None,
+                    })
+            });
+
+        (event_id, parent_id, tool_use_id)
+    }
 }
 
 #[cfg(test)]
@@ -475,5 +506,82 @@ mod tests {
             .map(|e| e["id"].as_u64().unwrap())
             .collect();
         assert_eq!(ids, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn test_extract_event_ids_assistant_with_tool_use() {
+        let agent = ClaudeAgent::new();
+        let event = serde_json::json!({
+            "type": "assistant",
+            "uuid": "e55c8481-4ee9-429d-a11a-2cbf9a87b688",
+            "parentUuid": "d75bc9bf-0326-433e-9f4f-1e5fc8c415d0",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "toolu_013JnBoRSqxCShSX", "name": "Edit", "input": {}}
+                ]
+            }
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(
+            eid,
+            Some("e55c8481-4ee9-429d-a11a-2cbf9a87b688".to_string())
+        );
+        assert_eq!(
+            pid,
+            Some("d75bc9bf-0326-433e-9f4f-1e5fc8c415d0".to_string())
+        );
+        assert_eq!(tid, Some("toolu_013JnBoRSqxCShSX".to_string()));
+    }
+
+    #[test]
+    fn test_extract_event_ids_user_with_tool_result() {
+        let agent = ClaudeAgent::new();
+        let event = serde_json::json!({
+            "type": "user",
+            "uuid": "abc-123",
+            "parentUuid": "def-456",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_xyz", "content": "ok"}
+                ]
+            }
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(eid, Some("abc-123".to_string()));
+        assert_eq!(pid, Some("def-456".to_string()));
+        assert_eq!(tid, Some("toolu_xyz".to_string()));
+    }
+
+    #[test]
+    fn test_extract_event_ids_text_only() {
+        let agent = ClaudeAgent::new();
+        let event = serde_json::json!({
+            "type": "assistant",
+            "uuid": "msg-1",
+            "parentUuid": null,
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Hello"}
+                ]
+            }
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(eid, Some("msg-1".to_string()));
+        assert_eq!(pid, None);
+        assert_eq!(tid, None);
+    }
+
+    #[test]
+    fn test_extract_event_ids_summary_event() {
+        let agent = ClaudeAgent::new();
+        let event = serde_json::json!({
+            "type": "summary",
+            "summary": "Did something",
+            "leafUuid": "leaf-1"
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(eid, None);
+        assert_eq!(pid, None);
+        assert_eq!(tid, None);
     }
 }

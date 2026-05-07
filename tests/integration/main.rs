@@ -125,7 +125,6 @@ mod sweep_e2e;
 mod sync_authorship_types;
 mod test_utils_unit;
 mod tls_native_certs;
-mod transcript_external_ids;
 mod transcripts_claude_reader;
 mod transcripts_e2e;
 mod utf8_filenames;

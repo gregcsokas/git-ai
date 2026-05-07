@@ -285,6 +285,38 @@ impl Agent for OpenCodeAgent {
             new_watermark,
         })
     }
+
+    fn extract_event_ids(
+        &self,
+        event: &serde_json::Value,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let message = event.get("message");
+
+        let event_id = message
+            .and_then(|m| m.get("id"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let parent_event_id = message
+            .and_then(|m| m.get("data"))
+            .and_then(|d| d.get("parentID"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let tool_use_id = event
+            .get("parts")
+            .and_then(|p| p.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|part| {
+                    part.get("data")
+                        .and_then(|d| d.get("callID"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+            });
+
+        (event_id, parent_event_id, tool_use_id)
+    }
 }
 
 #[cfg(test)]
@@ -543,5 +575,96 @@ mod tests {
         for msg_parts in parts.values() {
             assert!(!msg_parts.is_empty());
         }
+    }
+
+    #[test]
+    fn test_extract_event_ids_with_tool_call() {
+        let agent = OpenCodeAgent::new();
+        let event = serde_json::json!({
+            "message": {
+                "id": "msg_c5d3ff79b001I77d7ERgcEhCCc",
+                "session_id": "ses_3a2c00870ffebuyMGjJ2UiakYv",
+                "time_created": 1000,
+                "time_updated": 2000,
+                "data": {
+                    "role": "assistant",
+                    "parentID": "msg_c5d3ff791001Egl5tW62x4Vgzo",
+                    "modelID": "big-pickle"
+                }
+            },
+            "parts": [
+                {
+                    "id": "prt_c5d4001ea001t4tNa4ACM94hno",
+                    "message_id": "msg_c5d3ff79b001I77d7ERgcEhCCc",
+                    "session_id": "ses_3a2c00870ffebuyMGjJ2UiakYv",
+                    "time_created": 1000,
+                    "time_updated": 2000,
+                    "data": {
+                        "type": "tool",
+                        "callID": "call_function_p43u37xcf94i_1",
+                        "tool": "read",
+                        "state": {"status": "completed"}
+                    }
+                }
+            ]
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(eid, Some("msg_c5d3ff79b001I77d7ERgcEhCCc".to_string()));
+        assert_eq!(pid, Some("msg_c5d3ff791001Egl5tW62x4Vgzo".to_string()));
+        assert_eq!(tid, Some("call_function_p43u37xcf94i_1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_event_ids_no_parts() {
+        let agent = OpenCodeAgent::new();
+        let event = serde_json::json!({
+            "message": {
+                "id": "msg_c5d3ff791001Egl5tW62x4Vgzo",
+                "session_id": "ses_3a2c00870ffebuyMGjJ2UiakYv",
+                "time_created": 1000,
+                "time_updated": 1000,
+                "data": {"role": "user"}
+            }
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(eid, Some("msg_c5d3ff791001Egl5tW62x4Vgzo".to_string()));
+        assert_eq!(pid, None);
+        assert_eq!(tid, None);
+    }
+
+    #[test]
+    fn test_extract_event_ids_with_parent_no_tool() {
+        let agent = OpenCodeAgent::new();
+        let event = serde_json::json!({
+            "message": {
+                "id": "msg_c5d400371001TvbvIzWZB1f9il",
+                "session_id": "ses_3a2c00870ffebuyMGjJ2UiakYv",
+                "time_created": 1000,
+                "time_updated": 2000,
+                "data": {
+                    "role": "assistant",
+                    "parentID": "msg_c5d3ff791001Egl5tW62x4Vgzo",
+                    "modelID": "big-pickle"
+                }
+            },
+            "parts": [
+                {
+                    "id": "prt_c5d4002f20016aBCkx6UdvIDBo",
+                    "message_id": "msg_c5d400371001TvbvIzWZB1f9il",
+                    "session_id": "ses_3a2c00870ffebuyMGjJ2UiakYv",
+                    "time_created": 1000,
+                    "time_updated": 2000,
+                    "data": {
+                        "type": "step-finish",
+                        "reason": "tool-calls",
+                        "cost": 0
+                    }
+                }
+            ]
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(eid, Some("msg_c5d400371001TvbvIzWZB1f9il".to_string()));
+        assert_eq!(pid, Some("msg_c5d3ff791001Egl5tW62x4Vgzo".to_string()));
+        assert_eq!(tid, None);
     }
 }

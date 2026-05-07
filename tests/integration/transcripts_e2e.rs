@@ -5,12 +5,13 @@
 //! daemon tests and manual verification.
 
 use git_ai::transcripts::agent::Agent;
-use git_ai::transcripts::agents::ClaudeAgent;
-use git_ai::transcripts::watermark::ByteOffsetWatermark;
+use git_ai::transcripts::agents::{ClaudeAgent, OpenCodeAgent};
+use git_ai::transcripts::watermark::{ByteOffsetWatermark, TimestampWatermark};
 use git_ai::transcripts::{SessionRecord, TranscriptsDatabase};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 #[allow(dead_code)]
@@ -18,6 +19,13 @@ fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("transcripts")
+        .join("fixtures")
+        .join(name)
+}
+
+fn test_fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
         .join("fixtures")
         .join(name)
 }
@@ -243,4 +251,227 @@ fn test_error_tracking() {
     let retrieved2 = db.get_session("s_errors").unwrap().unwrap();
     assert_eq!(retrieved2.processing_errors, 2);
     assert_eq!(retrieved2.last_error, Some("Second error".to_string()));
+}
+
+#[test]
+fn test_full_pipeline_claude_session_ids_flow_through() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("transcripts.db");
+    let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+
+    let fixture = fixture_path("claude_with_ids.jsonl");
+    let now = chrono::Utc::now().timestamp();
+
+    let session = SessionRecord {
+        session_id: "sess-parent-abc".to_string(),
+        tool: "claude".to_string(),
+        transcript_path: fixture.display().to_string(),
+        transcript_format: "ClaudeJsonl".to_string(),
+        watermark_type: "ByteOffset".to_string(),
+        watermark_value: "0".to_string(),
+        external_session_id: "sess-parent-abc".to_string(),
+        external_parent_session_id: None,
+        first_seen_at: now,
+        last_processed_at: 0,
+        last_known_size: 0,
+        last_modified: None,
+        processing_errors: 0,
+        last_error: None,
+    };
+    db.insert_session(&session).unwrap();
+
+    let retrieved = db.get_session("sess-parent-abc").unwrap().unwrap();
+    assert_eq!(retrieved.external_session_id, "sess-parent-abc".to_string());
+    assert_eq!(retrieved.external_parent_session_id, None);
+
+    let agent = ClaudeAgent::new();
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let batch = agent
+        .read_incremental(
+            &PathBuf::from(&retrieved.transcript_path),
+            watermark,
+            &retrieved.session_id,
+        )
+        .unwrap();
+
+    use git_ai::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
+
+    let attrs_sparse = EventAttributes::with_version("test")
+        .session_id(retrieved.session_id.clone())
+        .external_session_id(retrieved.external_session_id.clone())
+        .external_parent_session_id_opt(retrieved.external_parent_session_id.clone())
+        .to_sparse();
+
+    let metric_events: Vec<MetricEvent> = batch
+        .events
+        .into_iter()
+        .map(|raw_event| {
+            let (eid, pid, tid) = agent.extract_event_ids(&raw_event);
+            MetricEvent::from_values(
+                SessionEventValues::with_ids(raw_event, eid, pid, tid),
+                attrs_sparse.clone(),
+            )
+        })
+        .collect();
+
+    assert_eq!(metric_events.len(), 5);
+
+    let attrs = EventAttributes::from_sparse(&metric_events[0].attrs);
+    assert_eq!(attrs.session_id, Some(Some("sess-parent-abc".to_string())));
+    assert_eq!(
+        attrs.external_session_id,
+        Some(Some("sess-parent-abc".to_string()))
+    );
+    assert_eq!(attrs.external_parent_session_id, None);
+
+    let values = SessionEventValues::from_sparse(&metric_events[2].values);
+    assert_eq!(
+        values.external_event_id,
+        Some("ccc33333-3333-3333-3333-333333333333".to_string())
+    );
+    assert_eq!(
+        values.external_parent_event_id,
+        Some("bbb22222-2222-2222-2222-222222222222".to_string())
+    );
+    assert_eq!(
+        values.external_tool_use_id,
+        Some("toolu_01AbCdEfGhIjKlMnOp".to_string())
+    );
+}
+
+#[test]
+fn test_full_pipeline_opencode_session_ids_flow_through() {
+    use chrono::{DateTime, Utc};
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("transcripts.db");
+    let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+
+    let fixture = test_fixture_path("opencode-sqlite/opencode.db");
+    let now = chrono::Utc::now().timestamp();
+
+    let session = SessionRecord {
+        session_id: "test-session-123".to_string(),
+        tool: "opencode".to_string(),
+        transcript_path: fixture.display().to_string(),
+        transcript_format: "OpenCodeSqlite".to_string(),
+        watermark_type: "Timestamp".to_string(),
+        watermark_value: DateTime::<Utc>::UNIX_EPOCH.to_rfc3339(),
+        external_session_id: "test-session-123".to_string(),
+        external_parent_session_id: None,
+        first_seen_at: now,
+        last_processed_at: 0,
+        last_known_size: 0,
+        last_modified: None,
+        processing_errors: 0,
+        last_error: None,
+    };
+    db.insert_session(&session).unwrap();
+
+    let agent = OpenCodeAgent::new();
+    let watermark = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
+    let batch = agent
+        .read_incremental(
+            &PathBuf::from(&session.transcript_path),
+            watermark,
+            &session.session_id,
+        )
+        .unwrap();
+
+    use git_ai::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
+
+    let attrs_sparse = EventAttributes::with_version("test")
+        .session_id(session.session_id.clone())
+        .external_session_id(session.external_session_id.clone())
+        .external_parent_session_id_opt(session.external_parent_session_id.clone())
+        .to_sparse();
+
+    let metric_events: Vec<MetricEvent> = batch
+        .events
+        .into_iter()
+        .map(|raw_event| {
+            let (eid, pid, tid) = agent.extract_event_ids(&raw_event);
+            MetricEvent::from_values(
+                SessionEventValues::with_ids(raw_event, eid, pid, tid),
+                attrs_sparse.clone(),
+            )
+        })
+        .collect();
+
+    assert_eq!(metric_events.len(), 2);
+
+    let values = SessionEventValues::from_sparse(&metric_events[1].values);
+    assert_eq!(
+        values.external_event_id,
+        Some("msg-assistant-sql-001".to_string())
+    );
+    assert_eq!(
+        values.external_parent_event_id,
+        Some("msg-user-sql-001".to_string())
+    );
+    assert_eq!(
+        values.external_tool_use_id,
+        Some("call-sql-001".to_string())
+    );
+}
+
+#[test]
+fn test_subagent_session_record_has_parent_link() {
+    use git_ai::metrics::{EventAttributes, PosEncoded};
+    use git_ai::transcripts::agents::claude::ClaudeAgent as ClaudeAgentImpl;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("transcripts.db");
+    let db = TranscriptsDatabase::open(&db_path).unwrap();
+
+    let subagent_path = PathBuf::from(
+        "/home/user/.claude/projects/proj/sess-parent-abc/subagents/agent-a1b2c3d4e5f6.jsonl",
+    );
+    let parent_id = ClaudeAgentImpl::detect_subagent_parent(&subagent_path);
+    assert_eq!(parent_id, Some("sess-parent-abc".to_string()));
+
+    let now = chrono::Utc::now().timestamp();
+    let session = SessionRecord {
+        session_id: "agent-a1b2c3d4e5f6".to_string(),
+        tool: "claude".to_string(),
+        transcript_path: subagent_path.display().to_string(),
+        transcript_format: "ClaudeJsonl".to_string(),
+        watermark_type: "ByteOffset".to_string(),
+        watermark_value: "0".to_string(),
+        external_session_id: "agent-a1b2c3d4e5f6".to_string(),
+        external_parent_session_id: parent_id.clone(),
+        first_seen_at: now,
+        last_processed_at: 0,
+        last_known_size: 0,
+        last_modified: None,
+        processing_errors: 0,
+        last_error: None,
+    };
+    db.insert_session(&session).unwrap();
+
+    let retrieved = db.get_session("agent-a1b2c3d4e5f6").unwrap().unwrap();
+    assert_eq!(
+        retrieved.external_session_id,
+        "agent-a1b2c3d4e5f6".to_string()
+    );
+    assert_eq!(
+        retrieved.external_parent_session_id,
+        Some("sess-parent-abc".to_string())
+    );
+
+    let attrs = EventAttributes::with_version("test")
+        .session_id(retrieved.session_id.clone())
+        .external_session_id(retrieved.external_session_id.clone())
+        .external_parent_session_id_opt(retrieved.external_parent_session_id.clone())
+        .to_sparse();
+
+    let restored = EventAttributes::from_sparse(&attrs);
+    assert_eq!(
+        restored.external_session_id,
+        Some(Some("agent-a1b2c3d4e5f6".to_string()))
+    );
+    assert_eq!(
+        restored.external_parent_session_id,
+        Some(Some("sess-parent-abc".to_string()))
+    );
 }
