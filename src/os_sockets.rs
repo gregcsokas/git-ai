@@ -219,7 +219,19 @@ mod windows_impl {
         }
 
         pub fn connect_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
-            // Spawn blocking connect in a thread and join with timeout.
+            // Windows AF_UNIX sockets: connecting to a socket file with no listener hangs indefinitely.
+            // We can't make connect() non-blocking easily with raw Winsock, so just fail fast if
+            // the socket file doesn't exist.
+            if !path.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "socket file does not exist",
+                ));
+            }
+
+            // Try to connect with the given timeout by using blocking connect
+            // in a dedicated thread. If connect hangs (no listener), the thread
+            // will be abandoned. This is acceptable for daemon health checks.
             use std::sync::mpsc;
             use std::thread;
 
@@ -227,8 +239,7 @@ mod windows_impl {
             let (tx, rx) = mpsc::channel();
 
             thread::spawn(move || {
-                let result = Self::connect(&path);
-                let _ = tx.send(result);
+                let _ = tx.send(Self::connect(&path));
             });
 
             match rx.recv_timeout(timeout) {
@@ -240,7 +251,7 @@ mod windows_impl {
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("connection timed out after {:?}", timeout),
+                    "connection timed out",
                 )),
             }
         }
