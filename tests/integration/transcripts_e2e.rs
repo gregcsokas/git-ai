@@ -31,14 +31,13 @@ fn test_session_database_basic() {
     let now = chrono::Utc::now().timestamp();
     let session = SessionRecord {
         session_id: "s_test_123".to_string(),
-        agent_type: "claude".to_string(),
+        tool: "claude".to_string(),
         transcript_path: "/path/to/transcript.jsonl".to_string(),
         transcript_format: "claude-jsonl".to_string(),
         watermark_type: "byte_offset".to_string(),
         watermark_value: "0".to_string(),
-        model: Some("claude-sonnet-4".to_string()),
-        tool: Some("claude-code".to_string()),
-        external_thread_id: None,
+        external_session_id: "test-ext-session".to_string(),
+        external_parent_session_id: None,
         first_seen_at: now,
         last_processed_at: now,
         last_known_size: 0,
@@ -55,7 +54,7 @@ fn test_session_database_basic() {
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.session_id, "s_test_123");
-    assert_eq!(retrieved.agent_type, "claude");
+    assert_eq!(retrieved.tool, "claude");
     assert_eq!(retrieved.processing_errors, 0);
 
     // Update watermark
@@ -136,14 +135,13 @@ fn test_multiple_sessions_isolation() {
     for i in 0..5 {
         let session = SessionRecord {
             session_id: format!("s_session_{}", i),
-            agent_type: "claude".to_string(),
+            tool: "claude".to_string(),
             transcript_path: format!("/path/to/transcript_{}.jsonl", i),
             transcript_format: "claude-jsonl".to_string(),
             watermark_type: "byte_offset".to_string(),
             watermark_value: (i * 10).to_string(),
-            model: Some("claude-sonnet-4".to_string()),
-            tool: Some("claude-code".to_string()),
-            external_thread_id: None,
+            external_session_id: "test-ext-session".to_string(),
+            external_parent_session_id: None,
             first_seen_at: now,
             last_processed_at: now,
             last_known_size: 0,
@@ -181,14 +179,13 @@ fn test_database_persistence() {
         let db = TranscriptsDatabase::open(&db_path).unwrap();
         let session = SessionRecord {
             session_id: "s_persist".to_string(),
-            agent_type: "claude".to_string(),
+            tool: "claude".to_string(),
             transcript_path: "/path/to/transcript.jsonl".to_string(),
             transcript_format: "claude-jsonl".to_string(),
             watermark_type: "byte_offset".to_string(),
             watermark_value: "42".to_string(),
-            model: Some("claude-sonnet-4".to_string()),
-            tool: Some("claude-code".to_string()),
-            external_thread_id: None,
+            external_session_id: "test-ext-session".to_string(),
+            external_parent_session_id: None,
             first_seen_at: now,
             last_processed_at: now,
             last_known_size: 0,
@@ -218,14 +215,13 @@ fn test_error_tracking() {
     let now = chrono::Utc::now().timestamp();
     let session = SessionRecord {
         session_id: "s_errors".to_string(),
-        agent_type: "claude".to_string(),
+        tool: "claude".to_string(),
         transcript_path: "/path/to/transcript.jsonl".to_string(),
         transcript_format: "claude-jsonl".to_string(),
         watermark_type: "byte_offset".to_string(),
         watermark_value: "0".to_string(),
-        model: Some("claude-sonnet-4".to_string()),
-        tool: Some("claude-code".to_string()),
-        external_thread_id: None,
+        external_session_id: "test-ext-session".to_string(),
+        external_parent_session_id: None,
         first_seen_at: now,
         last_processed_at: now,
         last_known_size: 0,

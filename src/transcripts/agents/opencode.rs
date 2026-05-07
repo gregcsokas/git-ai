@@ -26,7 +26,7 @@ impl OpenCodeAgent {
     }
 }
 
-fn open_sqlite_readonly(path: &Path) -> Result<Connection, TranscriptError> {
+pub fn open_sqlite_readonly(path: &Path) -> Result<Connection, TranscriptError> {
     let conn =
         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| {
             TranscriptError::Fatal {

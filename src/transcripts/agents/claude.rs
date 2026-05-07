@@ -1,5 +1,6 @@
 //! Claude Code agent implementation with sweep discovery.
 
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -73,11 +74,21 @@ impl ClaudeAgent {
 
     /// Extract session ID from a Claude conversation file path.
     ///
-    /// Claude files are typically named like: `<uuid>.jsonl` under `projects/<project-dir>/`
-    fn extract_session_id(path: &Path) -> Option<String> {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("claude:{}", s))
+    /// Detect if a path is a subagent transcript and extract the parent session UUID.
+    ///
+    /// Subagent path pattern: `<project>/<parent-uuid>/subagents/agent-<id>.jsonl`
+    pub fn detect_subagent_parent(path: &Path) -> Option<String> {
+        let components: Vec<_> = path.components().collect();
+        for (i, component) in components.iter().enumerate() {
+            if let std::path::Component::Normal(s) = component
+                && s.to_str() == Some("subagents")
+                && i > 0
+                && let std::path::Component::Normal(parent) = components[i - 1]
+            {
+                return parent.to_str().map(|s| s.to_string());
+            }
+        }
+        None
     }
 }
 
@@ -102,22 +113,25 @@ impl Agent for ClaudeAgent {
         let mut sessions = Vec::new();
 
         for path in paths {
-            let Some(session_id) = Self::extract_session_id(&path) else {
+            let Some(external_session_id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+            else {
                 continue;
             };
+            let session_id = generate_session_id(&external_session_id, "claude");
+            let external_parent_session_id = Self::detect_subagent_parent(&path);
 
-            // Don't parse file content here - just filesystem scanning.
-            // Model will be extracted later during first read_incremental() if needed.
             let session = DiscoveredSession {
                 session_id,
-                agent_type: "claude".to_string(),
+                tool: "claude".to_string(),
                 transcript_path: path,
                 transcript_format: TranscriptFormat::ClaudeJsonl,
                 watermark_type: WatermarkType::ByteOffset,
                 initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
-                model: None,
-                tool: Some("Claude Code".to_string()),
-                external_thread_id: None,
+                external_session_id,
+                external_parent_session_id,
             };
 
             sessions.push(session);
@@ -233,11 +247,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_session_id() {
-        let path =
-            PathBuf::from("/home/user/.config/Claude/conversations/conversation_abc-123.jsonl");
-        let session_id = ClaudeAgent::extract_session_id(&path);
-        assert_eq!(session_id, Some("claude:conversation_abc-123".to_string()));
+    fn test_detect_subagent_parent() {
+        let subagent_path = PathBuf::from(
+            "/home/user/.claude/projects/-home-user-myproject/cf28d639-11e1-4851-b914-d16eb53d907b/subagents/agent-a20c8d201882f84b6.jsonl",
+        );
+        assert_eq!(
+            ClaudeAgent::detect_subagent_parent(&subagent_path),
+            Some("cf28d639-11e1-4851-b914-d16eb53d907b".to_string())
+        );
+
+        let main_session_path = PathBuf::from(
+            "/home/user/.claude/projects/-home-user-myproject/cf28d639-11e1-4851-b914-d16eb53d907b.jsonl",
+        );
+        assert_eq!(
+            ClaudeAgent::detect_subagent_parent(&main_session_path),
+            None
+        );
+
+        let no_parent_path = PathBuf::from("/subagents/agent-xyz.jsonl");
+        assert_eq!(ClaudeAgent::detect_subagent_parent(&no_parent_path), None);
     }
 
     #[test]
