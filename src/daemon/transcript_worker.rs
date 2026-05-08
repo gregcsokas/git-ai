@@ -4,7 +4,7 @@
 //! 1. **Checkpoint notifications** (Immediate priority, <100ms) - fired when `git-ai checkpoint` is called
 //! 2. **Periodic sweeps** (Low priority, every 30min) - agent-specific discovery of all sessions
 
-use crate::authorship::authorship_log_serialization::generate_trace_id;
+use crate::authorship::authorship_log_serialization::{generate_session_id, generate_trace_id};
 use crate::config;
 use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
 use crate::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
@@ -315,10 +315,16 @@ impl TranscriptWorker {
         let mut current_watermark = watermark_type.deserialize(&session.watermark_value)?;
         let path = PathBuf::from(&session.transcript_path);
         let mut total_events = 0usize;
+        let parent_session_id = session
+            .external_parent_session_id
+            .as_ref()
+            .map(|ext_pid| generate_session_id(ext_pid, &session.tool));
         let base_attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
             .session_id(session.session_id.clone())
+            .tool(&session.tool)
             .external_session_id(session.external_session_id.clone())
-            .external_parent_session_id_opt(session.external_parent_session_id.clone());
+            .external_parent_session_id_opt(session.external_parent_session_id.clone())
+            .parent_session_id_opt(parent_session_id);
 
         loop {
             let batch = agent.read_incremental(&path, current_watermark, &session.session_id)?;
