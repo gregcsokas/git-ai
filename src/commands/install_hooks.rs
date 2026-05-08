@@ -609,12 +609,16 @@ async fn async_run_install(
         }
     }
 
-    // Install skills for detected agents only (requires --skills flag)
-    if install_skills
-        && let Ok(result) = skills_installer::install_skills(dry_run, verbose, &installed_tools)
-        && result.changed
-    {
-        has_changes = true;
+    if install_skills {
+        if let Ok(result) = skills_installer::install_skills(dry_run, verbose, &installed_tools) {
+            if result.changed {
+                has_changes = true;
+            }
+        }
+    } else if let Ok(result) = skills_installer::uninstall_skills(dry_run, verbose) {
+        if result.changed {
+            has_changes = true;
+        }
     }
 
     if !any_checked {
