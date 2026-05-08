@@ -18,6 +18,7 @@ pub mod attr_pos {
     pub const EXTERNAL_SESSION_ID: usize = 23;
     pub const SESSION_ID: usize = 24;
     pub const TRACE_ID: usize = 25;
+    pub const PARENT_SESSION_ID: usize = 26;
     pub const EXTERNAL_PARENT_SESSION_ID: usize = 27;
     pub const CUSTOM_ATTRIBUTES: usize = 30;
 }
@@ -38,6 +39,7 @@ pub mod attr_pos {
 /// | 23 | external_session_id | String | No (nullable) |
 /// | 24 | session_id | String | Yes |
 /// | 25 | trace_id | String | No (nullable) |
+/// | 26 | parent_session_id | String | No (nullable) |
 /// | 27 | external_parent_session_id | String | No (nullable) |
 /// | 30 | custom_attributes | String (JSON) | No (nullable) |
 #[derive(Debug, Clone, Default)]
@@ -53,6 +55,7 @@ pub struct EventAttributes {
     pub prompt_id: PosField<String>,
     pub session_id: PosField<String>,
     pub trace_id: PosField<String>,
+    pub parent_session_id: PosField<String>,
     pub external_session_id: PosField<String>,
     pub external_parent_session_id: PosField<String>,
     pub custom_attributes: PosField<String>,
@@ -195,6 +198,19 @@ impl EventAttributes {
         self
     }
 
+    // Builder methods for parent_session_id
+    pub fn parent_session_id(mut self, value: impl Into<String>) -> Self {
+        self.parent_session_id = Some(Some(value.into()));
+        self
+    }
+
+    pub fn parent_session_id_opt(self, value: Option<String>) -> Self {
+        match value {
+            Some(v) => self.parent_session_id(v),
+            None => self,
+        }
+    }
+
     // Builder methods for external_session_id
     pub fn external_session_id(mut self, value: impl Into<String>) -> Self {
         self.external_session_id = Some(Some(value.into()));
@@ -294,6 +310,11 @@ impl PosEncoded for EventAttributes {
         sparse_set(&mut map, attr_pos::TRACE_ID, string_to_json(&self.trace_id));
         sparse_set(
             &mut map,
+            attr_pos::PARENT_SESSION_ID,
+            string_to_json(&self.parent_session_id),
+        );
+        sparse_set(
+            &mut map,
             attr_pos::EXTERNAL_PARENT_SESSION_ID,
             string_to_json(&self.external_parent_session_id),
         );
@@ -318,6 +339,7 @@ impl PosEncoded for EventAttributes {
             prompt_id: sparse_get_string(arr, attr_pos::PROMPT_ID),
             session_id: sparse_get_string(arr, attr_pos::SESSION_ID),
             trace_id: sparse_get_string(arr, attr_pos::TRACE_ID),
+            parent_session_id: sparse_get_string(arr, attr_pos::PARENT_SESSION_ID),
             external_session_id: sparse_get_string(arr, attr_pos::EXTERNAL_SESSION_ID),
             external_parent_session_id: sparse_get_string(
                 arr,
