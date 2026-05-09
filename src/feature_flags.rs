@@ -84,6 +84,7 @@ define_feature_flags!(
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
     transcript_streaming: transcript_streaming, debug = true, release = true,
     transcript_sweep: transcript_sweep, debug = true, release = false,
+    daemon_allow_root: daemon_allow_root, debug = false, release = false,
 );
 
 impl FeatureFlags {
