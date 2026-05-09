@@ -4119,7 +4119,11 @@ fn stale_lock_cleaned_up_on_start() {
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     // Create stale lock file and fake PID metadata pointing to a dead process
-    let daemon_dir = repo.test_home_path().join(".git-ai").join("internal").join("daemon");
+    let daemon_dir = repo
+        .test_home_path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon");
     fs::create_dir_all(&daemon_dir).unwrap();
     let lock_path = daemon_dir.join("daemon.lock");
     fs::write(&lock_path, "stale").unwrap();
