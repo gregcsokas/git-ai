@@ -107,10 +107,14 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
     }
 
     if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+        diagnose_blocked_daemon(&config)?;
+        // diagnose returned Ok — stale files cleaned up. Retry.
+        if daemon_startup_is_blocked(&config) {
+            return Err(format!(
+                "daemon startup blocked: lock still held at {} after cleanup",
+                config.lock_path.display()
+            ));
+        }
     }
 
     #[cfg(not(windows))]
@@ -267,6 +271,76 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
     }
 }
 
+/// When the lock is held but the daemon is not connectable, determine why and
+/// either auto-recover (stale lock from dead process) or provide an actionable error.
+fn diagnose_blocked_daemon(config: &DaemonConfig) -> Result<(), String> {
+    let pid = match crate::daemon::read_daemon_pid(config) {
+        Ok(pid) => pid,
+        Err(_) => {
+            // No PID metadata — stale lock from crash. Try cleanup.
+            if force_remove_stale_files(config) {
+                return Ok(());
+            }
+            return Err(format!(
+                "daemon startup blocked: lock held at {} (no PID metadata, manual removal may be required)",
+                config.lock_path.display()
+            ));
+        }
+    };
+
+    match crate::privilege::check_pid_status(pid) {
+        crate::privilege::PidStatus::Dead => {
+            eprintln!(
+                "[git-ai] cleaning up stale daemon files from dead process (pid {})",
+                pid
+            );
+            if force_remove_stale_files(config) {
+                return Ok(());
+            }
+            Err(format!(
+                "daemon startup blocked: stale lock from dead process (pid {}), cleanup failed — manual removal required: {}",
+                pid,
+                config.lock_path.display()
+            ))
+        }
+        crate::privilege::PidStatus::AliveButInaccessible => {
+            #[cfg(unix)]
+            {
+                Err(format!(
+                    "Daemon (pid {}) is running as a different user. To fix:\n  sudo kill {} && rm -f \"{}\"",
+                    pid, pid, config.lock_path.display()
+                ))
+            }
+            #[cfg(windows)]
+            {
+                Err(format!(
+                    "Daemon (pid {}) is running with elevated privileges. Open an Administrator terminal and run:\n  git-ai bg stop",
+                    pid
+                ))
+            }
+        }
+        crate::privilege::PidStatus::Alive => {
+            Err(format!(
+                "daemon startup blocked: lock held at {} by process {} (alive but not responding on sockets)",
+                config.lock_path.display(),
+                pid
+            ))
+        }
+    }
+}
+
+fn force_remove_stale_files(config: &DaemonConfig) -> bool {
+    let mut ok = true;
+    if config.lock_path.exists() {
+        if std::fs::remove_file(&config.lock_path).is_err() {
+            ok = false;
+        }
+    }
+    let _ = std::fs::remove_file(&config.control_socket_path);
+    let _ = std::fs::remove_file(&config.trace_socket_path);
+    ok
+}
+
 pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
     if !config.control_socket_path.exists() || !config.trace_socket_path.exists() {
         return false;
@@ -301,10 +375,13 @@ fn start_daemon_detached_with_config(
     }
 
     if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+        diagnose_blocked_daemon(&config)?;
+        if daemon_startup_is_blocked(&config) {
+            return Err(format!(
+                "daemon startup blocked: lock still held at {} after cleanup",
+                config.lock_path.display()
+            ));
+        }
     }
 
     spawn_daemon_run_detached(&config)?;
