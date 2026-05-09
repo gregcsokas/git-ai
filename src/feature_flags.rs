@@ -209,6 +209,7 @@ mod tests {
             git_hooks_externally_managed: false,
             transcript_streaming: true,
             transcript_sweep: true,
+            daemon_allow_root: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -229,6 +230,7 @@ mod tests {
             git_hooks_externally_managed: false,
             transcript_streaming: true,
             transcript_sweep: true,
+            daemon_allow_root: false,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);

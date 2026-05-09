@@ -257,3 +257,31 @@ fn respawn_deescalated_windows() -> Result<(), String> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_pid_status_dead_process() {
+        // PID 4_000_000_000 is impossibly high and guaranteed not running
+        assert_eq!(check_pid_status(4_000_000_000), PidStatus::Dead);
+    }
+
+    #[test]
+    fn check_pid_status_alive_process() {
+        // Current process is definitely alive
+        let pid = std::process::id();
+        assert_eq!(check_pid_status(pid), PidStatus::Alive);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn privilege_check_not_elevated() {
+        // Tests run as normal user, should return Continue
+        // (unless tests are running as root, which would be unusual)
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(check_and_deescalate_privileges(), PrivilegeAction::Continue);
+        }
+    }
+}

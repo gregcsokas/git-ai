@@ -4111,3 +4111,64 @@ fn daemon_self_heals_after_socket_deletion() {
         thread::sleep(Duration::from_millis(50));
     }
 }
+
+#[test]
+#[serial]
+fn stale_lock_cleaned_up_on_start() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+
+    // Create stale lock file and fake PID metadata pointing to a dead process
+    let daemon_dir = repo.test_home_path().join(".git-ai").join("internal").join("daemon");
+    fs::create_dir_all(&daemon_dir).unwrap();
+    let lock_path = daemon_dir.join("daemon.lock");
+    fs::write(&lock_path, "stale").unwrap();
+    let pid_path = daemon_dir.join("daemon.pid.json");
+    fs::write(&pid_path, r#"{"pid": 4000000000, "started_at_ns": 0}"#).unwrap();
+
+    // Attempt to start daemon — should auto-recover by cleaning stale files
+    let mut command = Command::new(get_binary_path());
+    command
+        .arg("bg")
+        .arg("start")
+        .current_dir(repo.path())
+        .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
+        .env("GITAI_TEST_DB_PATH", repo.test_db_path());
+    configure_test_home_env(&mut command, repo.test_home_path());
+    configure_test_daemon_env(
+        &mut command,
+        &repo.daemon_home_path(),
+        &repo.daemon_control_socket_path(),
+        &repo.daemon_trace_socket_path(),
+    );
+
+    let output = command.output().expect("failed to run bg start");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // The stale lock should have been cleaned up and daemon started
+    // (or at minimum, the error should NOT be the opaque "lock held" message)
+    assert!(
+        output.status.success() || stderr.contains("cleaning up stale daemon files"),
+        "expected stale lock cleanup, got exit={} stderr={}",
+        output.status,
+        stderr
+    );
+
+    // Clean up: stop daemon if it started
+    if output.status.success() {
+        let mut stop = Command::new(get_binary_path());
+        stop.arg("bg")
+            .arg("shutdown")
+            .current_dir(repo.path())
+            .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
+            .env("GITAI_TEST_DB_PATH", repo.test_db_path());
+        configure_test_home_env(&mut stop, repo.test_home_path());
+        configure_test_daemon_env(
+            &mut stop,
+            &repo.daemon_home_path(),
+            &repo.daemon_control_socket_path(),
+            &repo.daemon_trace_socket_path(),
+        );
+        let _ = stop.output();
+    }
+}
