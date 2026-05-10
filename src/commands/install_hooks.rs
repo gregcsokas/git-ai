@@ -327,7 +327,7 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
 
     // Get absolute path to the current binary
     let binary_path = get_current_binary_path()?;
-    persist_install_api_base_config(&binary_path, dry_run)?;
+    persist_install_config(&binary_path, dry_run)?;
     let params = HookInstallerParams { binary_path };
 
     // Run async operations with smol and convert result
@@ -342,32 +342,45 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     Ok(to_hashmap(statuses))
 }
 
-fn persist_install_api_base_config(binary_path: &Path, dry_run: bool) -> Result<bool, GitAiError> {
+fn persist_install_config(binary_path: &Path, dry_run: bool) -> Result<bool, GitAiError> {
     if dry_run {
         return Ok(false);
     }
 
     let api_base = std::env::var("API_BASE").ok().filter(|s| !s.is_empty());
-    let Some(api_base) = api_base else {
+    let api_key = std::env::var("API_KEY").ok().filter(|s| !s.is_empty());
+
+    if api_base.is_none() && api_key.is_none() {
         return Ok(false);
-    };
+    }
 
     let mut file_config = crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
     let mut changed = false;
 
-    if file_config.api_base_url.as_deref() != Some(api_base.as_str()) {
-        file_config.api_base_url = Some(api_base);
+    if let Some(ref api_base) = api_base
+        && file_config.api_base_url.as_deref() != Some(api_base.as_str())
+    {
+        file_config.api_base_url = Some(api_base.clone());
         changed = true;
     }
 
-    let git_path_missing = file_config
-        .git_path
-        .as_ref()
-        .map(|value| value.trim().is_empty())
-        .unwrap_or(true);
-    if git_path_missing && let Some(git_path) = detect_install_git_path(binary_path) {
-        file_config.git_path = Some(git_path);
+    if let Some(ref api_key) = api_key
+        && file_config.api_key.as_deref() != Some(api_key.as_str())
+    {
+        file_config.api_key = Some(api_key.clone());
         changed = true;
+    }
+
+    if api_base.is_some() {
+        let git_path_missing = file_config
+            .git_path
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true);
+        if git_path_missing && let Some(git_path) = detect_install_git_path(binary_path) {
+            file_config.git_path = Some(git_path);
+            changed = true;
+        }
     }
 
     if !changed {
@@ -1122,7 +1135,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn persist_install_api_base_updates_config_and_backfills_git_path() {
+    fn persist_install_config_updates_api_base_and_backfills_git_path() {
         let temp = tempdir().unwrap();
         let install_dir = temp.path().join("bin");
         fs::create_dir_all(&install_dir).unwrap();
@@ -1139,9 +1152,9 @@ mod tests {
         #[cfg(windows)]
         let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
         let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
+        let _api_key = EnvVarGuard::remove("API_KEY");
 
-        let changed =
-            persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
+        let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
 
         assert!(changed);
 
@@ -1151,11 +1164,12 @@ mod tests {
             Some("https://enterprise.example")
         );
         assert_eq!(config.git_path.as_deref(), Some(expected_git_path));
+        assert_eq!(config.api_key, None);
     }
 
     #[test]
     #[serial]
-    fn persist_install_api_base_preserves_existing_git_path() {
+    fn persist_install_config_preserves_existing_git_path() {
         let temp = tempdir().unwrap();
         let install_dir = temp.path().join("bin");
         fs::create_dir_all(&install_dir).unwrap();
@@ -1173,6 +1187,7 @@ mod tests {
         #[cfg(windows)]
         let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
         let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
+        let _api_key = EnvVarGuard::remove("API_KEY");
 
         let existing_git_path = if cfg!(windows) {
             r"D:\PortableGit\bin\git.exe"
@@ -1185,7 +1200,7 @@ mod tests {
         })
         .unwrap();
 
-        persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
+        persist_install_config(&test_binary_path(&install_dir), false).unwrap();
 
         let config = crate::config::load_file_config_public().unwrap();
         assert_eq!(
@@ -1197,7 +1212,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn persist_install_api_base_skips_without_env_or_in_dry_run() {
+    fn persist_install_config_skips_without_env_or_in_dry_run() {
         let temp = tempdir().unwrap();
         let install_dir = temp.path().join("bin");
         fs::create_dir_all(&install_dir).unwrap();
@@ -1207,17 +1222,65 @@ mod tests {
         #[cfg(windows)]
         let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
         let _api_base = EnvVarGuard::remove("API_BASE");
+        let _api_key = EnvVarGuard::remove("API_KEY");
 
-        let changed =
-            persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
+        let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
         assert!(!changed);
         assert!(!temp.path().join(".git-ai").join("config.json").exists());
 
         let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
-        let changed =
-            persist_install_api_base_config(&test_binary_path(&install_dir), true).unwrap();
+        let changed = persist_install_config(&test_binary_path(&install_dir), true).unwrap();
         assert!(!changed);
         assert!(!temp.path().join(".git-ai").join("config.json").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn persist_install_config_persists_api_key() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_base = EnvVarGuard::remove("API_BASE");
+        let _api_key = EnvVarGuard::set("API_KEY", "sk-enterprise-key-12345");
+
+        let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
+
+        assert!(changed);
+
+        let config = crate::config::load_file_config_public().unwrap();
+        assert_eq!(config.api_key.as_deref(), Some("sk-enterprise-key-12345"));
+        assert_eq!(config.api_base_url, None);
+    }
+
+    #[test]
+    #[serial]
+    fn persist_install_config_persists_both_api_base_and_api_key() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
+        let _api_key = EnvVarGuard::set("API_KEY", "sk-enterprise-key-12345");
+
+        let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
+
+        assert!(changed);
+
+        let config = crate::config::load_file_config_public().unwrap();
+        assert_eq!(
+            config.api_base_url.as_deref(),
+            Some("https://enterprise.example")
+        );
+        assert_eq!(config.api_key.as_deref(), Some("sk-enterprise-key-12345"));
     }
 
     #[cfg(windows)]
