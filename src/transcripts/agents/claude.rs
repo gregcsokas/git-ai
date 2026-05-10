@@ -281,7 +281,7 @@ impl Agent for ClaudeAgent {
 
         // Check up to 50 lines for a top-level "cwd" field
         for line in reader.lines().take(50) {
-            let line = line.ok()?;
+            let Ok(line) = line else { continue };
             if line.is_empty() {
                 continue;
             }

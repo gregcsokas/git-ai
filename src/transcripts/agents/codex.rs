@@ -272,7 +272,7 @@ impl Agent for CodexAgent {
 
         // Codex has cwd in session_meta or turn_context payload events
         for line in reader.lines().take(20) {
-            let line = line.ok()?;
+            let Ok(line) = line else { continue };
             if line.is_empty() {
                 continue;
             }

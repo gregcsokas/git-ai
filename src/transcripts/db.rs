@@ -360,13 +360,20 @@ impl TranscriptsDatabase {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        conn.execute(
-            "UPDATE sessions SET repo_work_dir = ?1 WHERE session_id = ?2",
-            params![repo_work_dir, session_id],
-        )
-        .map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to update repo_work_dir: {}", e),
-        })?;
+        let rows_changed = conn
+            .execute(
+                "UPDATE sessions SET repo_work_dir = ?1 WHERE session_id = ?2",
+                params![repo_work_dir, session_id],
+            )
+            .map_err(|e| TranscriptError::Fatal {
+                message: format!("Failed to update repo_work_dir: {}", e),
+            })?;
+
+        if rows_changed == 0 {
+            return Err(TranscriptError::Fatal {
+                message: format!("Session not found: {}", session_id),
+            });
+        }
 
         Ok(())
     }
