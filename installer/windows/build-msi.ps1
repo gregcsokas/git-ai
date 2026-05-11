@@ -247,7 +247,7 @@ Start-Sleep -Seconds 2
 # Uses the WindowsInstaller.Installer COM object (built into Windows) instead of
 # msiinfo.exe which has unreliable flag semantics across SDK versions.
 Write-Host 'Writing Summary Information Stream...'
-$platform = if ($Architecture -eq 'arm64') { 'Arm64' } else { 'Intel64' }
+$platform = if ($Architecture -eq 'arm64') { 'Arm64' } else { 'x64' }
 $template = "$platform;1033"
 
 $installer = New-Object -ComObject WindowsInstaller.Installer

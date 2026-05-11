@@ -51,14 +51,12 @@ echo "  Binary: $BINARY_PATH"
 BUILD_DIR="$SCRIPT_DIR/build/rpm-${ARCHITECTURE}"
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-mkdir -p "$BUILD_DIR/BUILDROOT/git-ai-${VERSION}-1.${ARCHITECTURE}/usr/lib/git-ai/bin"
 
-# --- Stage binaries ---
-BUILDROOT="$BUILD_DIR/BUILDROOT/git-ai-${VERSION}-1.${ARCHITECTURE}"
-cp "$BINARY_PATH" "$BUILDROOT/usr/lib/git-ai/bin/git-ai"
-cp "$BINARY_PATH" "$BUILDROOT/usr/lib/git-ai/bin/git"
-chmod 755 "$BUILDROOT/usr/lib/git-ai/bin/git-ai"
-chmod 755 "$BUILDROOT/usr/lib/git-ai/bin/git"
+# --- Stage binaries in SOURCES (rpmbuild wipes BUILDROOT, not SOURCES) ---
+cp "$BINARY_PATH" "$BUILD_DIR/SOURCES/git-ai"
+cp "$BINARY_PATH" "$BUILD_DIR/SOURCES/git"
+chmod 755 "$BUILD_DIR/SOURCES/git-ai"
+chmod 755 "$BUILD_DIR/SOURCES/git"
 
 # --- Write spec file ---
 cat > "$BUILD_DIR/SPECS/git-ai.spec" << SPEC
@@ -77,8 +75,8 @@ and supports checkpointing from IDE extensions and AI coding agents.
 
 %install
 mkdir -p %{buildroot}/usr/lib/git-ai/bin
-cp ${BUILDROOT}/usr/lib/git-ai/bin/git-ai %{buildroot}/usr/lib/git-ai/bin/git-ai
-cp ${BUILDROOT}/usr/lib/git-ai/bin/git %{buildroot}/usr/lib/git-ai/bin/git
+cp %{_sourcedir}/git-ai %{buildroot}/usr/lib/git-ai/bin/git-ai
+cp %{_sourcedir}/git %{buildroot}/usr/lib/git-ai/bin/git
 
 %files
 %attr(755, root, root) /usr/lib/git-ai/bin/git-ai
