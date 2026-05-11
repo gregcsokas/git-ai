@@ -1,11 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Copy, Default)]
-pub struct PromptLineMetrics {
-    pub accepted_lines: u32,
-    pub overridden_lines: u32,
-}
-
 /// Pre-loaded note data for all commits involved in a rebase.
 /// Eliminates redundant git subprocess calls by reading everything once upfront.
 pub struct RebaseNoteCache {
@@ -20,33 +14,8 @@ pub struct RebaseNoteCache {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct CommitTrackedDelta {
-    pub changed_files: HashSet<String>,
-    pub file_to_blob_oid: HashMap<String, Option<String>>,
-}
-
-#[derive(Debug, Default, Clone)]
 pub struct CommitObjectMetadata {
     pub tree_oid: String,
-}
-
-pub type ChangedFileContents = (HashSet<String>, HashMap<String, String>);
-pub type ChangedFileContentsByCommit = HashMap<String, ChangedFileContents>;
-
-/// Result of parsing diff-tree output: per-commit deltas and the set of all blob OIDs needed.
-pub struct DiffTreeResult {
-    pub commit_deltas: Vec<(String, CommitTrackedDelta)>,
-    pub all_blob_oids: Vec<String>, // sorted, deduplicated
-}
-
-impl DiffTreeResult {
-    pub fn all_changed_files(&self) -> HashSet<String> {
-        let mut files = HashSet::new();
-        for (_commit, delta) in &self.commit_deltas {
-            files.extend(delta.changed_files.iter().cloned());
-        }
-        files
-    }
 }
 
 /// A unified diff hunk header parsed from `git diff-tree -p -U0` output.
