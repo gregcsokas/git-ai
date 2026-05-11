@@ -4,6 +4,7 @@ mod repos;
 
 use git_ai::commands::diff::{DiffCommandOptions, DiffJsonHunk, build_diff_artifacts_with_note};
 use git_ai::git::repository::Repository as GitAiRepository;
+use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -38,6 +39,9 @@ fn test_commit_hunks_basic_ai_attribution() {
     repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
         .unwrap();
     let commit = repo.stage_all_and_commit("add AI lines").unwrap();
+
+    let mut file = repo.filename("example.txt");
+    file.assert_committed_lines(lines!["AI line 1".ai(), "AI line 2".ai(), "AI line 3".ai()]);
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
@@ -100,6 +104,14 @@ fn test_commit_hunks_mixed_attribution() {
 
     let commit = repo.stage_all_and_commit("mixed commit").unwrap();
 
+    let mut file = repo.filename("mixed.txt");
+    file.assert_committed_lines(lines![
+        "Human line 1".human(),
+        "Human line 2".human(),
+        "AI line 1".ai(),
+        "AI line 2".ai()
+    ]);
+
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
     let artifacts = build_diff_artifacts_with_note(
@@ -160,6 +172,11 @@ fn test_commit_hunks_multiple_files() {
 
     let commit = repo.stage_all_and_commit("multi-file commit").unwrap();
 
+    let mut file_a_test = repo.filename("a.txt");
+    file_a_test.assert_committed_lines(lines!["A line 1".ai(), "A line 2".ai()]);
+    let mut file_b_test = repo.filename("b.txt");
+    file_b_test.assert_committed_lines(lines!["B line 1".human()]);
+
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
     let artifacts = build_diff_artifacts_with_note(
@@ -207,11 +224,16 @@ fn test_commit_hunks_deletions_unattributed() {
         .unwrap();
     repo.stage_all_and_commit("initial").unwrap();
 
+    let mut file = repo.filename("deleteme.txt");
+    file.assert_committed_lines(lines!["Line 1".ai(), "Line 2".ai(), "Line 3".ai()]);
+
     // Second commit: delete a line
     fs::write(&file_path, "Line 1\nLine 3\n").unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "deleteme.txt"])
         .unwrap();
     let commit = repo.stage_all_and_commit("delete line 2").unwrap();
+
+    file.assert_committed_lines(lines!["Line 1".ai(), "Line 3".ai()]);
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
@@ -258,6 +280,20 @@ fn test_commit_hunks_consecutive_same_attribution_merges() {
         .unwrap();
     let commit = repo.stage_all_and_commit("consecutive AI lines").unwrap();
 
+    let mut file = repo.filename("merge.txt");
+    file.assert_committed_lines(lines![
+        "AI line 1".ai(),
+        "AI line 2".ai(),
+        "AI line 3".ai(),
+        "AI line 4".ai(),
+        "AI line 5".ai(),
+        "AI line 6".ai(),
+        "AI line 7".ai(),
+        "AI line 8".ai(),
+        "AI line 9".ai(),
+        "AI line 10".ai()
+    ]);
+
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
     let artifacts = build_diff_artifacts_with_note(
@@ -296,6 +332,9 @@ fn test_commit_hunks_attribution_boundaries_split() {
         .unwrap();
 
     let commit = repo.stage_all_and_commit("boundary split").unwrap();
+
+    let mut file = repo.filename("split.txt");
+    file.assert_committed_lines(lines!["Untracked".unattributed_human(), "AI added".ai()]);
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
@@ -339,6 +378,9 @@ fn test_commit_hunks_session_id_extraction() {
         .unwrap();
     let commit = repo.stage_all_and_commit("session test").unwrap();
 
+    let mut file = repo.filename("session.txt");
+    file.assert_committed_lines(lines!["Session line".ai()]);
+
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
     let artifacts = build_diff_artifacts_with_note(
@@ -381,6 +423,9 @@ fn test_commit_hunks_empty_diff() {
         .unwrap();
     let first = repo.stage_all_and_commit("first").unwrap();
 
+    let mut file = repo.filename("empty.txt");
+    file.assert_committed_lines(lines!["content".ai()]);
+
     // Make same content commit (empty diff) by using allow-empty
     repo.git(&["commit", "--allow-empty", "-m", "empty"])
         .unwrap();
@@ -410,6 +455,13 @@ fn test_commit_hunks_content_hash_correctness() {
     repo.git_ai(&["checkpoint", "mock_ai", "hash_test.txt"])
         .unwrap();
     let commit = repo.stage_all_and_commit("hash test").unwrap();
+
+    let mut file = repo.filename("hash_test.txt");
+    file.assert_committed_lines(lines![
+        "first line".ai(),
+        "second line".ai(),
+        "third line".ai()
+    ]);
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
@@ -452,6 +504,9 @@ fn test_commit_hunks_interleaved_attributions() {
         .unwrap();
 
     let commit = repo.stage_all_and_commit("interleaved").unwrap();
+
+    let mut file = repo.filename("interleaved.txt");
+    file.assert_committed_lines(lines!["Human 1".human(), "AI 1".ai(), "AI 2".ai()]);
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);

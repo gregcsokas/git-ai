@@ -1017,11 +1017,11 @@ fn build_line_attribution_from_note(
     }
 
     // Deleted lines: include with NoData attribution (no blame)
-    let deleted_lines_by_file = collect_lines_by_file(hunks, LineSide::Old);
-    for (file_path, lines) in &deleted_lines_by_file {
-        for line in lines {
+    // Use file_path (new name) for DiffLineKey to match build_json_hunk_segments lookup
+    for hunk in hunks {
+        for line in &hunk.deleted_lines {
             let key = DiffLineKey {
-                file: file_path.clone(),
+                file: hunk.file_path.clone(),
                 line: *line,
                 side: LineSide::Old,
             };
