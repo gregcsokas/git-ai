@@ -379,55 +379,38 @@ pub fn stats_for_commit_stats(
     commit_sha: &str,
     ignore_patterns: &[String],
 ) -> Result<CommitStats, GitAiError> {
+    use crate::commands::diff::get_diff_with_line_numbers;
+
     let commit_obj = repo.revparse_single(commit_sha)?.peel_to_commit()?;
-
-    // Step 1: get the diff between this commit and its parent ON refname (if more than one parent)
-    // If initial than everything is additions
-    // We want the count here git shows +111 -55
-    let (git_diff_added_lines, git_diff_deleted_lines) =
-        get_git_diff_stats(repo, commit_sha, ignore_patterns)?;
-
-    // Step 2: get the authorship log for this commit
-    let authorship_log = get_authorship(repo, commit_sha);
-
-    // Step 3: get line numbers added by this specific commit, then intersect with attestations.
-    // This keeps accepted stats scoped to the target commit while avoiding expensive blame traversal.
     let parent_count = commit_obj.parent_count()?;
-    let is_merge_commit = parent_count > 1;
-    let mut added_lines_by_file: HashMap<String, Vec<u32>> = if is_merge_commit {
-        HashMap::new()
-    } else {
-        let from_ref = if parent_count == 0 {
-            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
-        } else {
-            commit_obj.parent(0)?.id()
-        };
-        repo.diff_added_lines(&from_ref, commit_sha, None)?
-    };
-    let ignore_matcher = build_ignore_matcher(ignore_patterns);
-    added_lines_by_file
-        .retain(|file_path, _| !should_ignore_file_with_matcher(file_path, &ignore_matcher));
-    for lines in added_lines_by_file.values_mut() {
-        lines.sort_unstable();
-        lines.dedup();
+
+    if parent_count > 1 {
+        let authorship_log = get_authorship(repo, commit_sha);
+        return stats_for_commit_stats_from_hunks(
+            repo,
+            commit_sha,
+            ignore_patterns,
+            &[],
+            authorship_log.as_ref(),
+        );
     }
 
-    // Step 4: derive accepted lines directly from note attestations for lines added in this commit.
-    let (ai_accepted, known_human_accepted, ai_accepted_by_tool) = accepted_lines_from_attestations(
-        authorship_log.as_ref(),
-        &added_lines_by_file,
-        is_merge_commit,
-    );
+    let from_ref = if parent_count == 0 {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+    } else {
+        commit_obj.parent(0)?.id()
+    };
 
-    // Step 5: Calculate stats from authorship log
-    Ok(stats_from_authorship_log(
+    let hunks = get_diff_with_line_numbers(repo, &from_ref, commit_sha)?;
+    let authorship_log = get_authorship(repo, commit_sha);
+
+    stats_for_commit_stats_from_hunks(
+        repo,
+        commit_sha,
+        ignore_patterns,
+        &hunks,
         authorship_log.as_ref(),
-        git_diff_added_lines,
-        git_diff_deleted_lines,
-        ai_accepted,
-        known_human_accepted,
-        &ai_accepted_by_tool,
-    ))
+    )
 }
 
 #[doc(hidden)]

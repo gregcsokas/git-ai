@@ -777,6 +777,13 @@ pub fn build_diff_artifacts_with_note(
     options: &DiffCommandOptions,
     authorship_log: Option<&AuthorshipLog>,
 ) -> Result<DiffBuildArtifacts, GitAiError> {
+    let hunks = get_diff_with_line_numbers(repo, from_commit, to_commit)?;
+
+    if let Some(note) = authorship_log {
+        return build_diff_artifacts_from_hunks(repo, hunks, to_commit, Some(note));
+    }
+
+    // Slow path: no authorship log, needs blame
     let effective_patterns = effective_ignore_patterns(repo, &[], &[]);
     let ignore_matcher = build_ignore_matcher(&effective_patterns);
     let diff_sections = get_diff_sections_by_file(repo, from_commit, to_commit)?;
@@ -788,7 +795,7 @@ pub fn build_diff_artifacts_with_note(
         })
         .collect();
 
-    let mut hunks = get_diff_with_line_numbers(repo, from_commit, to_commit)?;
+    let mut hunks = hunks;
     hunks.retain(|hunk| {
         !hunk.file_path.is_empty()
             && !should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher)
@@ -797,11 +804,7 @@ pub fn build_diff_artifacts_with_note(
     let line_contents = build_line_content_map(&hunks);
 
     let (annotations_by_file, attributions, line_details, prompts, sessions, humans, mut commits) =
-        if let Some(note) = authorship_log {
-            build_line_attribution_from_note(to_commit, &hunks, note)
-        } else {
-            build_line_attribution_data(repo, from_commit, to_commit, &hunks, options)?
-        };
+        build_line_attribution_data(repo, from_commit, to_commit, &hunks, options)?;
 
     let json_hunks = build_json_hunks(
         repo,
