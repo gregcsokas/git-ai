@@ -18,7 +18,6 @@ pub enum CiEvent {
         head_ref: String,
         head_sha: String,
         base_ref: String,
-        #[allow(dead_code)]
         base_sha: String,
     },
 }
@@ -60,7 +59,6 @@ pub struct CiContext {
 
 impl CiContext {
     /// Create a CiContext with an existing repository (no automatic cleanup)
-    #[allow(dead_code)]
     pub fn with_repository(repo: Repository, event: CiEvent) -> Self {
         CiContext {
             repo,
