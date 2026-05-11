@@ -2788,14 +2788,6 @@ pub fn walk_commits_to_base(
 }
 
 /// Get all file paths changed between two commits
-fn get_files_changed_between_commits(
-    repo: &Repository,
-    from_commit: &str,
-    to_commit: &str,
-) -> Result<Vec<String>, GitAiError> {
-    repo.diff_changed_files(from_commit, to_commit)
-}
-
 /// Reconstruct working log after a reset that preserves working directory
 ///
 /// This handles --soft, --mixed, and --merge resets where we move HEAD backward
@@ -2828,8 +2820,7 @@ pub fn reconstruct_working_log_after_reset(
     );
 
     // Step 1: Get all files changed between target and old_head
-    let all_changed_files =
-        get_files_changed_between_commits(repo, target_commit_sha, old_head_sha)?;
+    let all_changed_files = repo.diff_changed_files(target_commit_sha, old_head_sha)?;
 
     // Filter to user pathspecs if provided
     let pathspecs: Vec<String> = if let Some(user_paths) = user_pathspecs {
@@ -2929,42 +2920,17 @@ pub fn reconstruct_working_log_after_reset(
         old_head_va.prompts().len()
     );
 
-    // Step 4: Build VirtualAttributions from target_commit.
-    //
-    // The original intent was to capture AI lines that predate the reset range — lines that were
-    // AI-authored before `target_commit` and are still present in the working directory — so that
-    // `merge_attributions_favoring_first` (Step 5) could fill gaps in `old_head_va` with them.
-    //
-    // The implementation was broken from the start: it called `new_for_base_commit` with both
-    // `base_commit` and `blame_start_commit` set to `target_commit_sha`, producing a blame range
-    // of `target..target` (oldest == newest). That range is always empty — every line is
-    // attributed to a boundary commit and mapped to human — so `target_va` always had zero AI
-    // attributions and never filled any gaps.
-    //
-    // Additionally, `old_head_va` is built via `from_working_log_for_commit`, which replays the
-    // existing working log entries at `old_head` on top of blame. Any AI lines that predate the
-    // reset range and are tracked by git-ai are already carried into `old_head_va` through the
-    // working log replay, so a correct `target_va` would have been redundant anyway.
-    //
-    // We create an empty VA directly (no subprocess calls). The merge result is identical to
-    // before the fix because `target_va` was always empty.
-    let target_va = {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        crate::authorship::virtual_attribution::VirtualAttributions::new(
-            repo.clone(),
-            target_commit_sha.to_string(),
-            HashMap::new(),
-            HashMap::new(),
-            ts,
-        )
-    };
-
-    // Step 5: Merge VAs favoring old_head to preserve uncommitted AI changes
-    // old_head (with working log) wins overlaps, target fills gaps
+    // Step 4+5: Merge old_head attributions with an empty VA against the final state.
+    // target_va is always empty (the original blame range was broken: target..target is
+    // always empty), but merge_attributions_favoring_first still performs the essential
+    // transformation of primary attributions into the final_state coordinate space.
+    let target_va = crate::authorship::virtual_attribution::VirtualAttributions::new(
+        repo.clone(),
+        target_commit_sha.to_string(),
+        HashMap::new(),
+        HashMap::new(),
+        0,
+    );
     let merged_va = crate::authorship::virtual_attribution::merge_attributions_favoring_first(
         old_head_va,
         target_va,
