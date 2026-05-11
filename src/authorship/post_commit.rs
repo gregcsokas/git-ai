@@ -222,9 +222,14 @@ pub fn post_commit_with_final_state(
     if skip_reason.is_none() {
         let computed = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns)?;
 
+        let diff_base_for_hunks = if parent_sha == "initial" {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        } else {
+            &parent_sha
+        };
         let hunks_json = crate::commands::diff::build_diff_artifacts_with_note(
             repo,
-            &parent_sha,
+            diff_base_for_hunks,
             &commit_sha,
             &crate::commands::diff::DiffCommandOptions::default(),
             Some(&authorship_log),
