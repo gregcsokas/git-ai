@@ -27,6 +27,7 @@ pub mod committed_pos {
     pub const FIRST_CHECKPOINT_TS: usize = 10; // u64 (null if no checkpoints)
     pub const COMMIT_SUBJECT: usize = 11; // String
     pub const COMMIT_BODY: usize = 12; // String (null if empty)
+    pub const AUTHORSHIP_NOTE: usize = 13; // String (full serialized authorship note)
 }
 
 /// Values for Event ID 1: committed
@@ -53,6 +54,7 @@ pub mod committed_pos {
 /// | 10 | first_checkpoint_ts | u64 |
 /// | 11 | commit_subject | String |
 /// | 12 | commit_body | String |
+/// | 13 | authorship_note | String |
 #[derive(Debug, Clone, Default)]
 pub struct CommittedValues {
     // Scalar fields
@@ -69,6 +71,7 @@ pub struct CommittedValues {
     pub first_checkpoint_ts: PosField<u64>,
     pub commit_subject: PosField<String>,
     pub commit_body: PosField<String>,
+    pub authorship_note: PosField<String>,
 }
 
 impl CommittedValues {
@@ -177,6 +180,16 @@ impl CommittedValues {
         self.commit_body = Some(None);
         self
     }
+
+    pub fn authorship_note(mut self, value: impl Into<String>) -> Self {
+        self.authorship_note = Some(Some(value.into()));
+        self
+    }
+
+    pub fn authorship_note_null(mut self) -> Self {
+        self.authorship_note = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for CommittedValues {
@@ -233,6 +246,11 @@ impl PosEncoded for CommittedValues {
             committed_pos::COMMIT_BODY,
             string_to_json(&self.commit_body),
         );
+        sparse_set(
+            &mut map,
+            committed_pos::AUTHORSHIP_NOTE,
+            string_to_json(&self.authorship_note),
+        );
 
         map
     }
@@ -253,6 +271,7 @@ impl PosEncoded for CommittedValues {
             first_checkpoint_ts: sparse_get_u64(arr, committed_pos::FIRST_CHECKPOINT_TS),
             commit_subject: sparse_get_string(arr, committed_pos::COMMIT_SUBJECT),
             commit_body: sparse_get_string(arr, committed_pos::COMMIT_BODY),
+            authorship_note: sparse_get_string(arr, committed_pos::AUTHORSHIP_NOTE),
         }
     }
 }

@@ -191,11 +191,11 @@ pub fn post_commit_with_final_state(
         }
     }
 
-    let authorship_json = authorship_log
+    let authorship_note_str = authorship_log
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
 
-    notes_add(repo, &commit_sha, &authorship_json)?;
+    notes_add(repo, &commit_sha, &authorship_note_str)?;
 
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
@@ -227,7 +227,7 @@ pub fn post_commit_with_final_state(
             &commit_sha,
             &parent_sha,
             &human_author,
-            &authorship_log,
+            &authorship_note_str,
             &computed,
             &parent_working_log,
         );
@@ -412,7 +412,7 @@ fn record_commit_metrics(
     commit_sha: &str,
     parent_sha: &str,
     human_author: &str,
-    _authorship_log: &AuthorshipLog,
+    authorship_note: &str,
     stats: &crate::authorship::stats::CommitStats,
     checkpoints: &[Checkpoint],
 ) {
@@ -484,6 +484,8 @@ fn record_commit_metrics(
     } else {
         values.commit_subject_null().commit_body_null()
     };
+
+    let values = values.authorship_note(authorship_note);
 
     // Build attributes - start with version and extract session_id from first AI checkpoint
     // session_id links this commit to the AI agent conversation that produced it
