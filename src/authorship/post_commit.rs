@@ -2,7 +2,7 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
-use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
+use crate::authorship::stats::{stats_for_commit_stats_from_hunks, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
 use crate::config::Config;
@@ -191,11 +191,11 @@ pub fn post_commit_with_final_state(
         }
     }
 
-    let authorship_json = authorship_log
+    let authorship_note_str = authorship_log
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
 
-    notes_add(repo, &commit_sha, &authorship_json)?;
+    notes_add(repo, &commit_sha, &authorship_note_str)?;
 
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
@@ -220,16 +220,42 @@ pub fn post_commit_with_final_state(
     };
 
     if skip_reason.is_none() {
-        let computed = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns)?;
+        let diff_base = if parent_sha == "initial" {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        } else {
+            &parent_sha
+        };
+
+        let diff_hunks =
+            crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
+
+        let computed = stats_for_commit_stats_from_hunks(
+            repo,
+            &commit_sha,
+            &ignore_patterns,
+            &diff_hunks,
+            Some(&authorship_log),
+        )?;
+
+        let hunks_json = crate::commands::diff::build_diff_artifacts_from_hunks(
+            repo,
+            diff_hunks,
+            &commit_sha,
+            Some(&authorship_log),
+        )
+        .ok()
+        .and_then(|artifacts| serde_json::to_string(&artifacts.json_hunks).ok());
+
         // Record metrics only when we have full stats.
         record_commit_metrics(
             repo,
             &commit_sha,
             &parent_sha,
             &human_author,
-            &authorship_log,
+            &authorship_note_str,
             &computed,
             &parent_working_log,
+            hunks_json.as_deref(),
         );
         stats = Some(computed);
     } else {
@@ -407,14 +433,16 @@ pub fn count_line_ranges(lines: &[u32]) -> usize {
 
 /// Record metrics for a committed change.
 /// This is a best-effort operation - failures are silently ignored.
+#[allow(clippy::too_many_arguments)]
 fn record_commit_metrics(
     repo: &Repository,
     commit_sha: &str,
     parent_sha: &str,
     human_author: &str,
-    _authorship_log: &AuthorshipLog,
+    authorship_note: &str,
     stats: &crate::authorship::stats::CommitStats,
     checkpoints: &[Checkpoint],
+    hunks_json: Option<&str>,
 ) {
     use crate::metrics::{CommittedValues, EventAttributes, record};
 
@@ -483,6 +511,14 @@ fn record_commit_metrics(
         }
     } else {
         values.commit_subject_null().commit_body_null()
+    };
+
+    let values = values.authorship_note(authorship_note);
+
+    let values = if let Some(hunks) = hunks_json {
+        values.hunks(hunks)
+    } else {
+        values.hunks_null()
     };
 
     // Build attributes - start with version and extract session_id from first AI checkpoint

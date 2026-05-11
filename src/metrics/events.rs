@@ -27,6 +27,8 @@ pub mod committed_pos {
     pub const FIRST_CHECKPOINT_TS: usize = 10; // u64 (null if no checkpoints)
     pub const COMMIT_SUBJECT: usize = 11; // String
     pub const COMMIT_BODY: usize = 12; // String (null if empty)
+    pub const AUTHORSHIP_NOTE: usize = 13; // String (full serialized authorship note)
+    pub const HUNKS: usize = 14; // String (JSON array of DiffJsonHunk)
 }
 
 /// Values for Event ID 1: committed
@@ -53,6 +55,8 @@ pub mod committed_pos {
 /// | 10 | first_checkpoint_ts | u64 |
 /// | 11 | commit_subject | String |
 /// | 12 | commit_body | String |
+/// | 13 | authorship_note | String |
+/// | 14 | hunks | String |
 #[derive(Debug, Clone, Default)]
 pub struct CommittedValues {
     // Scalar fields
@@ -69,6 +73,8 @@ pub struct CommittedValues {
     pub first_checkpoint_ts: PosField<u64>,
     pub commit_subject: PosField<String>,
     pub commit_body: PosField<String>,
+    pub authorship_note: PosField<String>,
+    pub hunks: PosField<String>,
 }
 
 impl CommittedValues {
@@ -177,6 +183,26 @@ impl CommittedValues {
         self.commit_body = Some(None);
         self
     }
+
+    pub fn authorship_note(mut self, value: impl Into<String>) -> Self {
+        self.authorship_note = Some(Some(value.into()));
+        self
+    }
+
+    pub fn authorship_note_null(mut self) -> Self {
+        self.authorship_note = Some(None);
+        self
+    }
+
+    pub fn hunks(mut self, value: impl Into<String>) -> Self {
+        self.hunks = Some(Some(value.into()));
+        self
+    }
+
+    pub fn hunks_null(mut self) -> Self {
+        self.hunks = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for CommittedValues {
@@ -233,6 +259,12 @@ impl PosEncoded for CommittedValues {
             committed_pos::COMMIT_BODY,
             string_to_json(&self.commit_body),
         );
+        sparse_set(
+            &mut map,
+            committed_pos::AUTHORSHIP_NOTE,
+            string_to_json(&self.authorship_note),
+        );
+        sparse_set(&mut map, committed_pos::HUNKS, string_to_json(&self.hunks));
 
         map
     }
@@ -253,6 +285,8 @@ impl PosEncoded for CommittedValues {
             first_checkpoint_ts: sparse_get_u64(arr, committed_pos::FIRST_CHECKPOINT_TS),
             commit_subject: sparse_get_string(arr, committed_pos::COMMIT_SUBJECT),
             commit_body: sparse_get_string(arr, committed_pos::COMMIT_BODY),
+            authorship_note: sparse_get_string(arr, committed_pos::AUTHORSHIP_NOTE),
+            hunks: sparse_get_string(arr, committed_pos::HUNKS),
         }
     }
 }
@@ -779,6 +813,37 @@ mod tests {
             Some(Some("Test commit".to_string()))
         );
         assert_eq!(restored.commit_body, Some(None));
+    }
+
+    #[test]
+    fn test_committed_values_with_hunks() {
+        let hunks_json = r#"[{"commit_sha":"abc123","content_hash":"def456","hunk_kind":"addition","start_line":1,"end_line":5,"file_path":"src/main.rs"}]"#;
+        let values = CommittedValues::new().human_additions(10).hunks(hunks_json);
+
+        assert_eq!(values.hunks, Some(Some(hunks_json.to_string())));
+    }
+
+    #[test]
+    fn test_committed_values_hunks_null() {
+        let values = CommittedValues::new().hunks_null();
+        assert_eq!(values.hunks, Some(None));
+    }
+
+    #[test]
+    fn test_committed_values_hunks_roundtrip() {
+        use super::PosEncoded;
+
+        let hunks_json = r#"[{"commit_sha":"abc","content_hash":"def","hunk_kind":"addition","start_line":1,"end_line":3,"file_path":"test.rs"}]"#;
+        let original = CommittedValues::new().human_additions(5).hunks(hunks_json);
+
+        let sparse = PosEncoded::to_sparse(&original);
+        assert_eq!(
+            sparse.get("14"),
+            Some(&Value::String(hunks_json.to_string()))
+        );
+
+        let restored = <CommittedValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.hunks, Some(Some(hunks_json.to_string())));
     }
 
     #[test]
