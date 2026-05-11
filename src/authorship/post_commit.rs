@@ -221,6 +221,17 @@ pub fn post_commit_with_final_state(
 
     if skip_reason.is_none() {
         let computed = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns)?;
+
+        let hunks_json = crate::commands::diff::build_diff_artifacts_with_note(
+            repo,
+            &parent_sha,
+            &commit_sha,
+            &crate::commands::diff::DiffCommandOptions::default(),
+            Some(&authorship_log),
+        )
+        .ok()
+        .and_then(|artifacts| serde_json::to_string(&artifacts.json_hunks).ok());
+
         // Record metrics only when we have full stats.
         record_commit_metrics(
             repo,
@@ -230,6 +241,7 @@ pub fn post_commit_with_final_state(
             &authorship_note_str,
             &computed,
             &parent_working_log,
+            hunks_json.as_deref(),
         );
         stats = Some(computed);
     } else {
@@ -407,6 +419,7 @@ pub fn count_line_ranges(lines: &[u32]) -> usize {
 
 /// Record metrics for a committed change.
 /// This is a best-effort operation - failures are silently ignored.
+#[allow(clippy::too_many_arguments)]
 fn record_commit_metrics(
     repo: &Repository,
     commit_sha: &str,
@@ -415,6 +428,7 @@ fn record_commit_metrics(
     authorship_note: &str,
     stats: &crate::authorship::stats::CommitStats,
     checkpoints: &[Checkpoint],
+    hunks_json: Option<&str>,
 ) {
     use crate::metrics::{CommittedValues, EventAttributes, record};
 
@@ -486,6 +500,12 @@ fn record_commit_metrics(
     };
 
     let values = values.authorship_note(authorship_note);
+
+    let values = if let Some(hunks) = hunks_json {
+        values.hunks(hunks)
+    } else {
+        values.hunks_null()
+    };
 
     // Build attributes - start with version and extract session_id from first AI checkpoint
     // session_id links this commit to the AI agent conversation that produced it
