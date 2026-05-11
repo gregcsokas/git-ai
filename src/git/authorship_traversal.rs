@@ -108,59 +108,7 @@ fn batch_read_blobs_with_oids(
     parse_cat_file_batch_output_with_oids(&output.stdout)
 }
 
-fn parse_cat_file_batch_output_with_oids(
-    data: &[u8],
-) -> Result<std::collections::HashMap<String, String>, GitAiError> {
-    let mut results = std::collections::HashMap::new();
-    let mut pos = 0usize;
-
-    while pos < data.len() {
-        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
-            Some(idx) => pos + idx,
-            None => break,
-        };
-
-        let header = std::str::from_utf8(&data[pos..header_end])?;
-        let parts: Vec<&str> = header.split_whitespace().collect();
-        if parts.len() < 2 {
-            pos = header_end + 1;
-            continue;
-        }
-
-        let oid = parts[0].to_string();
-        if parts[1] == "missing" {
-            pos = header_end + 1;
-            continue;
-        }
-
-        if parts.len() < 3 {
-            pos = header_end + 1;
-            continue;
-        }
-
-        let size: usize = parts[2]
-            .parse()
-            .map_err(|e| GitAiError::Generic(format!("Invalid size in cat-file output: {}", e)))?;
-
-        let content_start = header_end + 1;
-        let content_end = content_start + size;
-        if content_end > data.len() {
-            return Err(GitAiError::Generic(
-                "Malformed cat-file --batch output: truncated content".to_string(),
-            ));
-        }
-
-        let content = String::from_utf8_lossy(&data[content_start..content_end]).to_string();
-        results.insert(oid, content);
-
-        pos = content_end;
-        if pos < data.len() && data[pos] == b'\n' {
-            pos += 1;
-        }
-    }
-
-    Ok(results)
-}
+use crate::git::refs::parse_cat_file_batch_output_with_oids;
 
 /// Extract file paths from a note blob content
 /// Public wrapper for extracting file paths from a note's attestation section.

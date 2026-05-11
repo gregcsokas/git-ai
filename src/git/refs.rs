@@ -56,7 +56,7 @@ pub fn parse_batch_check_blob_oid(line: &str) -> Option<String> {
     }
 }
 
-fn parse_cat_file_batch_output_with_oids(
+pub fn parse_cat_file_batch_output_with_oids(
     data: &[u8],
 ) -> Result<HashMap<String, String>, GitAiError> {
     let mut results = HashMap::new();
@@ -110,7 +110,7 @@ fn parse_cat_file_batch_output_with_oids(
     Ok(results)
 }
 
-fn batch_read_blob_contents(
+pub(crate) fn batch_read_blob_contents(
     repo: &Repository,
     blob_oids: &[String],
 ) -> Result<HashMap<String, String>, GitAiError> {

@@ -12,7 +12,9 @@ use crate::error::GitAiError;
 use crate::git::authorship_traversal::{
     commits_have_authorship_notes, load_ai_touched_files_for_commits,
 };
-use crate::git::refs::{get_reference_as_authorship_log_v3, note_blob_oids_for_commits};
+use crate::git::refs::{
+    batch_read_blob_contents, get_reference_as_authorship_log_v3, note_blob_oids_for_commits,
+};
 use crate::git::repository::{CommitRange, Repository, exec_git, exec_git_stdin};
 use crate::git::rewrite_log::RewriteLogEvent;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -721,7 +723,6 @@ fn try_reconstruct_attributions_from_notes_cached(
     original_head: &str,
     original_commits: &[String],
     pathspecs: &[String],
-    _is_squash_rebase: bool,
     note_cache: &RebaseNoteCache,
     original_hunks: &HunksByCommitAndFile,
 ) -> Option<(
@@ -1218,69 +1219,38 @@ pub fn rewrite_authorship_after_rebase_v2(
         initial_prompts,
         initial_humans,
         initial_sessions,
-        _rebase_ts,
     ) = if let Some((attrs, contents, prompts, humans, sessions)) =
         try_reconstruct_attributions_from_notes_cached(
             repo,
             original_head,
             original_commits,
             &pathspecs,
-            force_process_existing_notes,
             &note_cache,
             &original_hunks_by_commit,
         ) {
         tracing::debug!("Using fast note-based attribution reconstruction (skipping blame)");
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        (attrs, contents, prompts, humans, sessions, ts)
+        (attrs, contents, prompts, humans, sessions)
     } else {
-        tracing::debug!("Falling back to VirtualAttributions (blame-based reconstruction)");
-        let new_head = new_commits.last().unwrap();
-        let merge_base = repo
-            .merge_base(original_head.to_string(), new_head.to_string())
-            .ok();
-
-        let repo_clone = repo.clone();
-        let original_head_clone = original_head.to_string();
-        let pathspecs_clone = pathspecs.clone();
-
-        let current_va = smol::block_on(async {
-            crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
-                repo_clone,
-                original_head_clone,
-                &pathspecs_clone,
-                merge_base,
-            )
-            .await
-        })?;
-
-        let mut attrs = HashMap::new();
-        let mut contents = HashMap::new();
-        for file in current_va.files() {
-            if let Some(char_attrs) = current_va.get_char_attributions(&file)
-                && let Some(line_attrs) = current_va.get_line_attributions(&file)
-            {
-                attrs.insert(file.clone(), (char_attrs.clone(), line_attrs.clone()));
-            }
-            if let Some(content) = current_va.get_file_content(&file) {
-                contents.insert(file, content.clone());
-            }
-        }
-
-        let mut prompts: BTreeMap<
-            String,
-            BTreeMap<String, crate::authorship::authorship_log::PromptRecord>,
-        > = BTreeMap::new();
-        for (prompt_id, commit_map) in current_va.prompts() {
-            prompts.insert(prompt_id.clone(), commit_map.clone());
-        }
-
-        let humans = current_va.humans.clone();
-        let sessions = current_va.sessions.clone();
-        let ts = current_va.timestamp();
-        (attrs, contents, prompts, humans, sessions, ts)
+        // Note-based reconstruction failed (no parseable notes). Fall back to simple
+        // note remapping — this preserves provenance without the expensive blame path.
+        tracing::debug!("Note-based reconstruction failed; falling back to note remapping");
+        let original_note_contents: HashMap<String, String> = original_commits_for_processing
+            .iter()
+            .filter_map(|commit| {
+                note_cache
+                    .original_note_contents
+                    .get(commit)
+                    .map(|content| (commit.clone(), content.clone()))
+            })
+            .collect();
+        let remapped_count =
+            remap_notes_for_commit_pairs(repo, &commit_pairs_to_process, &original_note_contents)?;
+        tracing::debug!(
+            "rebase_v2: completed via note-remap fallback in {}ms (remapped {} notes)",
+            rewrite_start.elapsed().as_millis(),
+            remapped_count,
+        );
+        return Ok(());
     };
 
     timing_phases.push((
@@ -1312,7 +1282,7 @@ pub fn rewrite_authorship_after_rebase_v2(
         oid_list.sort();
         oid_list
     };
-    let blob_contents = batch_read_blob_contents_parallel(repo, &first_appearance_blobs)?;
+    let blob_contents = batch_read_blob_contents(repo, &first_appearance_blobs)?;
     let mut changed_contents_by_commit =
         assemble_changed_contents(diff_tree_result.commit_deltas, &blob_contents);
     drop(blob_contents);
@@ -2256,78 +2226,8 @@ pub(crate) fn committed_file_snapshot_between_commits(
     Ok(contents)
 }
 
-fn batch_read_blob_contents(
-    repo: &Repository,
-    blob_oids: &[String],
-) -> Result<HashMap<String, String>, GitAiError> {
-    if blob_oids.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let mut args = repo.global_args_for_exec();
-    args.push("cat-file".to_string());
-    args.push("--batch".to_string());
-
-    let stdin_data = blob_oids.join("\n") + "\n";
-    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-
-    parse_cat_file_batch_output_with_oids(&output.stdout)
-}
-
-#[doc(hidden)]
-pub fn parse_cat_file_batch_output_with_oids(
-    data: &[u8],
-) -> Result<HashMap<String, String>, GitAiError> {
-    let mut results = HashMap::new();
-    let mut pos = 0usize;
-
-    while pos < data.len() {
-        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
-            Some(idx) => pos + idx,
-            None => break,
-        };
-
-        let header = std::str::from_utf8(&data[pos..header_end])?;
-        let parts: Vec<&str> = header.split_whitespace().collect();
-        if parts.len() < 2 {
-            pos = header_end + 1;
-            continue;
-        }
-
-        let oid = parts[0].to_string();
-        if parts[1] == "missing" {
-            pos = header_end + 1;
-            continue;
-        }
-
-        if parts.len() < 3 {
-            pos = header_end + 1;
-            continue;
-        }
-
-        let size: usize = parts[2]
-            .parse()
-            .map_err(|e| GitAiError::Generic(format!("Invalid size in cat-file output: {}", e)))?;
-
-        let content_start = header_end + 1;
-        let content_end = content_start + size;
-        if content_end > data.len() {
-            return Err(GitAiError::Generic(
-                "Malformed cat-file --batch output: truncated content".to_string(),
-            ));
-        }
-
-        let content = String::from_utf8_lossy(&data[content_start..content_end]).to_string();
-        results.insert(oid, content);
-
-        pos = content_end;
-        if pos < data.len() && data[pos] == b'\n' {
-            pos += 1;
-        }
-    }
-
-    Ok(results)
-}
+// Re-export for backward compatibility with tests
+pub use crate::git::refs::parse_cat_file_batch_output_with_oids;
 
 fn load_commit_metadata_batch(
     repo: &Repository,
@@ -2629,62 +2529,6 @@ fn assemble_changed_contents(
         result.insert(commit_sha, (delta.changed_files, contents));
     }
     result
-}
-
-/// Read blob contents in parallel using multiple `git cat-file --batch` processes.
-/// Falls back to a single call for small batches.
-const MAX_PARALLEL_BLOB_READS: usize = 4;
-const BLOB_BATCH_CHUNK_SIZE: usize = 200;
-
-fn batch_read_blob_contents_parallel(
-    repo: &Repository,
-    blob_oids: &[String],
-) -> Result<HashMap<String, String>, GitAiError> {
-    if blob_oids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    if blob_oids.len() <= BLOB_BATCH_CHUNK_SIZE {
-        return batch_read_blob_contents(repo, blob_oids);
-    }
-
-    let global_args = repo.global_args_for_exec();
-    let chunks: Vec<Vec<String>> = blob_oids
-        .chunks(BLOB_BATCH_CHUNK_SIZE)
-        .map(|c| c.to_vec())
-        .collect();
-
-    let results = smol::block_on(async {
-        let semaphore = std::sync::Arc::new(smol::lock::Semaphore::new(MAX_PARALLEL_BLOB_READS));
-        let mut tasks = Vec::new();
-
-        for chunk in chunks {
-            let args = global_args.clone();
-            let sem = std::sync::Arc::clone(&semaphore);
-
-            let task = smol::spawn(async move {
-                let _permit = sem.acquire().await;
-                smol::unblock(move || {
-                    let mut cat_args = args;
-                    cat_args.push("cat-file".to_string());
-                    cat_args.push("--batch".to_string());
-                    let stdin_data = chunk.join("\n") + "\n";
-                    let output = exec_git_stdin(&cat_args, stdin_data.as_bytes())?;
-                    parse_cat_file_batch_output_with_oids(&output.stdout)
-                })
-                .await
-            });
-
-            tasks.push(task);
-        }
-
-        futures::future::join_all(tasks).await
-    });
-
-    let mut merged = HashMap::new();
-    for result in results {
-        merged.extend(result?);
-    }
-    Ok(merged)
 }
 
 pub fn rewrite_authorship_after_commit_amend(
