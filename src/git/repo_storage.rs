@@ -425,7 +425,13 @@ impl PersistedWorkingLog {
             return Ok(());
         }
 
-        let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
+        let mut checkpoints = match self.read_all_checkpoints() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!("Skipping compaction due to read error: {}", e);
+                return Ok(());
+            }
+        };
         self.prune_old_char_attributions(&mut checkpoints);
         self.write_all_checkpoints(&checkpoints)
     }
