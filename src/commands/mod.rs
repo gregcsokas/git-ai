@@ -20,7 +20,6 @@ pub mod notes_migrate;
 pub mod personal_dashboard;
 pub mod show;
 pub mod show_prompt;
-pub mod squash_authorship;
 pub mod status;
 pub mod upgrade;
 pub mod whoami;
