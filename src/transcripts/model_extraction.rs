@@ -67,38 +67,62 @@ fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, Transcri
     let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
 
     for line in lines.iter().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-
-        // Copilot CLI: session.model_change event with data.newModel
-        if json.get("type").and_then(|v| v.as_str()) == Some("session.model_change")
-            && let Some(model) = json
-                .get("data")
-                .and_then(|d| d.get("newModel"))
-                .and_then(|v| v.as_str())
-        {
-            return Ok(Some(model.to_string()));
-        }
-
-        let candidate = json
-            .get("message")
-            .and_then(|m| m.get("model"))
-            .and_then(|v| v.as_str())
-            .or_else(|| json.get("model").and_then(|v| v.as_str()));
-
-        if let Some(model) = candidate
-            && model != "<synthetic>"
-        {
-            return Ok(Some(model.to_string()));
+        if let Some(model) = extract_model_from_jsonl_line(line) {
+            return Ok(Some(model));
         }
     }
 
+    // Tail didn't contain the model — check the head (Copilot CLI emits
+    // session.model_change only at session start, which may fall outside the tail window).
+    if seek_pos > 0
+        && let Some(model) = extract_model_from_jsonl_head(path)
+    {
+        return Ok(Some(model));
+    }
+
     Ok(None)
+}
+
+fn extract_model_from_jsonl_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+
+    if json.get("type").and_then(|v| v.as_str()) == Some("session.model_change")
+        && let Some(model) = json
+            .get("data")
+            .and_then(|d| d.get("newModel"))
+            .and_then(|v| v.as_str())
+    {
+        return Some(model.to_string());
+    }
+
+    let candidate = json
+        .get("message")
+        .and_then(|m| m.get("model"))
+        .and_then(|v| v.as_str())
+        .or_else(|| json.get("model").and_then(|v| v.as_str()));
+
+    if let Some(model) = candidate
+        && model != "<synthetic>"
+    {
+        return Some(model.to_string());
+    }
+
+    None
+}
+
+fn extract_model_from_jsonl_head(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok).take(20) {
+        if let Some(model) = extract_model_from_jsonl_line(&line) {
+            return Some(model);
+        }
+    }
+    None
 }
 
 /// Extracts the model from VS Code Copilot's `models.json` debug log.
@@ -408,5 +432,30 @@ mod tests {
         let path = PathBuf::from("/nonexistent/transcripts/fake-session.jsonl");
         let result = extract_model_from_copilot_models_json(&path).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_model_head_fallback_for_large_file() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        // model_change at the start
+        writeln!(file, r#"{{"type":"session.start","data":{{"sessionId":"s1"}},"id":"e1","timestamp":"2026-01-01T00:00:00Z","parentId":null}}"#).unwrap();
+        writeln!(file, r#"{{"type":"session.model_change","data":{{"newModel":"gpt-4.1"}},"id":"e2","timestamp":"2026-01-01T00:00:01Z","parentId":"e1"}}"#).unwrap();
+        // Pad with >50KB of filler events so the model_change falls outside the tail window
+        for i in 0..600 {
+            writeln!(file, r#"{{"type":"user.message","data":{{"content":"padding message number {} with extra text to make the line longer and push past the fifty kilobyte tail read window boundary"}},"id":"pad-{}","timestamp":"2026-01-01T00:01:{:02}Z","parentId":null}}"#, i, i, i % 60).unwrap();
+        }
+        file.flush().unwrap();
+
+        let size = std::fs::metadata(file.path()).unwrap().len();
+        assert!(
+            size > 51200,
+            "file must exceed 50KB tail window, got {}",
+            size
+        );
+
+        let result =
+            extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None).unwrap();
+        assert_eq!(result, Some("gpt-4.1".to_string()));
     }
 }
