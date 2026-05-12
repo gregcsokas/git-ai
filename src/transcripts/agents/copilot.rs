@@ -116,14 +116,13 @@ impl CopilotAgent {
         let decoded = percent_decode_path(path_str);
         // On Windows, file URIs are file:///C:/... which leaves /C:/... after stripping.
         // Strip the leading slash if followed by a drive letter.
-        let normalized = if decoded.len() >= 3
-            && decoded.as_bytes()[0] == b'/'
-            && decoded.as_bytes()[2] == b':'
-        {
-            &decoded[1..]
-        } else {
-            &decoded
-        };
+        let normalized =
+            if decoded.len() >= 3 && decoded.as_bytes()[0] == b'/' && decoded.as_bytes()[2] == b':'
+            {
+                &decoded[1..]
+            } else {
+                &decoded
+            };
         Some(PathBuf::from(normalized))
     }
 
