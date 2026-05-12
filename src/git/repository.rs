@@ -1042,28 +1042,38 @@ impl Repository {
             .append_rewrite_event(rewrite_log_event.clone())
             .expect("Error writing .git/ai/rewrite_log");
 
-        if apply_side_effects
-            && let Err(error) = rewrite_authorship_if_needed(
-                self,
-                &rewrite_log_event,
-                commit_author,
-                &log,
-                supress_output,
-            )
-        {
-            tracing::debug!(
-                "rewrite_authorship_if_needed failed for {:?}: {}",
-                rewrite_log_event,
-                error
-            );
-            crate::observability::log_error(
-                &error,
-                Some(serde_json::json!({
-                    "component": "repository",
-                    "operation": "handle_rewrite_log_event",
-                    "rewrite_event": rewrite_log_event,
-                })),
-            );
+        if apply_side_effects {
+            let result = match &rewrite_log_event {
+                RewriteLogEvent::RebaseComplete { .. }
+                | RewriteLogEvent::CherryPickComplete { .. } => {
+                    crate::authorship::rewrite_op_v3::handle_rewrite_from_event(
+                        self,
+                        &rewrite_log_event,
+                    )
+                }
+                _ => rewrite_authorship_if_needed(
+                    self,
+                    &rewrite_log_event,
+                    commit_author,
+                    &log,
+                    supress_output,
+                ),
+            };
+            if let Err(error) = result {
+                tracing::debug!(
+                    "rewrite_authorship_if_needed failed for {:?}: {}",
+                    rewrite_log_event,
+                    error
+                );
+                crate::observability::log_error(
+                    &error,
+                    Some(serde_json::json!({
+                        "component": "repository",
+                        "operation": "handle_rewrite_log_event",
+                        "rewrite_event": rewrite_log_event,
+                    })),
+                );
+            }
         }
     }
 

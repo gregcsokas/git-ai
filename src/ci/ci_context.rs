@@ -1,12 +1,11 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::rebase_authorship::{
-    rewrite_authorship_after_rebase_v2, rewrite_authorship_after_squash_or_rebase,
-};
+use crate::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
 use crate::error::GitAiError;
 use crate::git::notes_api::{
     read_authorship_v3 as get_reference_as_authorship_log_v3, read_note as show_authorship_note,
 };
 use crate::git::repository::{CommitRange, Repository};
+use crate::git::rewrite_log::{RebaseCompleteEvent, RewriteLogEvent};
 use crate::git::sync_authorship::fetch_authorship_notes;
 use std::fs;
 use std::path::PathBuf;
@@ -197,13 +196,18 @@ impl CiContext {
                             original_commits.len(),
                             new_commits.len()
                         );
-                        // Rebase merge - use v2 which writes authorship to each rebased commit
-                        rewrite_authorship_after_rebase_v2(
-                            &self.repo,
-                            head_sha,
-                            &original_commits,
-                            &new_commits,
-                            "", // human_author not used
+                        // Rebase merge - use v3 which writes authorship to each rebased commit
+                        let event = RewriteLogEvent::RebaseComplete {
+                            rebase_complete: RebaseCompleteEvent {
+                                original_head: head_sha.to_string(),
+                                new_head: new_commits.last().cloned().unwrap_or_default(),
+                                is_interactive: false,
+                                original_commits: original_commits.clone(),
+                                new_commits: new_commits.clone(),
+                            },
+                        };
+                        crate::authorship::rewrite_op_v3::handle_rewrite_from_event(
+                            &self.repo, &event,
                         )?;
                     } else {
                         println!(

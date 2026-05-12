@@ -17,6 +17,7 @@ pub use repository::{
     GitAuthorIdentity, find_repository, find_repository_for_file, find_repository_in_path,
     from_bare_repository, group_files_by_repository,
 };
+pub mod range_diff;
 pub mod repo_storage;
 pub mod rewrite_log;
 pub mod status;

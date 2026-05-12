@@ -14,6 +14,7 @@ pub mod post_commit;
 pub mod prompt_utils;
 pub mod range_authorship;
 pub mod rebase_authorship;
+pub mod rewrite_op_v3;
 pub mod secrets;
 pub mod stats;
 pub mod transcript;

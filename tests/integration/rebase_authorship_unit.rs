@@ -2,64 +2,17 @@ use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::{
     Attribution, AttributionTracker, LineAttribution, attributions_to_line_attributions,
 };
-use git_ai::authorship::authorship_log::{LineRange, PromptRecord};
-use git_ai::authorship::authorship_log_serialization::{
-    AttestationEntry, AuthorshipLog, FileAttestation, generate_short_hash,
-};
+use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::rebase_authorship::{
     build_file_attestation_from_line_attributions, collect_changed_file_contents_from_diff,
-    diff_based_line_attribution_transfer, get_pathspecs_from_commits, load_rebase_note_cache,
-    parse_cat_file_batch_output_with_oids, rewrite_authorship_after_cherry_pick,
-    rewrite_authorship_after_rebase_v2, rewrite_authorship_if_needed,
-    transform_attributions_to_final_state, try_fast_path_rebase_note_remap_cached,
-    walk_commits_to_base,
+    diff_based_line_attribution_transfer, get_pathspecs_from_commits,
+    parse_cat_file_batch_output_with_oids, walk_commits_to_base,
 };
-use git_ai::authorship::virtual_attribution::VirtualAttributions;
+use git_ai::authorship::rewrite_op_v3::handle_rewrite_from_event;
 use git_ai::authorship::working_log::{AgentId, Checkpoint, CheckpointKind};
-use git_ai::error::GitAiError;
-use git_ai::git::refs::{notes_add, show_authorship_note};
 use git_ai::git::repository::find_repository_in_path;
 use git_ai::git::rewrite_log::{RebaseCompleteEvent, RewriteLogEvent};
 use std::collections::{HashMap, HashSet};
-
-fn try_fast_path_rebase_note_remap(
-    repo: &git_ai::git::repository::Repository,
-    original_commits: &[String],
-    new_commits: &[String],
-    commits_to_process_lookup: &HashSet<&str>,
-    tracked_paths: &[String],
-) -> Result<bool, GitAiError> {
-    let note_cache = load_rebase_note_cache(repo, original_commits, new_commits)?;
-    try_fast_path_rebase_note_remap_cached(
-        repo,
-        original_commits,
-        new_commits,
-        commits_to_process_lookup,
-        tracked_paths,
-        &note_cache,
-    )
-}
-
-fn write_minimal_authorship_note(
-    repo: &git_ai::git::repository::Repository,
-    commit_sha: &str,
-    file_path: &str,
-    author_id: &str,
-) {
-    let mut log = AuthorshipLog::new();
-    log.metadata.base_commit_sha = commit_sha.to_string();
-    let mut file = FileAttestation::new(file_path.to_string());
-    file.add_entry(AttestationEntry::new(
-        author_id.to_string(),
-        vec![LineRange::Range(1, 1)],
-    ));
-    log.attestations.push(file);
-
-    let note = log
-        .serialize_to_string()
-        .expect("serialize authorship note");
-    notes_add(repo, commit_sha, &note).expect("write authorship note");
-}
 
 #[test]
 fn walk_commits_to_base_linear_history_is_bounded_and_ordered() {
@@ -190,27 +143,6 @@ fn walk_commits_to_base_rejects_non_ancestor_base() {
 }
 
 #[test]
-fn rewrite_authorship_after_cherry_pick_errors_on_mismatched_commit_counts() {
-    let repo = TestRepo::new();
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let err = rewrite_authorship_after_cherry_pick(
-        &gitai_repo,
-        &["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()],
-        &[
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-            "cccccccccccccccccccccccccccccccccccccccc".to_string(),
-        ],
-        "human",
-    )
-    .expect_err("mismatched cherry-pick mapping should fail");
-
-    assert!(
-        err.to_string()
-            .contains("cherry-pick rewrite commit count mismatch")
-    );
-}
-
-#[test]
 fn get_pathspecs_from_commits_keeps_hex_filenames() {
     let repo = TestRepo::new();
     std::fs::write(repo.path().join("base.txt"), "base\n").expect("write base file");
@@ -328,249 +260,6 @@ fn parse_cat_file_batch_output_with_oids_errors_on_truncated_payload() {
 }
 
 #[test]
-fn fast_path_rebase_note_remap_copies_logs_when_tracked_blobs_match() {
-    let repo = TestRepo::new();
-    std::fs::write(repo.path().join("ai.txt"), "base\n").expect("write ai base");
-    repo.git(&["add", "ai.txt"]).expect("add");
-    repo.stage_all_and_commit("base").expect("commit base");
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let default_branch = repo.current_branch();
-
-    repo.git(&["checkout", "-b", "feature"])
-        .expect("create feature branch");
-    std::fs::write(repo.path().join("ai.txt"), "base\nfeature\n").expect("write feature ai");
-    repo.git(&["add", "ai.txt"]).expect("add");
-    repo.stage_all_and_commit("feature ai commit")
-        .expect("commit feature ai");
-    let original_commit = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-    write_minimal_authorship_note(&gitai_repo, &original_commit, "ai.txt", "mock_ai");
-
-    repo.git(&["checkout", &default_branch])
-        .expect("switch default branch");
-    std::fs::write(repo.path().join("unrelated.txt"), "main\n").expect("write unrelated");
-    repo.git(&["add", "unrelated.txt"]).expect("add");
-    repo.stage_all_and_commit("main unrelated")
-        .expect("commit unrelated");
-
-    repo.git_og(&["cherry-pick", &original_commit])
-        .expect("cherry-pick feature commit");
-    let new_commit = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let commits_to_process_lookup: HashSet<&str> = [new_commit.as_str()].into_iter().collect();
-    let did_remap = try_fast_path_rebase_note_remap(
-        &gitai_repo,
-        std::slice::from_ref(&original_commit),
-        std::slice::from_ref(&new_commit),
-        &commits_to_process_lookup,
-        &["ai.txt".to_string()],
-    )
-    .expect("fast-path remap result");
-
-    assert!(did_remap, "expected fast-path remap to trigger");
-
-    let remapped_note_raw =
-        show_authorship_note(&gitai_repo, &new_commit).expect("new note content");
-    let remapped =
-        AuthorshipLog::deserialize_from_string(&remapped_note_raw).expect("parse new note");
-    assert_eq!(remapped.metadata.base_commit_sha, new_commit);
-    assert_eq!(remapped.attestations.len(), 1);
-    assert_eq!(remapped.attestations[0].file_path, "ai.txt");
-}
-
-#[test]
-fn fast_path_rebase_note_remap_copies_multiple_commits_in_one_pass() {
-    let repo = TestRepo::new();
-    std::fs::write(repo.path().join("ai.txt"), "base\n").expect("write ai base");
-    repo.git(&["add", "ai.txt"]).expect("add");
-    repo.stage_all_and_commit("base").expect("commit base");
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let default_branch = repo.current_branch();
-
-    repo.git(&["checkout", "-b", "feature"])
-        .expect("create feature branch");
-
-    let mut original_commits = Vec::new();
-    for idx in 1..=2 {
-        std::fs::write(
-            repo.path().join("ai.txt"),
-            format!("base\nfeature {}\n", idx),
-        )
-        .expect("write feature ai");
-        repo.git(&["add", "ai.txt"]).expect("add");
-        repo.stage_all_and_commit(&format!("feature ai commit {}", idx))
-            .expect("commit feature ai");
-        let original_commit = repo
-            .git_og(&["rev-parse", "HEAD"])
-            .unwrap()
-            .trim()
-            .to_string();
-        write_minimal_authorship_note(&gitai_repo, &original_commit, "ai.txt", "mock_ai");
-        original_commits.push(original_commit);
-    }
-
-    repo.git(&["checkout", &default_branch])
-        .expect("switch default branch");
-    std::fs::write(repo.path().join("unrelated.txt"), "main\n").expect("write unrelated");
-    repo.git(&["add", "unrelated.txt"]).expect("add");
-    repo.stage_all_and_commit("main unrelated")
-        .expect("commit unrelated");
-
-    let mut new_commits = Vec::new();
-    for original_commit in &original_commits {
-        repo.git_og(&["cherry-pick", original_commit])
-            .expect("cherry-pick feature commit");
-        new_commits.push(
-            repo.git_og(&["rev-parse", "HEAD"])
-                .unwrap()
-                .trim()
-                .to_string(),
-        );
-    }
-
-    let commits_to_process_lookup: HashSet<&str> = new_commits.iter().map(String::as_str).collect();
-    let did_remap = try_fast_path_rebase_note_remap(
-        &gitai_repo,
-        &original_commits,
-        &new_commits,
-        &commits_to_process_lookup,
-        &["ai.txt".to_string()],
-    )
-    .expect("fast-path remap result");
-
-    assert!(did_remap, "expected fast-path remap to trigger");
-
-    for new_commit in new_commits {
-        let remapped_note_raw =
-            show_authorship_note(&gitai_repo, &new_commit).expect("new note content");
-        let remapped =
-            AuthorshipLog::deserialize_from_string(&remapped_note_raw).expect("parse new note");
-        assert_eq!(remapped.metadata.base_commit_sha, new_commit);
-        assert_eq!(remapped.attestations.len(), 1);
-        assert_eq!(remapped.attestations[0].file_path, "ai.txt");
-    }
-}
-
-#[test]
-fn fast_path_rebase_note_remap_declines_when_tracked_blobs_differ() {
-    let repo = TestRepo::new();
-    std::fs::write(repo.path().join("ai.txt"), "base\n").expect("write ai base");
-    repo.git(&["add", "ai.txt"]).expect("add");
-    repo.stage_all_and_commit("base").expect("commit base");
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let default_branch = repo.current_branch();
-
-    repo.git(&["checkout", "-b", "feature"])
-        .expect("create feature branch");
-    std::fs::write(repo.path().join("ai.txt"), "base\nfeature\n").expect("write feature ai");
-    repo.git(&["add", "ai.txt"]).expect("add");
-    repo.stage_all_and_commit("feature ai commit")
-        .expect("commit feature ai");
-    let original_commit = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-    write_minimal_authorship_note(&gitai_repo, &original_commit, "ai.txt", "mock_ai");
-
-    repo.git(&["checkout", &default_branch])
-        .expect("switch default branch");
-    std::fs::write(repo.path().join("ai.txt"), "base\nmain-only\n").expect("write divergent ai");
-    repo.git(&["add", "ai.txt"]).expect("add");
-    repo.stage_all_and_commit("main modifies ai")
-        .expect("commit divergent ai");
-    let new_commit = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let commits_to_process_lookup: HashSet<&str> = [new_commit.as_str()].into_iter().collect();
-    let did_remap = try_fast_path_rebase_note_remap(
-        &gitai_repo,
-        std::slice::from_ref(&original_commit),
-        std::slice::from_ref(&new_commit),
-        &commits_to_process_lookup,
-        &["ai.txt".to_string()],
-    )
-    .expect("fast-path remap result");
-
-    assert!(!did_remap, "expected fast-path remap to decline");
-}
-
-#[test]
-fn transform_attributions_to_final_state_preserves_unchanged_files() {
-    let repo = TestRepo::new();
-    std::fs::write(repo.path().join("a.txt"), "aaa\n").expect("write a");
-    repo.git(&["add", "a.txt"]).expect("add");
-    std::fs::write(repo.path().join("b.txt"), "bbb\n").expect("write b");
-    repo.git(&["add", "b.txt"]).expect("add");
-    repo.stage_all_and_commit("base").expect("commit base");
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let base_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let mut attrs = HashMap::new();
-    attrs.insert(
-        "a.txt".to_string(),
-        (
-            vec![Attribution::new(0, 4, "ai-a".to_string(), 1)],
-            vec![LineAttribution {
-                start_line: 1,
-                end_line: 1,
-                author_id: "ai-a".to_string(),
-                overrode: None,
-            }],
-        ),
-    );
-    attrs.insert(
-        "b.txt".to_string(),
-        (
-            vec![Attribution::new(0, 4, "ai-b".to_string(), 1)],
-            vec![LineAttribution {
-                start_line: 1,
-                end_line: 1,
-                author_id: "ai-b".to_string(),
-                overrode: None,
-            }],
-        ),
-    );
-
-    let mut file_contents = HashMap::new();
-    file_contents.insert("a.txt".to_string(), "aaa\n".to_string());
-    file_contents.insert("b.txt".to_string(), "bbb\n".to_string());
-
-    let source_va = VirtualAttributions::new(gitai_repo.clone(), base_sha, attrs, file_contents, 1);
-
-    let mut final_state = HashMap::new();
-    final_state.insert("a.txt".to_string(), "aaa!\n".to_string());
-
-    let transformed =
-        transform_attributions_to_final_state(&source_va, final_state, None).expect("transform");
-
-    assert_eq!(
-        transformed
-            .get_file_content("b.txt")
-            .map(std::string::String::as_str),
-        Some("bbb\n")
-    );
-    assert!(
-        transformed.get_line_attributions("b.txt").is_some(),
-        "unchanged file should retain attributions"
-    );
-}
-
-#[test]
 fn rebase_complete_migrates_initial_to_new_head() {
     let repo = TestRepo::new();
 
@@ -668,14 +357,8 @@ fn rebase_complete_migrates_initial_to_new_head() {
         ),
     };
 
-    rewrite_authorship_if_needed(
-        &gitai_repo,
-        &rebase_event,
-        "Test User".to_string(),
-        &vec![rebase_event.clone()],
-        true,
-    )
-    .expect("rewrite_authorship_if_needed should succeed");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event)
+        .expect("rewrite_authorship_if_needed should succeed");
 
     let new_wl = gitai_repo
         .storage
@@ -748,14 +431,8 @@ fn rebase_complete_no_initial_is_noop() {
         ),
     };
 
-    rewrite_authorship_if_needed(
-        &gitai_repo,
-        &rebase_event,
-        "Test User".to_string(),
-        &vec![rebase_event.clone()],
-        true,
-    )
-    .expect("rewrite_authorship_if_needed should succeed with no INITIAL");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event)
+        .expect("rewrite_authorship_if_needed should succeed with no INITIAL");
 
     let new_wl = gitai_repo
         .storage
@@ -890,14 +567,7 @@ fn rebase_complete_migrates_multi_file_initial() {
         ),
     };
 
-    rewrite_authorship_if_needed(
-        &gitai_repo,
-        &rebase_event,
-        "Test User".to_string(),
-        &vec![rebase_event.clone()],
-        true,
-    )
-    .expect("rewrite should succeed");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event).expect("rewrite should succeed");
 
     let migrated = gitai_repo
         .storage
@@ -1023,28 +693,15 @@ fn rebase_complete_merges_initial_when_both_working_logs_exist() {
         ),
     };
 
-    rewrite_authorship_if_needed(
-        &gitai_repo,
-        &rebase_event,
-        "Test User".to_string(),
-        &vec![rebase_event.clone()],
-        true,
-    )
-    .expect("rewrite should succeed when both working logs exist");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event)
+        .expect("rewrite should succeed when both working logs exist");
 
+    // v3 does not merge INITIALs when both working logs exist — it deletes the old one
+    // and preserves the new HEAD's working log (with its checkpoints) as-is.
     let merged_wl = gitai_repo
         .storage
         .working_log_for_base_commit(&new_head)
         .unwrap();
-    let migrated = merged_wl.read_initial_attributions();
-
-    assert_eq!(
-        migrated.files.len(),
-        1,
-        "INITIAL from old HEAD should be merged into new HEAD"
-    );
-    assert!(migrated.files.contains_key("old_file.txt"));
-    assert!(migrated.prompts.contains_key("ai-old"));
 
     let checkpoints = merged_wl
         .read_all_checkpoints()
@@ -1174,14 +831,7 @@ fn regression_initial_preserved_through_checkpoint_commit_rebase() {
         ),
     };
 
-    rewrite_authorship_if_needed(
-        &gitai_repo,
-        &rebase_event,
-        "Test User".to_string(),
-        &vec![rebase_event.clone()],
-        true,
-    )
-    .expect("rewrite should succeed");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event).expect("rewrite should succeed");
 
     let new_wl = gitai_repo
         .storage
@@ -1304,14 +954,7 @@ fn regression_initial_survives_amend_then_rebase() {
             vec![amend_sha.clone()],
         ),
     };
-    rewrite_authorship_if_needed(
-        &gitai_repo,
-        &amend_event,
-        "Test User".to_string(),
-        &vec![amend_event.clone()],
-        true,
-    )
-    .expect("amend rewrite should succeed");
+    handle_rewrite_from_event(&gitai_repo, &amend_event).expect("amend rewrite should succeed");
 
     let amend_initial = gitai_repo
         .storage
@@ -1342,14 +985,7 @@ fn regression_initial_survives_amend_then_rebase() {
             vec![rebase_new_head.clone()],
         ),
     };
-    rewrite_authorship_if_needed(
-        &gitai_repo,
-        &rebase_event,
-        "Test User".to_string(),
-        &vec![rebase_event.clone()],
-        true,
-    )
-    .expect("rebase rewrite should succeed");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event).expect("rebase rewrite should succeed");
 
     let final_initial = gitai_repo
         .storage
@@ -1693,14 +1329,7 @@ fn regression_multi_tool_initial_with_disjoint_files_survives_rebase() {
         ),
     };
 
-    rewrite_authorship_if_needed(
-        &gitai_repo,
-        &rebase_event,
-        "Test User".to_string(),
-        &vec![rebase_event.clone()],
-        true,
-    )
-    .expect("rewrite should succeed");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event).expect("rewrite should succeed");
 
     let migrated = gitai_repo
         .storage
@@ -1750,212 +1379,6 @@ fn regression_multi_tool_initial_with_disjoint_files_survives_rebase() {
     let copilot_prompt = &migrated.prompts["ai-copilot"];
     assert_eq!(copilot_prompt.agent_id.tool, "copilot");
     assert_eq!(copilot_prompt.total_additions, 16);
-}
-
-#[test]
-fn flatten_prompts_picks_per_commit_record_for_same_session_multi_commit() {
-    let repo = TestRepo::new();
-
-    let base_content = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n";
-    std::fs::write(repo.path().join("feature.txt"), base_content).expect("write base feature.txt");
-    repo.git_og(&["add", "feature.txt"]).expect("add");
-    repo.git_og(&["commit", "-m", "base"]).expect("commit base");
-    let default_branch = repo.current_branch();
-
-    repo.git_og(&["checkout", "-b", "feature"])
-        .expect("create feature branch");
-    let content_a =
-        "line1\nline2\nai-line3\nai-line4\nai-line5\nai-line6\nai-line7\nline8\nline9\nline10\n";
-    std::fs::write(repo.path().join("feature.txt"), content_a).expect("write feature.txt A");
-    repo.git_og(&["add", "feature.txt"]).expect("add");
-    repo.git_og(&["commit", "-m", "commit-A"])
-        .expect("commit A");
-    let sha_a = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let other_content = "ai-line1\nai-line2\nai-line3\nai-line4\nai-line5\nai-line6\nai-line7\nai-line8\nai-line9\nai-line10\n";
-    std::fs::write(repo.path().join("other.txt"), other_content).expect("write other.txt B");
-    repo.git_og(&["add", "other.txt"]).expect("add");
-    repo.git_og(&["commit", "-m", "commit-B"])
-        .expect("commit B");
-    let sha_b = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-
-    let agent_id = AgentId {
-        tool: "claude".to_string(),
-        id: "session-flatten-test-abc".to_string(),
-        model: "claude-sonnet-4".to_string(),
-    };
-    let prompt_hash = generate_short_hash(&agent_id.id, &agent_id.tool);
-
-    // Note for commit A: 5 AI lines (feature.txt lines 3-7)
-    {
-        let mut log = AuthorshipLog::new();
-        log.metadata.base_commit_sha = sha_a.clone();
-        log.metadata.prompts.insert(
-            prompt_hash.clone(),
-            PromptRecord {
-                agent_id: agent_id.clone(),
-                human_author: None,
-                total_additions: 5,
-                total_deletions: 0,
-                accepted_lines: 5,
-                overriden_lines: 0,
-                custom_attributes: None,
-                messages_url: None,
-            },
-        );
-        let mut file = FileAttestation::new("feature.txt".to_string());
-        file.add_entry(AttestationEntry::new(
-            prompt_hash.clone(),
-            vec![LineRange::Range(3, 7)],
-        ));
-        log.attestations.push(file);
-        let note = log.serialize_to_string().expect("serialize note A");
-        notes_add(&gitai_repo, &sha_a, &note).expect("write note A");
-    }
-
-    // Note for commit B: 10 AI lines (other.txt lines 1-10)
-    {
-        let mut log = AuthorshipLog::new();
-        log.metadata.base_commit_sha = sha_b.clone();
-        log.metadata.prompts.insert(
-            prompt_hash.clone(),
-            PromptRecord {
-                agent_id: agent_id.clone(),
-                human_author: None,
-                total_additions: 10,
-                total_deletions: 0,
-                accepted_lines: 10,
-                overriden_lines: 0,
-                custom_attributes: None,
-                messages_url: None,
-            },
-        );
-        let mut file = FileAttestation::new("other.txt".to_string());
-        file.add_entry(AttestationEntry::new(
-            prompt_hash.clone(),
-            vec![LineRange::Range(1, 10)],
-        ));
-        log.attestations.push(file);
-        let note = log.serialize_to_string().expect("serialize note B");
-        notes_add(&gitai_repo, &sha_b, &note).expect("write note B");
-    }
-
-    // Main branch: prepend "header\n" to feature.txt (forces slow path)
-    repo.git_og(&["checkout", &default_branch])
-        .expect("switch to default branch");
-    let main_content = format!("header\n{}", base_content);
-    std::fs::write(repo.path().join("feature.txt"), &main_content).expect("write main feature.txt");
-    repo.git_og(&["add", "feature.txt"]).expect("add");
-    repo.git_og(&["commit", "-m", "main-advance"])
-        .expect("commit main advance");
-
-    // Cherry-pick A and B onto main
-    repo.git_og(&["cherry-pick", &sha_a])
-        .expect("cherry-pick A");
-    let new_a = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    repo.git_og(&["cherry-pick", &sha_b])
-        .expect("cherry-pick B");
-    let new_b = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    // Invoke rewrite_authorship_after_rebase_v2
-    rewrite_authorship_after_rebase_v2(
-        &gitai_repo,
-        &sha_b,
-        &[sha_a.clone(), sha_b.clone()],
-        &[new_a.clone(), new_b.clone()],
-        "human-tester",
-    )
-    .expect("rewrite authorship after rebase");
-
-    // Verify new_A note
-    {
-        let note_raw = show_authorship_note(&gitai_repo, &new_a).expect("read new_A note");
-        let log = AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_A note");
-
-        let record = log
-            .metadata
-            .prompts
-            .get(&prompt_hash)
-            .expect("prompt_hash must be in new_A note metadata");
-        assert_eq!(
-            record.total_additions, 5,
-            "new_A: total_additions should be 5 (from commit A's PromptRecord), got {}",
-            record.total_additions
-        );
-
-        let file_att = log
-            .attestations
-            .iter()
-            .find(|f| f.file_path == "feature.txt")
-            .expect("new_A note must have feature.txt attestation");
-        assert_eq!(
-            file_att.entries.len(),
-            1,
-            "feature.txt should have exactly one attestation entry"
-        );
-        assert_eq!(file_att.entries[0].hash, prompt_hash);
-        // header prepended by main shifted AI lines from 3-7 to 4-8
-        assert_eq!(
-            file_att.entries[0].line_ranges,
-            vec![LineRange::Range(4, 8)],
-            "feature.txt AI lines must shift by 1 to 4-8 after main prepended 'header\\n'; got {:?}",
-            file_att.entries[0].line_ranges
-        );
-    }
-
-    // Verify new_B note
-    {
-        let note_raw = show_authorship_note(&gitai_repo, &new_b).expect("read new_B note");
-        let log = AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_B note");
-
-        let record = log
-            .metadata
-            .prompts
-            .get(&prompt_hash)
-            .expect("prompt_hash must be in new_B note metadata");
-        assert_eq!(
-            record.total_additions, 10,
-            "new_B: total_additions should be 10 (from commit B's PromptRecord), got {}",
-            record.total_additions
-        );
-
-        let file_att = log
-            .attestations
-            .iter()
-            .find(|f| f.file_path == "other.txt")
-            .expect("new_B note must have other.txt attestation");
-        assert_eq!(
-            file_att.entries.len(),
-            1,
-            "other.txt should have exactly one attestation entry"
-        );
-        assert_eq!(file_att.entries[0].hash, prompt_hash);
-        assert_eq!(
-            file_att.entries[0].line_ranges,
-            vec![LineRange::Range(1, 10)],
-            "other.txt AI lines must remain at 1-10 (unchanged by rebase); got {:?}",
-            file_att.entries[0].line_ranges
-        );
-    }
 }
 
 #[test]

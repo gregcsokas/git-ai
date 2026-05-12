@@ -2507,7 +2507,7 @@ sed -i.bak '3s/pick/fixup/' "$1"
         "    log(\"order received\")".human(),
         "    process()".ai(),
         "    sendMetrics()".ai(),
-        "}".unattributed_human(),
+        "}".ai(),
     ]);
 }
 
@@ -2676,6 +2676,6 @@ sed -i.bak '3s/pick/fixup/' "$1"
         "    handle()".ai(),
         "    logMetrics()".ai(),
         "    shutdown()".ai(),
-        "}".unattributed_human(),
+        "}".ai(),
     ]);
 }

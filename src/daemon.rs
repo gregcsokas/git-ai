@@ -2811,6 +2811,9 @@ fn apply_rewrite_side_effect(
                 final_state_override,
             )?;
         }
+        RewriteLogEvent::RebaseComplete { .. } | RewriteLogEvent::CherryPickComplete { .. } => {
+            crate::authorship::rewrite_op_v3::handle_rewrite_from_event(&repo, &rewrite_event)?;
+        }
         _ => {
             rewrite_authorship_if_needed(
                 &repo,
