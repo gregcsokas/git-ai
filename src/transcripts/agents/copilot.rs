@@ -112,11 +112,19 @@ impl CopilotAgent {
         let content = fs::read_to_string(&workspace_json).ok()?;
         let json: serde_json::Value = serde_json::from_str(&content).ok()?;
         let folder_uri = json.get("folder")?.as_str()?;
-        // folder is a file:// URI
         let path_str = folder_uri.strip_prefix("file://")?;
         let decoded = percent_decode_path(path_str);
-        let p = PathBuf::from(decoded);
-        Some(p)
+        // On Windows, file URIs are file:///C:/... which leaves /C:/... after stripping.
+        // Strip the leading slash if followed by a drive letter.
+        let normalized = if decoded.len() >= 3
+            && decoded.as_bytes()[0] == b'/'
+            && decoded.as_bytes()[2] == b':'
+        {
+            &decoded[1..]
+        } else {
+            &decoded
+        };
+        Some(PathBuf::from(normalized))
     }
 
     /// Determine transcript format from file path.
