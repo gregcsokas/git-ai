@@ -63,7 +63,7 @@ pub(super) fn parse_cli_hooks(
                 .and_then(|path| {
                     model_extraction::extract_model(
                         path,
-                        crate::transcripts::sweep::TranscriptFormat::CopilotCliSessionJsonl,
+                        crate::transcripts::sweep::TranscriptFormat::CopilotEventStreamJsonl,
                         None,
                     )
                     .ok()
@@ -79,7 +79,7 @@ pub(super) fn parse_cli_hooks(
 
     let transcript_source = session_state_path.map(|path| TranscriptSource {
         path,
-        format: TranscriptFormat::CopilotCliSessionJsonl,
+        format: TranscriptFormat::CopilotEventStreamJsonl,
         session_id: generate_session_id(&session_id, "github-copilot-cli"),
         external_session_id: session_id.clone(),
         external_parent_session_id: None,

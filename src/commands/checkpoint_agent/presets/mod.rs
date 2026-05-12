@@ -119,7 +119,6 @@ pub enum TranscriptFormat {
     AmpThreadJson,
     OpenCodeSqlite,
     PiJsonl,
-    CopilotCliSessionJsonl,
 }
 
 impl TranscriptFormat {
@@ -132,8 +131,7 @@ impl TranscriptFormat {
             | Self::WindsurfJsonl
             | Self::CodexJsonl
             | Self::PiJsonl
-            | Self::CopilotEventStreamJsonl
-            | Self::CopilotCliSessionJsonl => WatermarkType::ByteOffset,
+            | Self::CopilotEventStreamJsonl => WatermarkType::ByteOffset,
             Self::DroidJsonl => WatermarkType::Hybrid,
             Self::CopilotSessionJson | Self::ContinueJson | Self::AmpThreadJson => {
                 WatermarkType::RecordIndex

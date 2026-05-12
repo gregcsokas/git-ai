@@ -14,7 +14,6 @@ pub fn extract_model(
         | TranscriptFormat::CopilotEventStreamJsonl
         | TranscriptFormat::GeminiJsonl => extract_model_from_jsonl_tail(path),
         TranscriptFormat::CopilotSessionJson => extract_model_from_copilot_session_json(path),
-        TranscriptFormat::CopilotCliSessionJsonl => extract_model_from_copilot_cli_events(path),
         TranscriptFormat::AmpThreadJson => extract_model_from_amp_thread_json(path),
         TranscriptFormat::OpenCodeSqlite => extract_model_from_opencode_sqlite(path, session_id),
         // Droid uses extract_model_from_droid_settings() with the settings path instead
@@ -75,6 +74,16 @@ fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, Transcri
         let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
+
+        // Copilot CLI: session.model_change event with data.newModel
+        if json.get("type").and_then(|v| v.as_str()) == Some("session.model_change")
+            && let Some(model) = json
+                .get("data")
+                .and_then(|d| d.get("newModel"))
+                .and_then(|v| v.as_str())
+        {
+            return Ok(Some(model.to_string()));
+        }
 
         let candidate = json
             .get("message")
@@ -191,55 +200,6 @@ fn extract_model_from_amp_thread_json(path: &Path) -> Result<Option<String>, Tra
         });
 
     Ok(model)
-}
-
-fn extract_model_from_copilot_cli_events(path: &Path) -> Result<Option<String>, TranscriptError> {
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
-        Err(_) => return Ok(None),
-    };
-
-    let file_size = match file.metadata() {
-        Ok(m) => m.len(),
-        Err(_) => return Ok(None),
-    };
-
-    if file_size == 0 {
-        return Ok(None);
-    }
-
-    let read_size = std::cmp::min(51200, file_size);
-    let seek_pos = file_size - read_size;
-
-    if file.seek(SeekFrom::Start(seek_pos)).is_err() {
-        return Ok(None);
-    }
-
-    let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
-
-    for line in lines.iter().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-
-        if json.get("type").and_then(|v| v.as_str()) == Some("session.model_change")
-            && let Some(model) = json
-                .get("data")
-                .and_then(|d| d.get("newModel"))
-                .and_then(|v| v.as_str())
-        {
-            return Ok(Some(model.to_string()));
-        }
-    }
-
-    Ok(None)
 }
 
 fn extract_model_from_opencode_sqlite(
@@ -375,14 +335,14 @@ mod tests {
     #[test]
     fn test_extract_model_copilot_cli() {
         let path = fixture_path("copilot_cli_session_events.jsonl");
-        let result = extract_model(&path, TranscriptFormat::CopilotCliSessionJsonl, None).unwrap();
+        let result = extract_model(&path, TranscriptFormat::CopilotEventStreamJsonl, None).unwrap();
         assert_eq!(result, Some("gpt-4.1".to_string()));
     }
 
     #[test]
     fn test_extract_model_copilot_cli_no_model() {
         let path = fixture_path("copilot_cli_session_no_model.jsonl");
-        let result = extract_model(&path, TranscriptFormat::CopilotCliSessionJsonl, None).unwrap();
+        let result = extract_model(&path, TranscriptFormat::CopilotEventStreamJsonl, None).unwrap();
         assert_eq!(result, None);
     }
 

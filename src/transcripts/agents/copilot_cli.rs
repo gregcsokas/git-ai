@@ -82,7 +82,7 @@ impl Agent for CopilotCliAgent {
                 session_id,
                 tool: "github-copilot-cli".to_string(),
                 transcript_path: events_path,
-                transcript_format: TranscriptFormat::CopilotCliSessionJsonl,
+                transcript_format: TranscriptFormat::CopilotEventStreamJsonl,
                 watermark_type: WatermarkType::ByteOffset,
                 initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
                 external_session_id,
