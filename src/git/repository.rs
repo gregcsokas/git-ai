@@ -1588,15 +1588,14 @@ impl Repository {
         &self,
         file_paths: &[String],
     ) -> Result<HashMap<String, String>, GitAiError> {
-        use futures::future::join_all;
         use std::sync::Arc;
 
         const MAX_CONCURRENT: usize = 30;
 
         let repo_global_args = self.global_args_for_exec();
-        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
 
-        let futures: Vec<_> = file_paths
+        let tasks: Vec<_> = file_paths
             .iter()
             .map(|file_path| {
                 let mut args = repo_global_args.clone();
@@ -1605,22 +1604,22 @@ impl Repository {
                 let file_path = file_path.clone();
                 let semaphore = semaphore.clone();
 
-                async move {
-                    let _permit = semaphore.acquire().await;
+                tokio::spawn(async move {
+                    let _permit = semaphore.acquire().await.unwrap();
                     let result = exec_git(&args).and_then(|output| {
                         String::from_utf8(output.stdout)
                             .map_err(|e| GitAiError::Utf8Error(e.utf8_error()))
                     });
                     (file_path, result)
-                }
+                })
             })
             .collect();
 
-        let results = smol::block_on(async { join_all(futures).await });
+        let results = crate::utils::block_on(async { crate::utils::join_all(tasks).await });
 
         let mut staged_files = HashMap::new();
-        for (file_path, result) in results {
-            if let Ok(content) = result {
+        for task_result in results {
+            if let Ok((file_path, Ok(content))) = task_result {
                 staged_files.insert(file_path, content);
             }
         }
@@ -2219,7 +2218,7 @@ fn git_config_file_for_repo_paths(
     let mut config =
         gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
 
-    let home = dirs::home_dir();
+    let home = crate::utils::dirs::home_dir();
     let options = gix_config::file::init::Options {
         includes: gix_config::file::includes::Options::follow(
             gix_config::path::interpolate::Context {

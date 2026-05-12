@@ -3,14 +3,10 @@ use crate::config;
 use crate::error::GitAiError;
 use crate::git::repository::{exec_git, parse_git_var_identity};
 use crate::http;
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use url::Url;
 
-/// Global mutex to prevent multiple threads from refreshing simultaneously.
-/// This provides in-process synchronization to avoid thundering herd issues.
-/// Note: Cross-process races are acceptable - both processes get valid tokens.
-static REFRESH_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static REFRESH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Attempt to load stored credentials and refresh if needed.
 /// Returns None on any failure (not logged in, expired, refresh failed).

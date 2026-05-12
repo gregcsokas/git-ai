@@ -30,7 +30,7 @@ impl CursorAgent {
 
         // Standard location for Cursor transcripts
         let search_dirs =
-            vec![dirs::config_dir().map(|p| p.join("Cursor/User/globalStorage/conversations"))];
+            vec![crate::utils::dirs::config_dir().map(|p| p.join("Cursor/User/globalStorage/conversations"))];
 
         for dir_opt in search_dirs {
             if let Some(dir) = dir_opt

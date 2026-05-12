@@ -509,7 +509,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         // binary and shims are in use and need to be replaced. The installer will wait
         // for the files to be released before proceeding.
         let pid = std::process::id();
-        let log_dir = dirs::home_dir()
+        let log_dir = crate::utils::dirs::home_dir()
             .ok_or_else(|| "Could not determine home directory".to_string())?
             .join(".git-ai")
             .join("upgrade-logs");
