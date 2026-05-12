@@ -367,8 +367,8 @@ fn read_session_json(
     })
 }
 
-/// Read Copilot event stream JSONL incrementally.
-fn read_event_stream(
+/// Read JSONL event stream incrementally using byte-offset watermarks.
+pub(super) fn read_event_stream(
     path: &Path,
     watermark: Box<dyn WatermarkStrategy>,
     session_id: &str,

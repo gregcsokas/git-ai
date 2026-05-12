@@ -7,6 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::copilot::read_event_stream;
+
 pub struct CopilotCliAgent {
     batch_size: usize,
 }
@@ -99,89 +101,7 @@ impl Agent for CopilotCliAgent {
         watermark: Box<dyn WatermarkStrategy>,
         session_id: &str,
     ) -> Result<TranscriptBatch, TranscriptError> {
-        use std::fs::File;
-        use std::io::{BufRead, BufReader, Seek, SeekFrom};
-
-        let byte_watermark = watermark
-            .as_any()
-            .downcast_ref::<ByteOffsetWatermark>()
-            .ok_or_else(|| TranscriptError::Fatal {
-                message: format!(
-                    "CopilotCliAgent requires ByteOffsetWatermark, got incompatible type for session {}",
-                    session_id
-                ),
-            })?;
-
-        let start_offset = byte_watermark.0;
-
-        let file = File::open(path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                TranscriptError::Fatal {
-                    message: format!("Transcript file not found: {}", path.display()),
-                }
-            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                TranscriptError::Fatal {
-                    message: format!("Permission denied reading transcript: {}", path.display()),
-                }
-            } else {
-                TranscriptError::Transient {
-                    message: format!("Failed to open transcript file: {}", e),
-                    retry_after: Duration::from_secs(5),
-                }
-            }
-        })?;
-
-        let mut reader = BufReader::new(file);
-
-        reader
-            .seek(SeekFrom::Start(start_offset))
-            .map_err(|e| TranscriptError::Transient {
-                message: format!("Failed to seek to offset {}: {}", start_offset, e),
-                retry_after: Duration::from_secs(5),
-            })?;
-
-        let batch_limit = self.batch_size_hint();
-        let mut events = Vec::with_capacity(batch_limit);
-        let mut current_offset = start_offset;
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let bytes_read =
-                reader
-                    .read_line(&mut line)
-                    .map_err(|e| TranscriptError::Transient {
-                        message: format!("I/O error reading line: {}", e),
-                        retry_after: Duration::from_secs(5),
-                    })?;
-
-            if bytes_read == 0 {
-                break;
-            }
-
-            current_offset += bytes_read as u64;
-
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let entry: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            events.push(entry);
-            if events.len() >= batch_limit {
-                break;
-            }
-        }
-
-        let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));
-
-        Ok(TranscriptBatch {
-            events,
-            new_watermark,
-        })
+        read_event_stream(path, watermark, session_id, self.batch_size_hint())
     }
 
     fn extract_event_ids(
