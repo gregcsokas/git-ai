@@ -24,7 +24,7 @@ use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args
 use crate::utils::LockFile;
 use crate::{
     authorship::post_commit::post_commit_with_final_state,
-    authorship::rebase_authorship::{
+    authorship::rewrite_op_v3::{
         committed_file_snapshot_between_commits, prepare_working_log_after_squash_from_final_state,
         reconstruct_working_log_after_reset, restore_virtual_attribution_carryover,
         restore_working_log_carryover, rewrite_authorship_after_commit_amend_with_snapshot,

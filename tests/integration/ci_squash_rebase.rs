@@ -54,7 +54,7 @@ fn test_ci_squash_merge_basic() {
         .expect("Failed to find repository");
 
     // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",
@@ -131,7 +131,7 @@ fn test_ci_squash_merge_multiple_files() {
         .expect("Failed to find repository");
 
     // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",
@@ -210,7 +210,7 @@ fn test_ci_squash_merge_mixed_content() {
         .expect("Failed to find repository");
 
     // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",
@@ -270,7 +270,7 @@ fn test_ci_squash_merge_empty_notes_preserved() {
     let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("Failed to find repository");
 
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",
@@ -327,7 +327,7 @@ fn test_ci_squash_merge_no_notes_no_authorship_created() {
     let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("Failed to find repository");
 
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",
@@ -393,7 +393,7 @@ fn test_ci_squash_merge_with_manual_changes() {
         .expect("Failed to find repository");
 
     // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",
@@ -486,7 +486,7 @@ fn test_ci_rebase_merge_multiple_commits() {
         .expect("Failed to find repository");
 
     // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",
@@ -1062,7 +1062,7 @@ fn test_ci_squash_merge_basic_standard_human() {
         .expect("Failed to find repository");
 
     // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",
@@ -1142,7 +1142,7 @@ fn test_ci_squash_merge_mixed_content_standard_human() {
         .expect("Failed to find repository");
 
     // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",
@@ -1220,7 +1220,7 @@ fn test_ci_squash_merge_with_manual_changes_standard_human() {
         .expect("Failed to find repository");
 
     // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",
@@ -1309,7 +1309,7 @@ fn test_ci_rebase_merge_multiple_commits_standard_human() {
         .expect("Failed to find repository");
 
     // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::rewrite_op_v3::rewrite_authorship_after_squash_or_rebase;
     rewrite_authorship_after_squash_or_rebase(
         &git_ai_repo,
         "feature",

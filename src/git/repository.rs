@@ -1,4 +1,4 @@
-use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
+use crate::authorship::rewrite_op_v3::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::repo_state::{

@@ -1,4 +1,4 @@
-use crate::authorship::rebase_authorship::walk_commits_to_base;
+use crate::authorship::rewrite_op_v3::walk_commits_to_base;
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
 

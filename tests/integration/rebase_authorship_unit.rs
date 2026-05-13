@@ -3,12 +3,12 @@ use git_ai::authorship::attribution_tracker::{
     Attribution, AttributionTracker, LineAttribution, attributions_to_line_attributions,
 };
 use git_ai::authorship::authorship_log::PromptRecord;
-use git_ai::authorship::rebase_authorship::{
+use git_ai::authorship::rewrite_op_v3::handle_rewrite_from_event;
+use git_ai::authorship::rewrite_op_v3::{
     build_file_attestation_from_line_attributions, collect_changed_file_contents_from_diff,
     diff_based_line_attribution_transfer, get_pathspecs_from_commits,
     parse_cat_file_batch_output_with_oids, walk_commits_to_base,
 };
-use git_ai::authorship::rewrite_op_v3::handle_rewrite_from_event;
 use git_ai::authorship::working_log::{AgentId, Checkpoint, CheckpointKind};
 use git_ai::git::repository::find_repository_in_path;
 use git_ai::git::rewrite_log::{RebaseCompleteEvent, RewriteLogEvent};
@@ -1007,7 +1007,7 @@ fn regression_initial_survives_amend_then_rebase() {
 
 #[test]
 fn diff_based_transfer_equal_content() {
-    use git_ai::authorship::rebase_authorship::diff_based_line_attribution_transfer;
+    use git_ai::authorship::rewrite_op_v3::diff_based_line_attribution_transfer;
 
     let old = "line1\nline2\nline3\n";
     let new = "line1\nline2\nline3\n";
@@ -1040,7 +1040,7 @@ fn diff_based_transfer_equal_content() {
 
 #[test]
 fn diff_based_transfer_insertion_shifts_lines() {
-    use git_ai::authorship::rebase_authorship::diff_based_line_attribution_transfer;
+    use git_ai::authorship::rewrite_op_v3::diff_based_line_attribution_transfer;
 
     let old = "line1\nline2\nline3\n";
     let new = "line1\nnew_line\nline2\nline3\n";
@@ -1077,7 +1077,7 @@ fn diff_based_transfer_insertion_shifts_lines() {
 
 #[test]
 fn diff_based_transfer_deletion_removes_line() {
-    use git_ai::authorship::rebase_authorship::diff_based_line_attribution_transfer;
+    use git_ai::authorship::rewrite_op_v3::diff_based_line_attribution_transfer;
 
     let old = "line1\nline2\nline3\n";
     let new = "line1\nline3\n";
@@ -1112,7 +1112,7 @@ fn diff_based_transfer_deletion_removes_line() {
 
 #[test]
 fn diff_based_transfer_replacement_drops_attribution() {
-    use git_ai::authorship::rebase_authorship::diff_based_line_attribution_transfer;
+    use git_ai::authorship::rewrite_op_v3::diff_based_line_attribution_transfer;
 
     let old = "line1\nline2\nline3\n";
     let new = "line1\nmodified\nline3\n";
@@ -1147,7 +1147,7 @@ fn diff_based_transfer_replacement_drops_attribution() {
 
 #[test]
 fn diff_based_transfer_handles_duplicate_lines_correctly() {
-    use git_ai::authorship::rebase_authorship::diff_based_line_attribution_transfer;
+    use git_ai::authorship::rewrite_op_v3::diff_based_line_attribution_transfer;
 
     // This tests the case that the old content-matching approach got wrong:
     // identical lines from different authors should be tracked by position, not content
