@@ -1,18 +1,7 @@
-pub mod api;
-pub mod auth;
-pub mod authorship;
-pub mod ci;
-pub mod commands;
-pub mod config;
-pub mod daemon;
-pub mod error;
-pub mod feature_flags;
-pub mod git;
-pub mod http;
-pub mod mdm;
-pub mod metrics;
-pub mod observability;
-pub mod repo_url;
-pub mod transcripts;
-pub mod utils;
-pub mod uuid;
+pub mod core;
+
+pub mod authorship {
+    pub mod authorship_log_serialization {
+        pub use crate::core::authorship_log::AuthorshipLog;
+    }
+}

@@ -200,7 +200,7 @@ fn test_ai_human_interleaved_line_attribution() {
     file.assert_lines_and_blame(crate::lines![
         "Base line".ai(),
         "AI Line 1".ai(),
-        "Human Line 1".ai(),
+        "Human Line 1".human(),
         "AI Line 2".ai(),
     ]);
 }
@@ -307,7 +307,7 @@ fn test_complex_mixed_additions_and_deletions() {
         "Line 7".human(),
         "Line 8".human(),
         "Line 9".human(),
-        "Line 10".ai(),
+        "Line 10".human(),
         "END LINE 1".ai(),
         "END LINE 2".ai(),
     ]);
@@ -1185,8 +1185,7 @@ fn test_ai_deletion_with_human_checkpoint_in_same_commit() {
 
     // Verify the stats are correct for the last commit
     let stats_output = repo.git_ai(&["stats", "HEAD", "--json"]).unwrap();
-    let stats_output = stats_output.split("}}}").next().unwrap().to_string() + "}}}";
-    let stats: serde_json::Value = serde_json::from_str(&stats_output).unwrap();
+    let stats: serde_json::Value = serde_json::from_str(stats_output.trim()).unwrap();
 
     // Expected: 2 human additions, 2 AI additions
     // Bug #193 causes: 0 human additions, 4 AI additions
