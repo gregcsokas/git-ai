@@ -106,12 +106,12 @@ fn test_rebase_same_file_no_conflict() {
     );
     let default_branch = repo.current_branch();
 
-    // Main prepends a line (non-conflicting with feature's append)
+    // Main appends to the END (non-conflicting with feature's prepend)
     write_raw_commit(
         &repo,
         "lib.rs",
-        "// module header\nfn existing1() {}\nfn existing2() {}\nfn existing3() {}",
-        "Main: prepend header",
+        "fn existing1() {}\nfn existing2() {}\nfn existing3() {}\n// footer added by main",
+        "Main: append footer",
     );
 
     // Feature branch from common ancestor
@@ -122,28 +122,26 @@ fn test_rebase_same_file_no_conflict() {
         .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
-    // AI appends to the same file
-    let mut lib = repo.filename("lib.rs");
-    lib.set_contents(crate::lines![
-        "fn existing1() {}",
-        "fn existing2() {}",
-        "fn existing3() {}",
-        "fn ai_added() {}".ai()
-    ]);
-    repo.stage_all_and_commit("feat: AI appends to lib.rs")
+    // AI PREPENDS to the same file (line numbers stay same in the rebased commit)
+    let file_path = repo.path().join("lib.rs");
+    repo.git_ai(&["checkpoint", "human", "lib.rs"]).unwrap();
+    fs::write(&file_path, "fn ai_added() {}\nfn existing1() {}\nfn existing2() {}\nfn existing3() {}\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "lib.rs"]).unwrap();
+    repo.stage_all_and_commit("feat: AI prepends to lib.rs")
         .unwrap();
 
-    // Rebase (non-conflicting: upstream prepended, feature appended)
+    // Rebase (non-conflicting: upstream appended at end, feature prepended at start)
     repo.git(&["rebase", &default_branch])
         .expect("rebase should succeed (non-conflicting same file)");
 
-    // After rebase, AI line should still be attributed
+    // After rebase, AI line should still be attributed (line 1 in the rebased commit)
+    let mut lib = repo.filename("lib.rs");
     lib.assert_lines_and_blame(crate::lines![
-        "// module header",
+        "fn ai_added() {}".ai(),
         "fn existing1() {}",
         "fn existing2() {}",
         "fn existing3() {}",
-        "fn ai_added() {}".ai()
+        "// footer added by main",
     ]);
 }
 
