@@ -41,7 +41,109 @@ fn git_cmd(args: &[&str]) -> Result<String, String> {
 // Checkpoint command
 // ---------------------------------------------------------------------------
 
+/// Try to route the checkpoint through the daemon's control socket.
+/// Returns true if the daemon handled it, false if we need to fall back to local processing.
+fn try_checkpoint_via_daemon(args: &[String]) -> bool {
+    // Don't route to daemon if explicitly disabled
+    if env::var("GIT_AI_NO_DAEMON").as_deref() == Ok("1") {
+        return false;
+    }
+
+    let paths = git_ai::daemon::DaemonPaths::resolve();
+    if !paths.control_sock.exists() {
+        return false;
+    }
+
+    // Parse args to build request
+    let mut kind_str: Option<&str> = None;
+    let mut file_args: Vec<&str> = Vec::new();
+    let mut past_separator = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            past_separator = true;
+            i += 1;
+            continue;
+        }
+        if past_separator {
+            file_args.push(arg);
+        } else if kind_str.is_none() && matches!(arg, "human" | "mock_ai" | "mock_known_human") {
+            kind_str = Some(arg);
+        } else {
+            file_args.push(arg);
+        }
+        i += 1;
+    }
+
+    let repo_root = match git_cmd(&["rev-parse", "--show-toplevel"]) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+
+    let kind = match kind_str {
+        Some("mock_ai") => "ai",
+        Some("mock_known_human") => "known_human",
+        Some("human") | None => "human",
+        _ => "human",
+    };
+
+    let files: Vec<serde_json::Value> = if file_args.is_empty() {
+        let status_output = git_cmd(&["status", "--porcelain", "-u"]).unwrap_or_default();
+        status_output
+            .lines()
+            .filter(|l| l.len() > 3)
+            .map(|l| serde_json::json!({"path": l[3..].trim()}))
+            .collect()
+    } else {
+        file_args
+            .iter()
+            .map(|f| serde_json::json!({"path": f}))
+            .collect()
+    };
+
+    if files.is_empty() {
+        println!("0");
+        return true;
+    }
+
+    let mut request = serde_json::json!({
+        "type": "checkpoint",
+        "repo_dir": repo_root,
+        "kind": kind,
+        "files": files,
+    });
+
+    if kind == "ai" {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        request["agent"] = serde_json::json!({
+            "tool": kind_str.unwrap_or("mock_ai"),
+            "id": format!("ai-thread-{}", ts),
+            "model": "unknown"
+        });
+    }
+
+    let request_str = serde_json::to_string(&request).unwrap_or_default();
+
+    match git_ai::daemon::control_client::send_request(&paths.control_sock, &request_str) {
+        Ok(resp) if resp.ok => {
+            println!("{}", resp.processed.unwrap_or(0));
+            true
+        }
+        _ => false,
+    }
+}
+
 fn handle_checkpoint(args: &[String]) {
+    // Try routing through the daemon's control socket for lower latency
+    if try_checkpoint_via_daemon(args) {
+        return;
+    }
+
     let mut kind_str: Option<&str> = None;
     let mut file_args: Vec<&str> = Vec::new();
     let mut past_separator = false;

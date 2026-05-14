@@ -57,11 +57,17 @@ pub fn run_daemon(foreground: bool) -> Result<(), Error> {
     // Start the trace2 socket listener thread
     let listener_handle = start_trace2_listener(&paths, event_tx, shutdown.clone())?;
 
+    // Start the control socket listener thread
+    let control_handle = start_control_socket(&paths, shutdown.clone())?;
+
     // Run the event loop on the main thread (blocks until shutdown)
     event_loop::run_event_loop(event_rx, shutdown.clone());
 
-    // Wait for listener thread to finish
+    // Wait for listener threads to finish
     if let Some(handle) = listener_handle {
+        let _ = handle.join();
+    }
+    if let Some(handle) = control_handle {
         let _ = handle.join();
     }
 
@@ -126,6 +132,41 @@ fn start_trace2_listener(
     {
         let _ = (paths, event_tx, shutdown);
         eprintln!("[git-ai] trace2 listener not yet supported on this platform");
+        Ok(None)
+    }
+}
+
+/// Start the control socket on a background thread.
+fn start_control_socket(
+    paths: &DaemonPaths,
+    shutdown: Arc<AtomicBool>,
+) -> Result<Option<thread::JoinHandle<()>>, Error> {
+    #[cfg(unix)]
+    {
+        use super::control_socket::ControlSocket;
+
+        let ctrl = ControlSocket::bind(&paths.control_sock, shutdown)
+            .map_err(|e| Error::Generic(format!("failed to bind control socket: {}", e)))?;
+
+        eprintln!(
+            "[git-ai] control socket bound to {}",
+            paths.control_sock.display()
+        );
+
+        let handle = thread::Builder::new()
+            .name("control-socket".to_string())
+            .spawn(move || {
+                ctrl.run();
+            })
+            .map_err(|e| Error::Generic(format!("failed to spawn control thread: {}", e)))?;
+
+        Ok(Some(handle))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (paths, shutdown);
+        eprintln!("[git-ai] control socket not yet supported on this platform");
         Ok(None)
     }
 }

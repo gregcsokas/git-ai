@@ -87,26 +87,27 @@ The smallest useful daemon: listen on a trace2 socket, detect when
 Allow AI coding agents to submit checkpoints via the control socket
 instead of spawning `git-ai checkpoint` as a subprocess.
 
-- [ ] **2.1 Control socket listener** — `src/daemon/control_socket.rs`
+- [x] **2.1 Control socket listener** — `src/daemon/control_socket.rs`
   - AF_UNIX stream socket at `~/.git-ai/internal/daemon/control.sock`
   - Simple request/response protocol: JSON-line request → JSON-line response
   - Connection timeout (30s idle → close)
 
-- [ ] **2.2 Control protocol** — `src/daemon/protocol.rs`
-  - `CheckpointRun { repo_dir, kind, entries, agent_id, ... }` → processes checkpoint
+- [x] **2.2 Control protocol** — `src/daemon/protocol.rs`
+  - `Checkpoint { repo_dir, kind, files, agent }` → processes checkpoint
   - `Status { repo_dir }` → returns current working log state for repo
   - `Shutdown` → graceful daemon stop
   - `Ping` → health check / version response
 
-- [ ] **2.3 Checkpoint processing via control socket**
-  - Reuse the same `update_attributions` + `append_checkpoint` logic
-  - But avoid re-reading file from disk (agent sends content in request)
-  - Return processed entry count in response
+- [x] **2.3 Checkpoint processing via control socket** — `src/daemon/checkpoint_worker.rs`
+  - Reuses the same `update_attributions` + `append_checkpoint` logic
+  - Agent can optionally send file content in request (avoids disk read)
+  - Returns processed entry count in response
 
-- [ ] **2.4 Agent presets migrate to control socket**
-  - Agents that previously called `git-ai checkpoint <agent>` can now send
-    a control request directly (lower latency, no subprocess spawn)
-  - Fallback: if daemon is not running, fall back to CLI binary call
+- [x] **2.4 CLI routes through daemon when available**
+  - `git-ai checkpoint` auto-routes through control socket if daemon is running
+  - `src/daemon/control_client.rs` provides the client-side connection
+  - Fallback: if daemon is not running (socket missing), falls back to local processing
+  - Disable with `GIT_AI_NO_DAEMON=1` env var
 
 ### Phase 3: Rewrite tracking (rebase, cherry-pick, amend, reset)
 
@@ -296,7 +297,8 @@ If socket path exceeds Unix limit (108 bytes), hash to:
 - [x] CLI: `git-ai stats` command
 - [x] CLI: `git-ai install` (basic hook installer)
 - [x] Integration test suite (48/48 passing)
-- [x] **Daemon Phase 1** ← complete (all tests passing: 51 integration + 68 unit)
+- [x] **Daemon Phase 1** ← complete
+- [x] **Daemon Phase 2** ← complete (control socket + checkpoint worker + client fallback)
 
 ---
 
