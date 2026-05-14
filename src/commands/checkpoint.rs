@@ -314,9 +314,17 @@ pub fn handle_checkpoint(args: &[String]) {
                 .filter(|p| p.exists())
                 .collect()
         } else {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root_path.clone());
             file_args
                 .iter()
-                .map(|f| repo_root_path.join(f))
+                .map(|f| {
+                    let p = PathBuf::from(f);
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        cwd.join(f)
+                    }
+                })
                 .filter(|p| p.exists())
                 .collect()
         };

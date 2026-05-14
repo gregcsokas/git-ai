@@ -525,6 +525,18 @@ impl TestRepo {
             None
         };
 
+        // Detect merge --squash to reconstruct working logs from merged commits
+        let is_merge = args.first() == Some(&"merge");
+        let is_squash_merge = is_merge && args.iter().any(|a| *a == "--squash");
+        let squash_merge_branch = if is_squash_merge {
+            args.iter()
+                .filter(|a| !a.starts_with('-') && **a != "merge")
+                .last()
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+
         // Before reset, capture current HEAD for working log migration
         let is_reset = args.first() == Some(&"reset");
         let pre_reset_head = if is_reset {
@@ -664,6 +676,42 @@ impl TestRepo {
                 // After autostash pull completes, restore stash attributions
                 if is_autostash && has_dirty_changes {
                     let _ = self.git_ai(&["stash-restore"]);
+                }
+            }
+            // After a successful merge --squash, reconstruct working logs from squashed branch commits
+            if is_squash_merge {
+                if let Some(ref branch) = squash_merge_branch {
+                    let head_sha = Command::new(git)
+                        .current_dir(&self.path)
+                        .args(["rev-parse", "HEAD"])
+                        .env("GIT_TRACE2_EVENT", "/dev/null")
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_else(|| "HEAD".to_string());
+                    // Find commits on the branch not reachable from current HEAD
+                    let commits_output = Command::new(git)
+                        .current_dir(&self.path)
+                        .args(["rev-list", &format!("HEAD..{}", branch)])
+                        .env("GIT_TRACE2_EVENT", "/dev/null")
+                        .output();
+                    if let Ok(co) = commits_output {
+                        if co.status.success() {
+                            let squashed_commits: Vec<String> = String::from_utf8_lossy(&co.stdout)
+                                .lines()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            if !squashed_commits.is_empty() {
+                                self.reconstruct_working_log_from_notes(&head_sha, &squashed_commits);
+                                eprintln!(
+                                    "[test] squash merge: reconstructed working log from {} branch commit(s)",
+                                    squashed_commits.len()
+                                );
+                            }
+                        }
+                    }
                 }
             }
             Ok(if stdout.is_empty() { stderr } else { stdout })
