@@ -21,7 +21,7 @@ pub mod trace2_events;
 #[cfg(unix)]
 pub mod trace2_listener;
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 pub mod trace2_listener_win;
 
 pub use lifecycle::{DaemonPaths, DaemonPid};

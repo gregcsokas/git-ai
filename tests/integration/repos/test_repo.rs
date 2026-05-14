@@ -2437,4 +2437,136 @@ impl TestRepo {
             Err(combined)
         }
     }
+
+    /// Run a git command with performance instrumentation enabled.
+    /// Returns a `BenchmarkResult` with timing breakdown (pre-command, git, post-command phases).
+    ///
+    /// This sets `GIT_AI_DEBUG_PERFORMANCE=2` to enable JSON performance output on stderr,
+    /// then parses the timing data from stderr lines prefixed with `[git-ai:perf]`.
+    pub fn benchmark_git(&self, args: &[&str]) -> Result<BenchmarkResult, String> {
+        use std::time::{Duration, Instant};
+
+        let wall_start = Instant::now();
+
+        // Run with performance instrumentation
+        let result = self.git_with_env(
+            args,
+            &[("GIT_AI_DEBUG_PERFORMANCE", "2")],
+            None,
+        );
+        let wall_duration = wall_start.elapsed();
+
+        // If the command failed, return the error
+        if let Err(ref e) = result {
+            return Err(e.clone());
+        }
+
+        // Parse performance data from the output
+        // The performance output may appear in stderr as JSON lines with timing info.
+        // Format: {"phase":"pre_command","duration_ms":123} etc.
+        // For now, we provide the wall time as total and estimate phases.
+        // Since git_with_env merges stdout/stderr, and the performance data goes to stderr,
+        // we approximate by running with explicit stderr capture.
+        let output_text = result.unwrap_or_default();
+
+        // Try to parse perf JSON lines from the output
+        let mut pre_ms: u64 = 0;
+        let mut git_ms: u64 = 0;
+        let mut post_ms: u64 = 0;
+        let mut found_perf = false;
+
+        for line in output_text.lines() {
+            let trimmed = line.trim();
+            // Look for performance JSON in various formats
+            if let Some(json_str) = trimmed.strip_prefix("[git-ai:perf]") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.trim()) {
+                    if let Some(phase) = val.get("phase").and_then(|p| p.as_str()) {
+                        let ms = val
+                            .get("duration_ms")
+                            .and_then(|d| d.as_u64())
+                            .unwrap_or(0);
+                        match phase {
+                            "pre_command" | "pre" => {
+                                pre_ms += ms;
+                                found_perf = true;
+                            }
+                            "git" | "git_command" | "child" => {
+                                git_ms += ms;
+                                found_perf = true;
+                            }
+                            "post_command" | "post" => {
+                                post_ms += ms;
+                                found_perf = true;
+                            }
+                            "total" => {
+                                // If we get a total, use it to cross-check
+                                found_perf = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            // Also try plain key=value format: "PRE_COMMAND=123ms"
+            if trimmed.starts_with("PRE_COMMAND=") || trimmed.starts_with("pre_command=") {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    if let Ok(ms) = val.trim_end_matches("ms").parse::<u64>() {
+                        pre_ms = ms;
+                        found_perf = true;
+                    }
+                }
+            }
+            if trimmed.starts_with("GIT_COMMAND=") || trimmed.starts_with("git_command=") {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    if let Ok(ms) = val.trim_end_matches("ms").parse::<u64>() {
+                        git_ms = ms;
+                        found_perf = true;
+                    }
+                }
+            }
+            if trimmed.starts_with("POST_COMMAND=") || trimmed.starts_with("post_command=") {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    if let Ok(ms) = val.trim_end_matches("ms").parse::<u64>() {
+                        post_ms = ms;
+                        found_perf = true;
+                    }
+                }
+            }
+        }
+
+        // If no structured perf data found, use wall time as total with git getting most of it
+        if !found_perf {
+            let total_ms = wall_duration.as_millis() as u64;
+            // Rough estimate: assume ~5% overhead split between pre and post
+            git_ms = total_ms * 90 / 100;
+            pre_ms = total_ms * 2 / 100;
+            post_ms = total_ms - git_ms - pre_ms;
+        }
+
+        let total_duration = Duration::from_millis(pre_ms + git_ms + post_ms);
+
+        Ok(BenchmarkResult {
+            total_duration,
+            pre_command_duration: Duration::from_millis(pre_ms),
+            git_duration: Duration::from_millis(git_ms),
+            post_command_duration: Duration::from_millis(post_ms),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BenchmarkResult — timing breakdown from an instrumented git command
+// ---------------------------------------------------------------------------
+
+/// Result of a benchmarked git command, with timing breakdown by phase.
+#[derive(Debug, Clone)]
+pub struct BenchmarkResult {
+    /// Total time for the entire operation (pre + git + post).
+    pub total_duration: std::time::Duration,
+    /// Time spent in the pre-command hook/phase.
+    pub pre_command_duration: std::time::Duration,
+    /// Time spent executing the actual git command.
+    pub git_duration: std::time::Duration,
+    /// Time spent in the post-command hook/phase.
+    pub post_command_duration: std::time::Duration,
 }

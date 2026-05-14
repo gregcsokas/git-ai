@@ -42,6 +42,7 @@ mod real_world_workflows;
 mod realistic_complex_edits;
 mod rebase;
 mod rebase_attribution_remaining;
+mod rebase_benchmark;
 mod reset;
 mod simple_additions;
 mod simple_benchmark;
@@ -50,5 +51,9 @@ mod stash_hooks_unit;
 
 #[cfg(unix)]
 mod daemon_e2e;
+#[cfg(unix)]
+mod daemon_lifecycle;
+#[cfg(unix)]
+mod install_e2e;
 #[cfg(unix)]
 mod telemetry_e2e;
