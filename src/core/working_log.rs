@@ -97,7 +97,10 @@ pub struct InitialAttributions {
 // ---------------------------------------------------------------------------
 
 fn working_log_dir(repo_git_dir: &Path, base_commit: &str) -> PathBuf {
-    repo_git_dir.join("ai").join("working_logs").join(base_commit)
+    repo_git_dir
+        .join("ai")
+        .join("working_logs")
+        .join(base_commit)
 }
 
 fn checkpoints_path(repo_git_dir: &Path, base_commit: &str) -> PathBuf {

@@ -3,3 +3,6 @@
 mod repos;
 
 mod simple_additions;
+
+#[cfg(unix)]
+mod daemon_e2e;

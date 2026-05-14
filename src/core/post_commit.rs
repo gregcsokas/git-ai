@@ -8,7 +8,9 @@ use std::path::Path;
 use std::process::Command;
 
 use super::attribution::LineAttribution;
-use super::authorship_log::{self, AttestationEntry, AuthorshipLog, FileAttestation, LineRange, Metadata};
+use super::authorship_log::{
+    self, AttestationEntry, AuthorshipLog, FileAttestation, LineRange, Metadata,
+};
 use super::working_log::{self, AgentId, Checkpoint, CheckpointKind, InitialAttributions};
 
 /// Error type for post-commit operations.
@@ -57,12 +59,10 @@ pub fn generate_authorship_for_commit(
     let checkpoints = working_log::read_checkpoints(git_dir, parent_sha);
 
     // 2. Read INITIAL attributions carried over from prior commit
-    let initial = working_log::read_initial_attributions(git_dir, parent_sha)
-        .unwrap_or_default();
+    let initial = working_log::read_initial_attributions(git_dir, parent_sha).unwrap_or_default();
 
     // 3. Merge checkpoint data into per-file line attributions (last checkpoint wins)
-    let (file_attributions, metadata) =
-        merge_attributions(&checkpoints, &initial, human_author);
+    let (file_attributions, metadata) = merge_attributions(&checkpoints, &initial, human_author);
 
     if file_attributions.is_empty() {
         let log = AuthorshipLog::new(Metadata::new(commit_sha.to_string()));
@@ -76,7 +76,8 @@ pub fn generate_authorship_for_commit(
     for (file_path, attrs) in file_attributions.iter_mut() {
         let blob_content = find_last_blob_content(&checkpoints, file_path, git_dir, parent_sha);
         if let Some(ref checkpoint_content) = blob_content {
-            if let Some(committed_content) = std::fs::read_to_string(repo_dir.join(file_path)).ok() {
+            if let Some(committed_content) = std::fs::read_to_string(repo_dir.join(file_path)).ok()
+            {
                 if *checkpoint_content != committed_content {
                     let old_lines: Vec<&str> = checkpoint_content.lines().collect();
                     let new_lines: Vec<&str> = committed_content.lines().collect();
@@ -293,10 +294,22 @@ fn unescape_git_path(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             match bytes[i + 1] {
-                b'n' => { result.push(b'\n'); i += 2; }
-                b't' => { result.push(b'\t'); i += 2; }
-                b'\\' => { result.push(b'\\'); i += 2; }
-                b'"' => { result.push(b'"'); i += 2; }
+                b'n' => {
+                    result.push(b'\n');
+                    i += 2;
+                }
+                b't' => {
+                    result.push(b'\t');
+                    i += 2;
+                }
+                b'\\' => {
+                    result.push(b'\\');
+                    i += 2;
+                }
+                b'"' => {
+                    result.push(b'"');
+                    i += 2;
+                }
                 d @ b'0'..=b'3' => {
                     // Octal escape: up to 3 digits total
                     let mut val = (d - b'0') as u8;
@@ -391,7 +404,6 @@ fn parse_hunk_header_added(header: &str) -> Option<Vec<u32>> {
 
     Some((start..start + count).collect())
 }
-
 
 /// Find the content of the last checkpoint blob for a given file.
 fn find_last_blob_content(
@@ -495,19 +507,25 @@ fn merge_attributions(
 
     // Seed from INITIAL attributions (convert working_log types to authorship_log types)
     for (hash, record) in &initial.humans {
-        humans.insert(hash.clone(), authorship_log::HumanRecord {
-            author: record.author.clone(),
-        });
+        humans.insert(
+            hash.clone(),
+            authorship_log::HumanRecord {
+                author: record.author.clone(),
+            },
+        );
     }
     for (session_id, record) in &initial.sessions {
-        sessions.insert(session_id.clone(), authorship_log::SessionRecord {
-            agent_id: authorship_log::AgentId {
-                tool: record.agent_id.tool.clone(),
-                id: record.agent_id.id.clone(),
-                model: record.agent_id.model.clone(),
+        sessions.insert(
+            session_id.clone(),
+            authorship_log::SessionRecord {
+                agent_id: authorship_log::AgentId {
+                    tool: record.agent_id.tool.clone(),
+                    id: record.agent_id.id.clone(),
+                    model: record.agent_id.model.clone(),
+                },
+                human_author: record.human_author.clone(),
             },
-            human_author: record.human_author.clone(),
-        });
+        );
     }
     for (file_path, line_attrs) in &initial.files {
         file_attrs.insert(file_path.clone(), line_attrs.clone());
@@ -530,9 +548,11 @@ fn merge_attributions(
         // Register known-human record
         if checkpoint.kind == CheckpointKind::KnownHuman {
             let hash = authorship_log::generate_human_hash(&checkpoint.author);
-            humans.entry(hash).or_insert_with(|| authorship_log::HumanRecord {
-                author: checkpoint.author.clone(),
-            });
+            humans
+                .entry(hash)
+                .or_insert_with(|| authorship_log::HumanRecord {
+                    author: checkpoint.author.clone(),
+                });
         }
 
         // Apply per-file attributions from checkpoint entries
@@ -543,8 +563,10 @@ fn merge_attributions(
                 // — clear all prior AI attributions for it.
                 // Empty attributions + empty line_attributions = bare file listing
                 // (e.g. from stage_all_and_commit flow) — do NOT clear.
-                if matches!(checkpoint.kind, CheckpointKind::Human | CheckpointKind::KnownHuman)
-                    && !entry.attributions.is_empty()
+                if matches!(
+                    checkpoint.kind,
+                    CheckpointKind::Human | CheckpointKind::KnownHuman
+                ) && !entry.attributions.is_empty()
                 {
                     file_attrs.remove(&entry.file);
                 }
@@ -579,30 +601,34 @@ fn register_agent_metadata(
     if is_session_format {
         // New session format: s_<14 hex chars>
         let session_id = authorship_log::generate_session_id(&agent_id.tool, &agent_id.id);
-        sessions.entry(session_id).or_insert_with(|| authorship_log::SessionRecord {
-            agent_id: authorship_log::AgentId {
-                tool: agent_id.tool.clone(),
-                id: agent_id.id.clone(),
-                model: agent_id.model.clone(),
-            },
-            human_author: Some(human_author.to_string()),
-        });
+        sessions
+            .entry(session_id)
+            .or_insert_with(|| authorship_log::SessionRecord {
+                agent_id: authorship_log::AgentId {
+                    tool: agent_id.tool.clone(),
+                    id: agent_id.id.clone(),
+                    model: agent_id.model.clone(),
+                },
+                human_author: Some(human_author.to_string()),
+            });
     } else {
         // Legacy prompt format: 16 hex chars
         let author_id = authorship_log::generate_short_hash(&agent_id.tool, &agent_id.id);
-        prompts.entry(author_id.clone()).or_insert_with(|| authorship_log::PromptRecord {
-            agent_id: authorship_log::AgentId {
-                tool: agent_id.tool.clone(),
-                id: agent_id.id.clone(),
-                model: agent_id.model.clone(),
-            },
-            human_author: Some(human_author.to_string()),
-            messages_url: None,
-            total_additions: 0,
-            total_deletions: 0,
-            accepted_lines: 0,
-            overriden_lines: 0,
-        });
+        prompts
+            .entry(author_id.clone())
+            .or_insert_with(|| authorship_log::PromptRecord {
+                agent_id: authorship_log::AgentId {
+                    tool: agent_id.tool.clone(),
+                    id: agent_id.id.clone(),
+                    model: agent_id.model.clone(),
+                },
+                human_author: Some(human_author.to_string()),
+                messages_url: None,
+                total_additions: 0,
+                total_deletions: 0,
+                accepted_lines: 0,
+                overriden_lines: 0,
+            });
         // Mark as actively used (not INITIAL-only)
         initial_only_prompt_ids.remove(&author_id);
     }
@@ -663,7 +689,8 @@ fn split_attributions(
         // changes. This correctly handles modifications (same position, different
         // content) without erroneous position shifts.
         let wt_to_committed: Option<HashMap<u32, u32>> = if uncommitted_sorted_lines.is_some() {
-            if let Some(committed_content) = std::fs::read_to_string(repo_dir.join(file_path)).ok() {
+            if let Some(committed_content) = std::fs::read_to_string(repo_dir.join(file_path)).ok()
+            {
                 let wt_path = repo_dir.join(file_path);
                 if let Ok(wt_content) = std::fs::read_to_string(&wt_path) {
                     if wt_content != committed_content {
@@ -743,7 +770,6 @@ fn split_attributions(
             }
         }
 
-
         // Gap-fill committed lines (but not lines explicitly attributed to human)
         if let Some(c_set) = committed_set {
             gap_fill_committed(&mut committed_by_author, c_set, &explicitly_human_committed);
@@ -787,7 +813,9 @@ fn split_attributions(
                 uncommitted_attrs.extend(attrs);
             }
             if !uncommitted_attrs.is_empty() {
-                initial_out.files.insert(file_path.clone(), uncommitted_attrs);
+                initial_out
+                    .files
+                    .insert(file_path.clone(), uncommitted_attrs);
             }
         }
     }
@@ -795,8 +823,7 @@ fn split_attributions(
     // Prune INITIAL-only prompts from committed metadata if they have no committed lines
     if !metadata.initial_only_prompt_ids.is_empty() {
         log.metadata.prompts.retain(|id, _| {
-            !metadata.initial_only_prompt_ids.contains(id)
-                || referenced_committed.contains(id)
+            !metadata.initial_only_prompt_ids.contains(id) || referenced_committed.contains(id)
         });
     }
 
@@ -816,23 +843,27 @@ fn split_attributions(
     // Convert authorship_log types back to working_log types for InitialAttributions
     for author_id in &referenced_initial {
         if let Some(record) = metadata.humans.get(author_id) {
-            initial_out.humans.insert(author_id.clone(), working_log::HumanRecord {
-                author: record.author.clone(),
-            });
+            initial_out.humans.insert(
+                author_id.clone(),
+                working_log::HumanRecord {
+                    author: record.author.clone(),
+                },
+            );
         }
         if author_id.starts_with("s_") {
             let session_key = author_id.split("::").next().unwrap_or(author_id);
             if let Some(record) = metadata.sessions.get(session_key) {
-                initial_out
-                    .sessions
-                    .insert(session_key.to_string(), working_log::SessionRecord {
+                initial_out.sessions.insert(
+                    session_key.to_string(),
+                    working_log::SessionRecord {
                         agent_id: working_log::AgentId {
                             tool: record.agent_id.tool.clone(),
                             id: record.agent_id.id.clone(),
                             model: record.agent_id.model.clone(),
                         },
                         human_author: record.human_author.clone(),
-                    });
+                    },
+                );
             }
         }
     }
@@ -871,8 +902,7 @@ fn gap_fill_committed(
     }
     ai_line_author_pairs.sort_by_key(|(line, _)| *line);
 
-    let ai_attributed_lines: HashSet<u32> =
-        ai_line_author_pairs.iter().map(|(l, _)| *l).collect();
+    let ai_attributed_lines: HashSet<u32> = ai_line_author_pairs.iter().map(|(l, _)| *l).collect();
 
     let mut gap_fills: Vec<(&str, u32)> = Vec::new();
 
@@ -1156,8 +1186,14 @@ diff --git a/bar.rs b/bar.rs
             initial_only_prompt_ids: HashSet::new(),
         };
 
-        let (log, _initial) =
-            split_attributions(&file_attrs, &committed_lines, &uncommitted_lines, &metadata, "abc", Path::new("."));
+        let (log, _initial) = split_attributions(
+            &file_attrs,
+            &committed_lines,
+            &uncommitted_lines,
+            &metadata,
+            "abc",
+            Path::new("."),
+        );
 
         // "human" lines should NOT appear in attestations
         let file_att = &log.attestations[0];

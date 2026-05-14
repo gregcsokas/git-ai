@@ -263,7 +263,8 @@ impl TestRepo {
         };
 
         // Find old commits that have notes but are no longer reachable
-        let new_commit_set: std::collections::HashSet<&String> = post_rebase_commits.iter().collect();
+        let new_commit_set: std::collections::HashSet<&String> =
+            post_rebase_commits.iter().collect();
         let old_with_notes: Vec<&String> = noted_commits
             .iter()
             .filter(|c| !new_commit_set.contains(c))

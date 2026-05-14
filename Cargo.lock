@@ -115,6 +115,7 @@ version = "2.0.0-alpha.1"
 dependencies = [
  "git-ai",
  "imara-diff",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

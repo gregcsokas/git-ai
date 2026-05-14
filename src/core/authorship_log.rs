@@ -446,10 +446,7 @@ mod tests {
 
     #[test]
     fn test_compress_lines_single() {
-        assert_eq!(
-            LineRange::compress_lines(&[5]),
-            vec![LineRange::Single(5)]
-        );
+        assert_eq!(LineRange::compress_lines(&[5]), vec![LineRange::Single(5)]);
     }
 
     #[test]

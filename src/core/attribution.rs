@@ -35,12 +35,7 @@ pub fn update_attributions(
     current_author: &str,
     enable_move_detection: bool,
 ) -> Vec<Attribution> {
-    let ts = prev_attributions
-        .iter()
-        .map(|a| a.ts)
-        .max()
-        .unwrap_or(0)
-        + 1;
+    let ts = prev_attributions.iter().map(|a| a.ts).max().unwrap_or(0) + 1;
 
     let sorted;
     let prev = if !is_sorted(prev_attributions) {
@@ -206,10 +201,7 @@ fn compute_diff(old: &str, new: &str) -> Vec<ByteOp> {
                 process_changed_hunk(&pending, &old_lines, &new_lines, old, new, &mut result);
                 pending.clear();
             }
-            if let LineDiffOp::Equal {
-                old_index, len, ..
-            } = op
-            {
+            if let LineDiffOp::Equal { old_index, len, .. } = op {
                 let start = line_byte_start(&old_lines, old_index);
                 let end = line_byte_end(&old_lines, old_index + len, old.len());
                 if start < end {
@@ -313,8 +305,14 @@ fn process_changed_hunk(
                 new_index,
                 new_len,
             } => {
-                let os = old_tokens.get(old_index).map(|t| t.start).unwrap_or(old_cursor);
-                let ns = new_tokens.get(new_index).map(|t| t.start).unwrap_or(new_cursor);
+                let os = old_tokens
+                    .get(old_index)
+                    .map(|t| t.start)
+                    .unwrap_or(old_cursor);
+                let ns = new_tokens
+                    .get(new_index)
+                    .map(|t| t.start)
+                    .unwrap_or(new_cursor);
                 emit_range(result, old, new, old_cursor, os, new_cursor, ns);
 
                 if old_len > 0 {
@@ -506,8 +504,7 @@ fn detect_moves(
                         let del = &deletions[del_idx];
                         let ins = &insertions[ins_idx];
 
-                        let src_start =
-                            line_offset_in_range(&old_lines, dg[dp].1, del.start, true);
+                        let src_start = line_offset_in_range(&old_lines, dg[dp].1, del.start, true);
                         let src_end = line_offset_in_range(
                             &old_lines,
                             dg[dp + match_len - 1].1,
@@ -609,7 +606,12 @@ fn group_contiguous<'a>(
 
 /// Returns byte offset of a line relative to range_start.
 /// If `is_start` is true, returns the start of the line; otherwise returns the end.
-fn line_offset_in_range(lines: &[LineMeta], line_number: usize, range_start: usize, is_start: bool) -> usize {
+fn line_offset_in_range(
+    lines: &[LineMeta],
+    line_number: usize,
+    range_start: usize,
+    is_start: bool,
+) -> usize {
     lines
         .iter()
         .find(|l| l.number == line_number)
@@ -898,9 +900,9 @@ fn attribute_deletion_touched_lines(
         let (line_start, line_end) = line_ranges[line_idx];
 
         // Check if any existing attribution covers this line
-        let has_coverage = merged.iter().any(|attr| {
-            attr.end > line_start && attr.start < line_end
-        });
+        let has_coverage = merged
+            .iter()
+            .any(|attr| attr.end > line_start && attr.start < line_end);
 
         if !has_coverage {
             // No attribution for this line — attribute to current author
@@ -1352,20 +1354,32 @@ fn hunk_bounds(ops: &[LineDiffOp], for_old: bool) -> (usize, usize) {
         let (s, e) = match (op, for_old) {
             (LineDiffOp::Equal { old_index, len, .. }, true) => (*old_index, *old_index + *len),
             (LineDiffOp::Equal { new_index, len, .. }, false) => (*new_index, *new_index + *len),
-            (LineDiffOp::Delete { old_index, old_len, .. }, true) => {
-                (*old_index, *old_index + *old_len)
-            }
+            (
+                LineDiffOp::Delete {
+                    old_index, old_len, ..
+                },
+                true,
+            ) => (*old_index, *old_index + *old_len),
             (LineDiffOp::Delete { new_index, .. }, false) => (*new_index, *new_index),
             (LineDiffOp::Insert { old_index, .. }, true) => (*old_index, *old_index),
-            (LineDiffOp::Insert { new_index, new_len, .. }, false) => {
-                (*new_index, *new_index + *new_len)
-            }
-            (LineDiffOp::Replace { old_index, old_len, .. }, true) => {
-                (*old_index, *old_index + *old_len)
-            }
-            (LineDiffOp::Replace { new_index, new_len, .. }, false) => {
-                (*new_index, *new_index + *new_len)
-            }
+            (
+                LineDiffOp::Insert {
+                    new_index, new_len, ..
+                },
+                false,
+            ) => (*new_index, *new_index + *new_len),
+            (
+                LineDiffOp::Replace {
+                    old_index, old_len, ..
+                },
+                true,
+            ) => (*old_index, *old_index + *old_len),
+            (
+                LineDiffOp::Replace {
+                    new_index, new_len, ..
+                },
+                false,
+            ) => (*new_index, *new_index + *new_len),
         };
         start = start.min(s);
         end = end.max(e);

@@ -1,11 +1,9 @@
 use git_ai::core::attribution::{
-    attributions_to_line_attributions, update_attributions, Attribution,
+    Attribution, attributions_to_line_attributions, update_attributions,
 };
 use git_ai::core::authorship_log::AuthorshipLog;
 use git_ai::core::post_commit::generate_authorship_for_commit;
-use git_ai::core::working_log::{
-    AgentId, Checkpoint, CheckpointKind, WorkingLogEntry,
-};
+use git_ai::core::working_log::{AgentId, Checkpoint, CheckpointKind, WorkingLogEntry};
 
 use std::collections::HashMap;
 use std::env;
@@ -58,9 +56,7 @@ fn handle_checkpoint(args: &[String]) {
         }
         if past_separator {
             file_args.push(arg);
-        } else if kind_str.is_none()
-            && matches!(arg, "human" | "mock_ai" | "mock_known_human")
-        {
+        } else if kind_str.is_none() && matches!(arg, "human" | "mock_ai" | "mock_known_human") {
             kind_str = Some(arg);
         } else {
             file_args.push(arg);
@@ -139,8 +135,12 @@ fn handle_checkpoint(args: &[String]) {
             git_ai::core::working_log::read_checkpoints(&git_dir, &base_commit);
         let previous_attributions = find_latest_attributions(&existing_checkpoints, &relative_path);
 
-        let previous_content =
-            find_latest_content(&existing_checkpoints, &relative_path, &git_dir, &base_commit);
+        let previous_content = find_latest_content(
+            &existing_checkpoints,
+            &relative_path,
+            &git_dir,
+            &base_commit,
+        );
 
         let checkpoint_agent_id = if kind == CheckpointKind::AiAgent {
             let ts = SystemTime::now()
@@ -160,7 +160,8 @@ fn handle_checkpoint(args: &[String]) {
         // and the checkpoint.author field — they must be consistent.
         let known_human_identity = if kind == CheckpointKind::KnownHuman {
             let name = git_cmd(&["config", "user.name"]).unwrap_or_else(|_| "Unknown".to_string());
-            let email = git_cmd(&["config", "user.email"]).unwrap_or_else(|_| "unknown".to_string());
+            let email =
+                git_cmd(&["config", "user.email"]).unwrap_or_else(|_| "unknown".to_string());
             Some(format!("{} <{}>", name, email))
         } else {
             None
@@ -171,16 +172,20 @@ fn handle_checkpoint(args: &[String]) {
                 let aid = checkpoint_agent_id.as_ref().unwrap();
                 git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id)
             }
-            CheckpointKind::KnownHuman => {
-                git_ai::core::authorship_log::generate_human_hash(
-                    known_human_identity.as_deref().unwrap(),
-                )
-            }
+            CheckpointKind::KnownHuman => git_ai::core::authorship_log::generate_human_hash(
+                known_human_identity.as_deref().unwrap(),
+            ),
             CheckpointKind::Human => "human".to_string(),
         };
-        let enable_move_detection = kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
-        let new_attributions =
-            update_attributions(&previous_content, &content, &previous_attributions, &author_id, enable_move_detection);
+        let enable_move_detection =
+            kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
+        let new_attributions = update_attributions(
+            &previous_content,
+            &content,
+            &previous_attributions,
+            &author_id,
+            enable_move_detection,
+        );
 
         let line_attributions = attributions_to_line_attributions(&content, &new_attributions);
 
@@ -197,14 +202,16 @@ fn handle_checkpoint(args: &[String]) {
             kind_str.unwrap_or("human").to_string()
         };
 
-        let mut checkpoint =
-            Checkpoint::new(kind, checkpoint_author, vec![entry]);
+        let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
         checkpoint.agent_id = checkpoint_agent_id.clone();
         if kind == CheckpointKind::AiAgent {
-            checkpoint.trace_id = Some(format!("trace-{}", SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)));
+            checkpoint.trace_id = Some(format!(
+                "trace-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
         }
 
         git_ai::core::working_log::append_checkpoint(&git_dir, &base_commit, &checkpoint);
@@ -261,7 +268,8 @@ fn handle_post_commit() {
         Ok(d) => d,
         Err(_) => return,
     };
-    let git_dir = std::fs::canonicalize(&git_dir_str).unwrap_or_else(|_| PathBuf::from(&git_dir_str));
+    let git_dir =
+        std::fs::canonicalize(&git_dir_str).unwrap_or_else(|_| PathBuf::from(&git_dir_str));
 
     let commit_sha = match git_cmd(&["rev-parse", "HEAD"]) {
         Ok(s) => s,
@@ -271,11 +279,12 @@ fn handle_post_commit() {
     let parent_sha = git_cmd(&["rev-parse", "HEAD~1"]).ok();
     let base_commit = parent_sha.as_deref().unwrap_or("initial");
 
-    let repo_dir = git_cmd(&["rev-parse", "--show-toplevel"]).map(PathBuf::from).unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let repo_dir = git_cmd(&["rev-parse", "--show-toplevel"])
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     let human_author = git_cmd(&["log", "-1", "--format=%aN <%aE>"])
         .unwrap_or_else(|_| "Unknown <unknown>".to_string());
-
 
     let (authorship_log, initial_attrs) = match generate_authorship_for_commit(
         &git_dir,
@@ -288,11 +297,16 @@ fn handle_post_commit() {
         Err(_) => return,
     };
 
-
     let note_text = authorship_log.serialize_to_string();
     let result = Command::new("/usr/bin/git")
         .args([
-            "notes", "--ref=ai", "add", "-f", "-m", &note_text, &commit_sha,
+            "notes",
+            "--ref=ai",
+            "add",
+            "-f",
+            "-m",
+            &note_text,
+            &commit_sha,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -529,6 +543,10 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
 // ---------------------------------------------------------------------------
 
 fn handle_install() {
+    // --- Step 1: Kill v1 daemon if running ---
+    kill_v1_daemon_if_running();
+
+    // --- Step 2: Install local post-commit hook (for fallback / non-daemon use) ---
     let git_dir_str = match git_cmd(&["rev-parse", "--git-dir"]) {
         Ok(d) => d,
         Err(e) => {
@@ -560,6 +578,144 @@ fn handle_install() {
     }
 
     println!("git-ai: installed post-commit hook");
+
+    // --- Step 3: Configure global trace2 to point to the v2 daemon socket ---
+    configure_trace2_global();
+}
+
+/// Stop the v1 daemon if it is running.
+/// Reads the PID file from ~/.git-ai/internal/daemon/daemon.pid.json,
+/// sends SIGTERM, and waits up to 5s for exit.
+fn kill_v1_daemon_if_running() {
+    let home = match env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let pid_path = PathBuf::from(&home)
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon")
+        .join("daemon.pid.json");
+
+    if !pid_path.exists() {
+        return;
+    }
+
+    let content = match fs::read_to_string(&pid_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Minimal JSON parsing for {"pid": N, ...}
+    let pid: u32 = match extract_pid_from_json(&content) {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Check if the process is alive
+    #[cfg(unix)]
+    {
+        let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
+        if !alive {
+            let _ = fs::remove_file(&pid_path);
+            return;
+        }
+
+        eprintln!("[git-ai] stopping v1 daemon (pid {})...", pid);
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+
+        // Wait up to 5s for exit
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let still_alive = unsafe { libc::kill(pid as i32, 0) } == 0;
+            if !still_alive {
+                eprintln!("[git-ai] v1 daemon stopped");
+                let _ = fs::remove_file(&pid_path);
+                return;
+            }
+        }
+
+        eprintln!(
+            "[git-ai] warning: v1 daemon (pid {}) did not exit within 5s",
+            pid
+        );
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+/// Extract "pid" value from a minimal JSON object like {"pid":1234,...}
+fn extract_pid_from_json(json: &str) -> Option<u32> {
+    let pattern = "\"pid\":";
+    let idx = json.find(pattern)?;
+    let after = json[idx + pattern.len()..].trim_start();
+    let end = after
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after.len());
+    if end == 0 {
+        return None;
+    }
+    after[..end].parse().ok()
+}
+
+/// Configure git's global trace2 event target to point to the v2 daemon socket.
+/// This is what makes git send events to the daemon without any proxy/wrapper.
+fn configure_trace2_global() {
+    let socket_path = resolve_trace2_socket_path();
+    let target = format!("af_unix:stream:{}", socket_path.display());
+
+    // Set trace2.eventTarget
+    match git_cmd(&["config", "--global", "trace2.eventTarget", &target]) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("git-ai install: failed to set trace2.eventTarget: {}", e);
+            return;
+        }
+    }
+
+    // Set trace2.eventNesting (need enough depth to see command details)
+    match git_cmd(&["config", "--global", "trace2.eventNesting", "10"]) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("git-ai install: failed to set trace2.eventNesting: {}", e);
+            return;
+        }
+    }
+
+    println!(
+        "git-ai: configured trace2 event target -> {}",
+        socket_path.display()
+    );
+}
+
+/// Resolve the trace2 socket path.
+/// Uses the same logic as DaemonPaths: ~/.git-ai/internal/daemon/trace2.sock
+/// unless the path is too long (>= 100 chars), in which case it hashes to /tmp.
+fn resolve_trace2_socket_path() -> PathBuf {
+    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let base_dir = PathBuf::from(&home)
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon");
+    let candidate = base_dir.join("trace2.sock");
+
+    if candidate.to_string_lossy().len() >= 100 {
+        // Hash the base dir to create a short /tmp path (matching DaemonPaths logic)
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(base_dir.to_string_lossy().as_bytes());
+        let hash = hasher.finalize();
+        let short_hash: String = hash[..8].iter().map(|b| format!("{:02x}", b)).collect();
+        PathBuf::from(format!("/tmp/git-ai-d-{}", short_hash)).join("trace2.sock")
+    } else {
+        candidate
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +736,11 @@ fn handle_status(args: &[String]) {
 
 fn handle_stats(args: &[String]) {
     let is_json = args.iter().any(|a| a == "--json");
-    let commit_ref = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("HEAD");
+    let commit_ref = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("HEAD");
 
     let commit_sha = match git_cmd(&["rev-parse", commit_ref]) {
         Ok(s) => s,
@@ -623,7 +783,11 @@ fn handle_stats(args: &[String]) {
 
     for file_att in &log.attestations {
         for entry in &file_att.entries {
-            let count: u64 = entry.line_ranges.iter().map(|r| r.line_count() as u64).sum();
+            let count: u64 = entry
+                .line_ranges
+                .iter()
+                .map(|r| r.line_count() as u64)
+                .sum();
             if entry.hash.starts_with("h_") {
                 human_additions += count;
             } else {
@@ -671,7 +835,10 @@ fn handle_post_rewrite(args: &[String]) {
         // Direct old-sha new-sha pairs as arguments
         let mut pairs = Vec::new();
         let mut i = 0;
-        let filtered: Vec<&String> = args.iter().filter(|a| *a != "rebase" && *a != "amend").collect();
+        let filtered: Vec<&String> = args
+            .iter()
+            .filter(|a| *a != "rebase" && *a != "amend")
+            .collect();
         while i + 1 < filtered.len() {
             pairs.push((filtered[i].clone(), filtered[i + 1].clone()));
             i += 2;
@@ -703,7 +870,13 @@ fn handle_post_rewrite(args: &[String]) {
         // Write the note to the new commit
         let result = Command::new("/usr/bin/git")
             .args([
-                "notes", "--ref=ai", "add", "-f", "-m", &updated_note, new_sha,
+                "notes",
+                "--ref=ai",
+                "add",
+                "-f",
+                "-m",
+                &updated_note,
+                new_sha,
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -736,6 +909,44 @@ fn handle_post_rewrite(args: &[String]) {
 // Entry point — git-ai is ONLY git-ai, never a git proxy/wrapper
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Background daemon commands
+// ---------------------------------------------------------------------------
+
+fn handle_bg(args: &[String]) {
+    match args.first().map(String::as_str) {
+        Some("run") => {
+            if let Err(e) = git_ai::daemon::run::run_daemon(true) {
+                eprintln!("git-ai bg run: {}", e);
+                process::exit(1);
+            }
+        }
+        Some("start") => {
+            if let Err(e) = git_ai::daemon::run::run_daemon(false) {
+                eprintln!("git-ai bg start: {}", e);
+                process::exit(1);
+            }
+        }
+        Some("stop") => {
+            if let Err(e) = git_ai::daemon::run::stop_daemon() {
+                eprintln!("git-ai bg stop: {}", e);
+                process::exit(1);
+            }
+        }
+        Some("status") => {
+            git_ai::daemon::run::print_status();
+        }
+        _ => {
+            eprintln!("usage: git-ai bg <run|start|stop|status>");
+            process::exit(1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point — git-ai is ONLY git-ai, never a git proxy/wrapper
+// ---------------------------------------------------------------------------
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
@@ -747,6 +958,7 @@ fn main() {
         Some("install") => handle_install(),
         Some("status") => handle_status(&args[1..]),
         Some("stats") => handle_stats(&args[1..]),
+        Some("bg") => handle_bg(&args[1..]),
         Some("--version") | Some("-v") | Some("version") => {
             println!("git-ai {}", env!("CARGO_PKG_VERSION"));
         }
@@ -761,6 +973,7 @@ fn main() {
             println!("  install       Install git hooks for automatic attribution");
             println!("  status        Show uncommitted attribution status");
             println!("  stats         Show commit attribution stats");
+            println!("  bg            Daemon lifecycle (run, start, stop, status)");
         }
         Some(cmd) => {
             eprintln!("git-ai: unknown command '{}'", cmd);
