@@ -4,9 +4,9 @@
 
 - Platform: Linux 6.12.86+deb13-cloud-arm64 (aarch64)
 - Git: 2.47.3
-- v1: 1.4.6 (92 MB binary, daemon architecture)
-- v2: 2.0.0-alpha.1 (2.4 MB binary, daemon + sync fallback)
-- Methodology: median of 20-50 runs per operation, fresh repo per test
+- v1: 1.4.6 (92 MB binary, git proxy architecture)
+- v2: 2.0.0-alpha.1 (2.4 MB binary, trace2 daemon + sync fallback)
+- Methodology: median of 20 runs per operation, fresh repo per test, release builds
 
 ## Checkpoint
 
@@ -44,19 +44,22 @@ v2 wins on blame due to its 38x smaller binary (faster cold start), leaner initi
 
 ## Binary size and startup
 
-| Metric | v1 | v2 |
-|--------|----|----|
-| Binary size | 92 MB | 2.4 MB |
-| Startup (`--version`) | 2ms | 1ms |
+| Metric | v1 | v2 | Improvement |
+|--------|----|----|-------------|
+| Binary size | 92 MB | 2.4 MB | 38x smaller |
+| Startup (`--version`) | 2ms | 1ms | 2x |
+| Clean build time | 63s | 8s | 8x faster |
 
 ## Summary
 
-| Operation | Winner | Margin |
-|-----------|--------|--------|
-| Checkpoint | Tie | v1 2ms, v2 3ms |
-| Post-commit (daemon) | v2 | 1ms vs 2ms |
-| Post-commit (sync) | Tie | v1 2ms, v2 3ms |
-| Blame | v2 | 4x faster |
-| Binary size | v2 | 38x smaller |
+| Operation | Winner | v1 | v2 |
+|-----------|--------|----|----|
+| Checkpoint | Tie | 2ms | 3ms |
+| Post-commit (daemon) | v2 | 2ms | 1ms |
+| Post-commit (sync) | Tie | 2ms | 3ms |
+| Blame (100 lines) | v2 | 22ms | 6ms |
+| Blame (1000 lines) | v2 | 64ms | 16ms |
+| Binary size | v2 | 92 MB | 2.4 MB |
+| Build time | v2 | 63s | 8s |
 
-v2 matches or beats v1 on every path. The daemon-skip marker mechanism means the typical post-commit path (daemon running) is faster than v1. The sync fallback adds only 1ms over v1 due to two git subprocess spawns. v2 dominates the read path (blame) where its smaller binary and leaner runtime pay off.
+v2 matches or beats v1 on every path. The daemon-skip marker mechanism means the typical post-commit path (daemon running) is faster than v1. v2 dominates the read path (blame) where its smaller binary and leaner runtime pay off.
