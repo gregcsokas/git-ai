@@ -125,10 +125,24 @@ pub fn process_checkpoint(req: &CheckpointRequest) -> Result<u32, String> {
             None
         };
 
+        let trace_value = if kind == CheckpointKind::AiAgent {
+            Some(format!(
+                "trace-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ))
+        } else {
+            None
+        };
+
         let author_id = match &kind {
             CheckpointKind::AiAgent => {
                 let aid = checkpoint_agent_id.as_ref().unwrap();
-                authorship_log::generate_session_id(&aid.tool, &aid.id)
+                let session_id = authorship_log::generate_session_id(&aid.tool, &aid.id);
+                let trace_hash = authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
+                format!("{}::{}", session_id, trace_hash)
             }
             CheckpointKind::KnownHuman => {
                 authorship_log::generate_human_hash(known_human_identity.as_deref().unwrap())
@@ -168,15 +182,7 @@ pub fn process_checkpoint(req: &CheckpointRequest) -> Result<u32, String> {
 
         let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
         checkpoint.agent_id = checkpoint_agent_id;
-        if kind == CheckpointKind::AiAgent {
-            checkpoint.trace_id = Some(format!(
-                "trace-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-            ));
-        }
+        checkpoint.trace_id = trace_value;
 
         working_log::append_checkpoint(&git_dir, &base_commit, &checkpoint);
         processed += 1;

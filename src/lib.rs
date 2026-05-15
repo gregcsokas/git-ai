@@ -10,7 +10,9 @@ pub mod transcripts;
 
 pub mod authorship {
     pub mod authorship_log_serialization {
-        pub use crate::core::authorship_log::AuthorshipLog;
+        pub use crate::core::authorship_log::{
+            AttestationEntry, AuthorshipLog, FileAttestation, generate_short_hash,
+        };
     }
     pub mod authorship_log {
         pub use crate::core::authorship_log::{
@@ -21,6 +23,47 @@ pub mod authorship {
     }
     pub mod working_log {
         pub use crate::core::working_log::{AgentId, Checkpoint, CheckpointKind};
+    }
+    pub mod stats {
+        pub use crate::metrics::cache::{CommitStats, FileStats, StatsCache};
+    }
+    pub mod attribution_tracker {
+        pub use crate::core::attribution::LineAttribution;
+    }
+}
+
+pub mod error {
+    pub type GitAiError = String;
+}
+
+pub mod commands {
+    pub mod checkpoint_agent {
+        pub mod presets {
+            pub use crate::presets::{ParsedHookEvent, PresetContext};
+            pub use crate::presets::{
+                KnownHumanEdit, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit, UntrackedEdit,
+            };
+
+            pub struct ResolvedPreset {
+                agent_name: String,
+            }
+
+            impl ResolvedPreset {
+                pub fn parse(
+                    &self,
+                    hook_input: &str,
+                    _session_hint: &str,
+                ) -> Result<Vec<ParsedHookEvent>, String> {
+                    crate::presets::parse_hook_input(&self.agent_name, hook_input)
+                }
+            }
+
+            pub fn resolve_preset(name: &str) -> Result<ResolvedPreset, String> {
+                Ok(ResolvedPreset {
+                    agent_name: name.to_string(),
+                })
+            }
+        }
     }
 }
 

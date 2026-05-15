@@ -147,7 +147,7 @@ fn test_pre_commit_checkpoint_context_uses_inflight_bash_agent_context() {
             .custom_attributes
             .as_ref()
             .and_then(|m| m.get("transcript_path"))
-            .map(String::as_str),
+            .and_then(|v| v.as_str()),
         Some(transcript_path.to_string_lossy().as_ref()),
         "transcript_path metadata should flow through from the codex preset"
     );

@@ -333,6 +333,13 @@ pub fn generate_session_id(tool: &str, id: &str) -> String {
     format!("s_{}", &format!("{:x}", digest)[..14])
 }
 
+/// Generate a trace hash: "t_" + SHA256(trace_value)[0..14].
+/// Combined with session_id as "s_<session>::t_<trace>" for attestation entries.
+pub fn generate_trace_hash(trace_value: &str) -> String {
+    let digest = Sha256::digest(trace_value.as_bytes());
+    format!("t_{}", &format!("{:x}", digest)[..14])
+}
+
 /// Generate a human hash: "h_" + SHA256(author)[0..14] = 16 chars total.
 /// Used as the key in `metadata.humans`.
 pub fn generate_human_hash(author: &str) -> String {

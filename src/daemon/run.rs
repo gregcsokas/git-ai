@@ -365,3 +365,67 @@ fn query_live_stats(control_sock: &std::path::Path) -> Option<String> {
         .and_then(|s| s.as_str())
         .map(|s| s.to_string())
 }
+
+/// Ensure the daemon is running, spawning it in the background if needed.
+/// Blocks until the daemon is ready (PID file with live process), up to a timeout.
+pub fn ensure_daemon_running() {
+    if std::env::var("GIT_AI_NO_DAEMON").as_deref() == Ok("1") {
+        return;
+    }
+
+    let paths = DaemonPaths::resolve();
+
+    if is_daemon_alive(&paths) {
+        return;
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    // Use "bg run" (foreground mode) since we already handle detachment via
+    // spawn() on Unix and creation_flags on Windows.
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        let _ = Command::new(&exe)
+            .args(["bg", "run"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
+        const DETACHED_PROCESS_FLAG: u32 = 0x00000008;
+        let _ = Command::new(&exe)
+            .args(["bg", "run"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW_FLAG | DETACHED_PROCESS_FLAG)
+            .spawn();
+    }
+
+    // Wait for the daemon to be ready (up to 5 seconds)
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if is_daemon_alive(&paths) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn is_daemon_alive(paths: &DaemonPaths) -> bool {
+    if let Some(info) = read_pid_file(&paths.pid_file) {
+        lifecycle::is_process_alive(info.pid)
+    } else {
+        false
+    }
+}

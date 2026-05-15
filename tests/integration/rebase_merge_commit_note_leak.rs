@@ -186,10 +186,12 @@ fn test_pull_rebase_onto_branch_with_merge_commits_does_not_note_merge_commits()
     );
 }
 
-/// Simulates the daemon fallback path where onto_head == merge_base.
-/// Calls build_rebase_commit_mappings directly with Some(merge_base) to verify
-/// merge commits on the target branch are excluded from new_commits.
-/// Strict per-line blame assertions on all files.
+// The following tests call v1 internal APIs (build_rebase_commit_mappings)
+// that do not exist in v2. The E2E behavior is covered by the tests above.
+#[cfg(feature = "__v1_internals")]
+mod v1_internal_tests {
+use super::*;
+
 #[test]
 fn test_rebase_with_onto_equals_merge_base_does_not_note_merge_commits() {
     let repo = TestRepo::new();
@@ -583,10 +585,9 @@ fn test_rebase_onto_multiple_merge_commits_with_onto_equals_merge_base() {
     );
 }
 
+} // mod v1_internal_tests
+
 crate::reuse_tests_in_worktree!(
     test_rebase_onto_branch_with_merge_commits_does_not_note_merge_commits,
     test_pull_rebase_onto_branch_with_merge_commits_does_not_note_merge_commits,
-    test_rebase_with_onto_equals_merge_base_does_not_note_merge_commits,
-    test_rebase_multi_commit_with_onto_equals_merge_base_preserves_all_blame,
-    test_rebase_onto_multiple_merge_commits_with_onto_equals_merge_base,
 );

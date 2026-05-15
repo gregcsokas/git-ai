@@ -164,7 +164,6 @@ pub fn acquire_lock(path: &Path) -> Result<File, Error> {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use std::ptr;
         let handle = file.as_raw_handle();
         let mut overlapped: WinapiOverlapped = unsafe { std::mem::zeroed() };
         let ret = unsafe {
@@ -199,7 +198,7 @@ const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x00000002;
 #[cfg(windows)]
 const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x00000001;
 #[cfg(windows)]
-extern "system" {
+unsafe extern "system" {
     fn LockFileEx(
         hFile: *mut std::ffi::c_void,
         dwFlags: u32,
@@ -359,7 +358,7 @@ struct PROCESS_INFORMATION {
 }
 
 #[cfg(windows)]
-extern "system" {
+unsafe extern "system" {
     fn CreateProcessW(
         lpApplicationName: *const u16,
         lpCommandLine: *mut u16,
@@ -484,7 +483,7 @@ const CTRL_C_EVENT: u32 = 0;
 const CTRL_CLOSE_EVENT: u32 = 2;
 
 #[cfg(windows)]
-extern "system" {
+unsafe extern "system" {
     fn SetConsoleCtrlHandler(
         HandlerRoutine: Option<unsafe extern "system" fn(u32) -> i32>,
         Add: i32,

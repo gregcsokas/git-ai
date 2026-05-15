@@ -161,7 +161,10 @@ mod tests {
 
         // Create a symlink to it
         let link = dir.path().join("link");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&real_repo, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real_repo, &link).unwrap();
 
         let mut resolver = RepoPathResolver::new();
         let from_real = resolver.resolve(&real_repo);

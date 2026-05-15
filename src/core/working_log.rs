@@ -26,7 +26,7 @@ const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x00000002;
 const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x00000001;
 
 #[cfg(windows)]
-extern "system" {
+unsafe extern "system" {
     fn LockFileEx(
         hFile: *mut std::ffi::c_void,
         dwFlags: u32,
@@ -236,7 +236,7 @@ fn lock_working_log(repo_git_dir: &Path, base_commit: &str) -> Option<fs::File> 
     let ret = unsafe {
         LockFileEx(
             handle as _,
-            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            LOCKFILE_EXCLUSIVE_LOCK,
             0,
             1,
             0,

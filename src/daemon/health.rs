@@ -7,6 +7,7 @@
 use std::fmt;
 use std::path::Path;
 
+#[cfg(unix)]
 use super::control_client;
 use super::lifecycle::{DaemonPaths, is_process_alive, read_pid_file};
 

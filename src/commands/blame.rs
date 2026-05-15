@@ -290,10 +290,11 @@ pub fn resolve_line_author_with_prompt(
                 if entry.hash.starts_with("h_") {
                     return (git_author.to_string(), None);
                 }
-                if entry.hash.starts_with("s_")
-                    && let Some(session) = authorship_log.metadata.sessions.get(&entry.hash)
-                {
-                    return (session.agent_id.tool.clone(), Some(entry.hash.clone()));
+                if entry.hash.starts_with("s_") {
+                    let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                    if let Some(session) = authorship_log.metadata.sessions.get(session_key) {
+                        return (session.agent_id.tool.clone(), Some(entry.hash.clone()));
+                    }
                 }
             }
         }

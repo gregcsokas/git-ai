@@ -26,6 +26,12 @@ type CheckpointEventData = (
 
 /// Try to route the checkpoint through the daemon's control socket.
 /// Returns true if the daemon handled it, false if we need to fall back to local processing.
+#[cfg(not(unix))]
+fn try_checkpoint_via_daemon(_args: &[String]) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn try_checkpoint_via_daemon(args: &[String]) -> bool {
     // Don't route to daemon if explicitly disabled
     if env::var("GIT_AI_NO_DAEMON").as_deref() == Ok("1") {
@@ -209,6 +215,8 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
 }
 
 pub fn handle_checkpoint(args: &[String]) {
+    git_ai::daemon::run::ensure_daemon_running();
+
     // Try routing through the daemon's control socket for lower latency
     if try_checkpoint_via_daemon(args) {
         return;
@@ -500,10 +508,24 @@ fn process_checkpoint_file(
         None
     };
 
+    let trace_value = if kind == CheckpointKind::AiAgent {
+        Some(format!(
+            "trace-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ))
+    } else {
+        None
+    };
+
     let author_id = match &kind {
         CheckpointKind::AiAgent => {
             let aid = checkpoint_agent_id.as_ref().unwrap();
-            git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id)
+            let session_id = git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
+            let trace_hash = git_ai::core::authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
+            format!("{}::{}", session_id, trace_hash)
         }
         CheckpointKind::KnownHuman => git_ai::core::authorship_log::generate_human_hash(
             known_human_identity.as_deref().unwrap(),
@@ -536,15 +558,7 @@ fn process_checkpoint_file(
 
     let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
     checkpoint.agent_id = checkpoint_agent_id.clone();
-    if kind == CheckpointKind::AiAgent {
-        checkpoint.trace_id = Some(format!(
-            "trace-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-    }
+    checkpoint.trace_id = trace_value;
 
     git_ai::core::working_log::append_checkpoint(git_dir, base_commit, &checkpoint);
     1
@@ -807,9 +821,23 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                         None
                     };
 
+                    let trace_value = if kind == CheckpointKind::AiAgent {
+                        Some(format!(
+                            "trace-{}",
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_nanos())
+                                .unwrap_or(0)
+                        ))
+                    } else {
+                        None
+                    };
+
                     let author_id = match (&kind, &agent_id) {
                         (CheckpointKind::AiAgent, Some(aid)) => {
-                            git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id)
+                            let session_id = git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
+                            let trace_hash = git_ai::core::authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
+                            format!("{}::{}", session_id, trace_hash)
                         }
                         (CheckpointKind::KnownHuman, _) => {
                             git_ai::core::authorship_log::generate_human_hash(
@@ -848,15 +876,7 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
 
                     let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
                     checkpoint.agent_id = agent_id.clone();
-                    if kind == CheckpointKind::AiAgent {
-                        checkpoint.trace_id = Some(format!(
-                            "trace-{}",
-                            SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_nanos())
-                                .unwrap_or(0)
-                        ));
-                    }
+                    checkpoint.trace_id = trace_value;
 
                     git_ai::core::working_log::append_checkpoint(
                         &git_dir,
@@ -973,9 +993,23 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                     None
                 };
 
+                let trace_value = if kind == CheckpointKind::AiAgent {
+                    Some(format!(
+                        "trace-{}",
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0)
+                    ))
+                } else {
+                    None
+                };
+
                 let author_id = match (&kind, &agent_id) {
                     (CheckpointKind::AiAgent, Some(aid)) => {
-                        git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id)
+                        let session_id = git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
+                        let trace_hash = git_ai::core::authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
+                        format!("{}::{}", session_id, trace_hash)
                     }
                     (CheckpointKind::KnownHuman, _) => {
                         git_ai::core::authorship_log::generate_human_hash(
@@ -1014,15 +1048,7 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
 
                 let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
                 checkpoint.agent_id = agent_id.clone();
-                if kind == CheckpointKind::AiAgent {
-                    checkpoint.trace_id = Some(format!(
-                        "trace-{}",
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map(|d| d.as_nanos())
-                            .unwrap_or(0)
-                    ));
-                }
+                checkpoint.trace_id = trace_value;
 
                 git_ai::core::working_log::append_checkpoint(&git_dir, &base_commit, &checkpoint);
                 processed += 1;

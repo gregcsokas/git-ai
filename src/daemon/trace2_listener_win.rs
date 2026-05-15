@@ -86,6 +86,10 @@ mod imp {
     type DWORD = u32;
     type LPDWORD = *mut u32;
 
+    // SAFETY: Pipe handles are owned by a single thread at a time.
+    struct SendHandle(HANDLE);
+    unsafe impl Send for SendHandle {}
+
     #[repr(C)]
     struct OVERLAPPED {
         internal: usize,
@@ -239,8 +243,9 @@ mod imp {
                             .fetch_add(1, Ordering::Relaxed);
                         let tx = event_tx.clone();
                         let shutdown = Arc::clone(&self.shutdown);
+                        let handle = SendHandle(pipe_handle);
                         thread::spawn(move || {
-                            handle_pipe_connection(pipe_handle, tx, shutdown);
+                            handle_pipe_connection(handle, tx, shutdown);
                         });
                     }
                     Ok(false) => {
@@ -392,10 +397,11 @@ mod imp {
 
     /// Handle a single client pipe connection, reading trace2 JSON lines until EOF or shutdown.
     fn handle_pipe_connection(
-        pipe_handle: HANDLE,
+        handle: SendHandle,
         event_tx: Sender<Trace2Event>,
         shutdown: Arc<AtomicBool>,
     ) {
+        let pipe_handle = handle.0;
         let reader = PipeReader {
             handle: pipe_handle,
         };

@@ -143,10 +143,26 @@ fn find_real_git() -> &'static str {
             "/usr/local/bin/git",
             "/opt/homebrew/bin/git",
             "/bin/git",
+            r"C:\Program Files\Git\cmd\git.exe",
+            r"C:\Program Files (x86)\Git\cmd\git.exe",
         ];
         for c in candidates {
             if Path::new(c).is_file() {
                 return c.to_string();
+            }
+        }
+        if cfg!(windows) {
+            if let Ok(output) = std::process::Command::new("where")
+                .arg("git")
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let p = Path::new(line.trim());
+                    if p.is_file() && !p.to_string_lossy().contains(".git-ai") {
+                        return line.trim().to_string();
+                    }
+                }
             }
         }
         "git".to_string()
@@ -183,6 +199,24 @@ impl NewCommit {
     pub fn print_authorship(&self) {
         println!("{}", self.authorship_log.serialize_to_string());
     }
+}
+
+// ---------------------------------------------------------------------------
+// GitTestMode / DaemonTestScope — used by windows_install_script tests
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitTestMode {
+    Daemon,
+    WrapperDaemon,
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonTestScope {
+    NoDaemon,
+    WithDaemon,
+    Dedicated,
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +323,22 @@ impl TestRepo {
     /// Return the test DB path (sibling to the repo directory).
     pub fn test_db_path(&self) -> PathBuf {
         self._tempdir.path().join("test.db")
+    }
+
+    pub fn daemon_home_path(&self) -> PathBuf {
+        self._tempdir.path().join(".git-ai")
+    }
+
+    pub fn daemon_control_socket_path(&self) -> PathBuf {
+        self.daemon_home_path().join("control.sock")
+    }
+
+    pub fn daemon_trace_socket_path(&self) -> PathBuf {
+        self.daemon_home_path().join("trace.sock")
+    }
+
+    pub fn new_with_mode_and_daemon_scope(_mode: GitTestMode, _scope: DaemonTestScope) -> Self {
+        Self::new()
     }
 
     /// Read an authorship note from a specific git dir (e.g., a bare remote repo).
@@ -483,9 +533,9 @@ impl TestRepo {
             None
         };
 
-        // Detect commit --amend so we can run post-commit hook after
-        let is_amend =
-            args.first().map(|a| *a == "commit").unwrap_or(false) && args.contains(&"--amend");
+        // Detect commit commands so we can run post-commit hook after
+        let is_commit = args.first().map(|a| *a == "commit").unwrap_or(false);
+        let is_amend = is_commit && args.contains(&"--amend");
 
         // Before amend, capture current HEAD so we can migrate working logs
         let pre_amend_head = if is_amend {
@@ -604,6 +654,10 @@ impl TestRepo {
             // After a successful amend, migrate working logs and run post-commit
             if is_amend {
                 self.handle_post_amend(pre_amend_head.as_deref());
+            }
+            // After a successful regular commit, run post-commit to generate authorship note
+            if is_commit && !is_amend {
+                let _ = self.git_ai(&["post-commit"]);
             }
             // After checkout --merge, migrate working log from old HEAD to new HEAD
             if let Some(ref old_head) = pre_checkout_head {
@@ -2226,9 +2280,23 @@ impl TestRepo {
         }
     }
 
-    /// Alias kept for compatibility with tests that call git_og.
+    /// Raw git — no post-commit hook. Use this for test setup that
+    /// should not generate authorship notes.
     pub fn git_og(&self, args: &[&str]) -> Result<String, String> {
-        self.git(args)
+        let git = real_git_executable();
+        let output = Command::new(git)
+            .current_dir(&self.path)
+            .args(args)
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .unwrap_or_else(|_| panic!("Failed to execute git command: {:?}", args));
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if output.status.success() {
+            Ok(if stdout.is_empty() { stderr } else { stdout })
+        } else {
+            Err(format!("git {:?} failed: {}", args, stderr))
+        }
     }
 
     /// Stage all files and commit, then run post-commit to generate authorship.

@@ -1,7 +1,9 @@
 pub mod api_client;
 pub mod checkpoint_worker;
 pub mod commit_detector;
+#[cfg(unix)]
 pub mod control_client;
+#[cfg(unix)]
 pub mod control_socket;
 pub mod event_loop;
 pub mod health;

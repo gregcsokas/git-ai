@@ -586,11 +586,14 @@ pub fn handle_diff(args: &[String]) {
                                     serde_json::to_value(prompt).unwrap_or(serde_json::json!({})),
                                 );
                             }
-                            if let Some(session) = note.metadata.sessions.get(&entry.hash) {
-                                sessions_map.insert(
-                                    entry.hash.clone(),
-                                    serde_json::to_value(session).unwrap_or(serde_json::json!({})),
-                                );
+                            {
+                                let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                                if let Some(session) = note.metadata.sessions.get(session_key) {
+                                    sessions_map.insert(
+                                        session_key.to_string(),
+                                        serde_json::to_value(session).unwrap_or(serde_json::json!({})),
+                                    );
+                                }
                             }
                         }
                     }
@@ -742,7 +745,8 @@ fn compute_commit_stats(
                 || note.metadata.sessions.contains_key(&entry.hash)
             {
                 ai_lines_added += count;
-                if let Some(session) = note.metadata.sessions.get(&entry.hash) {
+                let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                if let Some(session) = note.metadata.sessions.get(session_key) {
                     let key = format!("{}::{}", session.agent_id.tool, session.agent_id.model);
                     let existing = tool_model_breakdown
                         .entry(key)

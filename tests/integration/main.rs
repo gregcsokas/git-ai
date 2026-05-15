@@ -65,6 +65,16 @@ mod subdirs;
 mod utf8_filenames;
 mod worktrees;
 
+// --- Batch 1: tests with minimal/no v1-internal imports ---
+mod checkpoint_perf;
+mod pi;
+mod post_commit_unit;
+mod pre_commit_unit;
+mod prompt_across_commit;
+mod rebase_merge_commit_note_leak;
+mod sessions_backwards_compat;
+mod stale_prompt_carry;
+
 #[cfg(unix)]
 mod daemon_e2e;
 #[cfg(unix)]

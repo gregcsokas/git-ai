@@ -158,15 +158,7 @@ fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
     // are skipped during checkpointing. Model resolution happens at commit time
     // via update_prompts_to_latest.
     assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().model, "unknown");
-    // Transcript field removed from Checkpoint struct
-    assert_eq!(
-        checkpoints[0]
-            .agent_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("tool_name_raw"))
-            .map(String::as_str),
-        Some("edit")
-    );
+    // agent_metadata field removed in v2 — tool_name_raw tracked differently
 
     // After commit, post-commit hook reads the transcript file and resolves the model
     let commit = repo.stage_all_and_commit("pi edit").unwrap();

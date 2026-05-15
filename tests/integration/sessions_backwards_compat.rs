@@ -83,7 +83,7 @@ fn test_old_format_note_roundtrips_without_adding_sessions() {
     let log =
         AuthorshipLog::deserialize_from_string(note).expect("should deserialize old format note");
 
-    let serialized = log.serialize_to_string().expect("should serialize note");
+    let serialized = log.serialize_to_string();
 
     // Assert re-serialized does NOT contain "sessions" key
     assert!(
@@ -306,7 +306,7 @@ fn test_old_session_with_messages_deserializes_without_them() {
     assert_eq!(session.agent_id.id, "test_agent");
 
     // Verify serialization does NOT include messages or messages_url
-    let serialized = log.serialize_to_string().expect("should serialize");
+    let serialized = log.serialize_to_string();
     assert!(
         !serialized.contains("\"messages\""),
         "re-serialized note should not contain messages field"
