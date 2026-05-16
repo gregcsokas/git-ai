@@ -193,4 +193,32 @@ mod tests {
         assert_eq!(meta.session_id, None);
         assert_eq!(meta.event_count, 0);
     }
+
+    #[test]
+    fn test_extract_model_in_request() {
+        let events = vec![json!({"request": {"model": "gemini-pro", "prompt": "test"}})];
+        assert_eq!(extract_model(&events), Some("gemini-pro".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_id_skips_empty_string() {
+        // An empty session_id should be skipped, falling through to subsequent events
+        let events = vec![
+            json!({"session_id": ""}),
+            json!({"session_id": "real-session"}),
+        ];
+        assert_eq!(
+            extract_session_id(&events),
+            Some("real-session".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_session_id_conversation_id_camel_case() {
+        let events = vec![json!({"conversationId": "conv-camel-456"})];
+        assert_eq!(
+            extract_session_id(&events),
+            Some("conv-camel-456".to_string())
+        );
+    }
 }

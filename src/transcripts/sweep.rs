@@ -305,4 +305,187 @@ mod tests {
         let (y, m, d) = days_to_ymd(19723);
         assert_eq!((y, m, d), (2024, 1, 1));
     }
+
+    #[test]
+    fn test_days_to_ymd_leap_year() {
+        // 2000-02-29 is day 11016 from epoch (2000 is a leap year)
+        let (y, m, d) = days_to_ymd(11016);
+        assert_eq!((y, m, d), (2000, 2, 29));
+    }
+
+    #[test]
+    fn test_days_to_ymd_end_of_year() {
+        // 2023-12-31 is 19722 days from epoch
+        let (y, m, d) = days_to_ymd(19722);
+        assert_eq!((y, m, d), (2023, 12, 31));
+    }
+
+    #[test]
+    fn test_days_to_ymd_day_one() {
+        // Day 1 from epoch is 1970-01-02
+        let (y, m, d) = days_to_ymd(1);
+        assert_eq!((y, m, d), (1970, 1, 2));
+    }
+
+    #[test]
+    fn test_now_iso8601_parses_components() {
+        let ts = now_iso8601();
+        // Year should be a reasonable value
+        let year: u32 = ts[0..4].parse().unwrap();
+        assert!((2024..=2100).contains(&year));
+
+        let month: u32 = ts[5..7].parse().unwrap();
+        assert!((1..=12).contains(&month));
+
+        let day: u32 = ts[8..10].parse().unwrap();
+        assert!((1..=31).contains(&day));
+
+        let hour: u32 = ts[11..13].parse().unwrap();
+        assert!(hour < 24);
+
+        let minute: u32 = ts[14..16].parse().unwrap();
+        assert!(minute < 60);
+
+        let second: u32 = ts[17..19].parse().unwrap();
+        assert!(second < 60);
+    }
+
+    #[test]
+    #[serial]
+    fn test_sweep_empty_session_dir_no_files() {
+        let tmp = TempDir::new().unwrap();
+        let git_dir = tmp.path().join("git_dir");
+        fs::create_dir_all(&git_dir).unwrap();
+
+        // Create the session directories but put no files in them
+        let home = tmp.path().join("home");
+        let session_dir = home.join(".claude/projects");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        unsafe { std::env::set_var("HOME", home.to_str().unwrap()) };
+
+        let updates = sweep_transcripts(&git_dir);
+        assert!(updates.is_empty());
+
+        unsafe { std::env::remove_var("HOME") };
+    }
+
+    #[test]
+    #[serial]
+    fn test_sweep_skips_invalid_json_lines() {
+        let tmp = TempDir::new().unwrap();
+        let git_dir = tmp.path().join("git_dir");
+        fs::create_dir_all(&git_dir).unwrap();
+
+        let home = tmp.path().join("home");
+        let session_dir = home.join(".codex/sessions");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let session_file = session_dir.join("bad_json.jsonl");
+        let mut f = fs::File::create(&session_file).unwrap();
+        writeln!(f, "this is not json").unwrap();
+        writeln!(f, r#"{{"id":1}}"#).unwrap();
+        writeln!(f, "{{{{invalid}}}}").unwrap();
+        writeln!(f, r#"{{"id":2}}"#).unwrap();
+        f.flush().unwrap();
+
+        unsafe { std::env::set_var("HOME", home.to_str().unwrap()) };
+
+        let updates = sweep_transcripts(&git_dir);
+        assert_eq!(updates.len(), 1);
+        // Only the valid JSON lines should be picked up
+        assert_eq!(updates[0].new_events.len(), 2);
+        assert_eq!(updates[0].new_events[0]["id"], 1);
+        assert_eq!(updates[0].new_events[1]["id"], 2);
+
+        unsafe { std::env::remove_var("HOME") };
+    }
+
+    #[test]
+    #[serial]
+    fn test_sweep_multiple_session_files() {
+        let tmp = TempDir::new().unwrap();
+        let git_dir = tmp.path().join("git_dir");
+        fs::create_dir_all(&git_dir).unwrap();
+
+        let home = tmp.path().join("home");
+        let session_dir = home.join(".codex/sessions");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        // Create two session files
+        let session1 = session_dir.join("session_a.jsonl");
+        let mut f = fs::File::create(&session1).unwrap();
+        writeln!(f, r#"{{"file":"a","id":1}}"#).unwrap();
+        f.flush().unwrap();
+
+        let session2 = session_dir.join("session_b.jsonl");
+        let mut f = fs::File::create(&session2).unwrap();
+        writeln!(f, r#"{{"file":"b","id":2}}"#).unwrap();
+        writeln!(f, r#"{{"file":"b","id":3}}"#).unwrap();
+        f.flush().unwrap();
+
+        unsafe { std::env::set_var("HOME", home.to_str().unwrap()) };
+
+        let updates = sweep_transcripts(&git_dir);
+        // Should have updates from both sessions
+        assert_eq!(updates.len(), 2);
+
+        let total_events: usize = updates.iter().map(|u| u.new_events.len()).sum();
+        assert_eq!(total_events, 3);
+
+        unsafe { std::env::remove_var("HOME") };
+    }
+
+    #[test]
+    fn test_read_session_jsonl_format() {
+        let tmp = TempDir::new().unwrap();
+        let session_file = tmp.path().join("test.jsonl");
+        let mut f = fs::File::create(&session_file).unwrap();
+        writeln!(f, r#"{{"msg":"hello"}}"#).unwrap();
+        writeln!(f, r#"{{"msg":"world"}}"#).unwrap();
+        f.flush().unwrap();
+
+        let config = AgentTranscriptConfig {
+            tool: "test",
+            format: TranscriptFormat::Jsonl,
+            discovery: DiscoveryStrategy::ScanDirs {
+                dirs: &[".test"],
+                extension: "jsonl",
+                recursive: false,
+            },
+        };
+
+        let (events, new_pos) = read_session(&config, &session_file, 0).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(new_pos > 0);
+
+        // Reading again from new position yields nothing
+        let (events2, _) = read_session(&config, &session_file, new_pos).unwrap();
+        assert!(events2.is_empty());
+    }
+
+    #[test]
+    fn test_read_session_json_array_format() {
+        let tmp = TempDir::new().unwrap();
+        let session_file = tmp.path().join("test.json");
+        fs::write(&session_file, r#"[{"a":1},{"a":2},{"a":3}]"#).unwrap();
+
+        let config = AgentTranscriptConfig {
+            tool: "test",
+            format: TranscriptFormat::JsonArray,
+            discovery: DiscoveryStrategy::ScanDirs {
+                dirs: &[".test"],
+                extension: "json",
+                recursive: false,
+            },
+        };
+
+        let (events, new_pos) = read_session(&config, &session_file, 0).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(new_pos, 3);
+
+        // Reading again from new position yields nothing
+        let (events2, _) = read_session(&config, &session_file, new_pos).unwrap();
+        assert!(events2.is_empty());
+    }
 }

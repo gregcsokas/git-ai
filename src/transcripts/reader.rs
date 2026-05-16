@@ -307,4 +307,189 @@ mod tests {
         let batch = read_json_array_incremental(f.path(), 0, 100).unwrap();
         assert_eq!(batch.events.len(), 1);
     }
+
+    #[test]
+    fn test_jsonl_empty_file() {
+        let f = NamedTempFile::new().unwrap();
+        // File is empty — should return zero events and offset 0
+        let batch = read_jsonl_incremental(f.path(), 0, 100).unwrap();
+        assert!(batch.events.is_empty());
+        assert_eq!(batch.new_position, 0);
+    }
+
+    #[test]
+    fn test_jsonl_seek_beyond_file_size() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"id":1}}"#).unwrap();
+        f.flush().unwrap();
+
+        // Seek to a position well beyond file size — should return no events
+        let batch = read_jsonl_incremental(f.path(), 99999, 100).unwrap();
+        assert!(batch.events.is_empty());
+        assert_eq!(batch.new_position, 99999);
+    }
+
+    #[test]
+    fn test_jsonl_only_malformed_lines() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "not json at all").unwrap();
+        writeln!(f, "{{{{broken").unwrap();
+        writeln!(f, "still not valid}}}}").unwrap();
+        f.flush().unwrap();
+
+        let batch = read_jsonl_incremental(f.path(), 0, 100).unwrap();
+        assert!(batch.events.is_empty());
+        // Position should still advance past the malformed lines
+        assert!(batch.new_position > 0);
+    }
+
+    #[test]
+    fn test_jsonl_only_whitespace_lines() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "   ").unwrap();
+        writeln!(f, "\t").unwrap();
+        f.flush().unwrap();
+
+        let batch = read_jsonl_incremental(f.path(), 0, 100).unwrap();
+        assert!(batch.events.is_empty());
+        assert!(batch.new_position > 0);
+    }
+
+    #[test]
+    fn test_jsonl_batch_size_one() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"id":0}}"#).unwrap();
+        writeln!(f, r#"{{"id":1}}"#).unwrap();
+        writeln!(f, r#"{{"id":2}}"#).unwrap();
+        f.flush().unwrap();
+
+        // batch_size=1 should return exactly one event per call
+        let batch1 = read_jsonl_incremental(f.path(), 0, 1).unwrap();
+        assert_eq!(batch1.events.len(), 1);
+        assert_eq!(batch1.events[0]["id"], 0);
+
+        let batch2 = read_jsonl_incremental(f.path(), batch1.new_position, 1).unwrap();
+        assert_eq!(batch2.events.len(), 1);
+        assert_eq!(batch2.events[0]["id"], 1);
+
+        let batch3 = read_jsonl_incremental(f.path(), batch2.new_position, 1).unwrap();
+        assert_eq!(batch3.events.len(), 1);
+        assert_eq!(batch3.events[0]["id"], 2);
+
+        let batch4 = read_jsonl_incremental(f.path(), batch3.new_position, 1).unwrap();
+        assert!(batch4.events.is_empty());
+    }
+
+    #[test]
+    fn test_json_array_empty_array() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "[]").unwrap();
+        f.flush().unwrap();
+
+        let batch = read_json_array_incremental(f.path(), 0, 100).unwrap();
+        assert!(batch.events.is_empty());
+        assert_eq!(batch.new_position, 0);
+    }
+
+    #[test]
+    fn test_json_array_file_not_found() {
+        let result = read_json_array_incremental(Path::new("/nonexistent/file.json"), 0, 10);
+        assert!(matches!(result, Err(TranscriptError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_json_array_invalid_json() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "this is not json at all").unwrap();
+        f.flush().unwrap();
+
+        let result = read_json_array_incremental(f.path(), 0, 100);
+        assert!(matches!(result, Err(TranscriptError::Parse { .. })));
+    }
+
+    #[test]
+    fn test_json_array_object_without_known_keys() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, r#"{{"unknownKey": [1, 2, 3]}}"#).unwrap();
+        f.flush().unwrap();
+
+        let result = read_json_array_incremental(f.path(), 0, 100);
+        assert!(matches!(result, Err(TranscriptError::Parse { .. })));
+    }
+
+    #[test]
+    fn test_json_array_with_events_key() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, r#"{{"events":[{{"type":"msg"}},{{"type":"tool"}}]}}"#).unwrap();
+        f.flush().unwrap();
+
+        let batch = read_json_array_incremental(f.path(), 0, 100).unwrap();
+        assert_eq!(batch.events.len(), 2);
+        assert_eq!(batch.events[0]["type"], "msg");
+        assert_eq!(batch.events[1]["type"], "tool");
+    }
+
+    #[test]
+    fn test_json_array_with_history_key() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"{{"history":[{{"step":1}},{{"step":2}},{{"step":3}}]}}"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let batch = read_json_array_incremental(f.path(), 0, 100).unwrap();
+        assert_eq!(batch.events.len(), 3);
+        assert_eq!(batch.events[2]["step"], 3);
+    }
+
+    #[test]
+    fn test_json_array_record_index_beyond_array() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, r#"[{{"id":0}},{{"id":1}}]"#).unwrap();
+        f.flush().unwrap();
+
+        // Skip past all records
+        let batch = read_json_array_incremental(f.path(), 100, 100).unwrap();
+        assert!(batch.events.is_empty());
+        assert_eq!(batch.new_position, 100);
+    }
+
+    #[test]
+    fn test_json_array_batch_size_limits_output() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"[{{"id":0}},{{"id":1}},{{"id":2}},{{"id":3}},{{"id":4}}]"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let batch = read_json_array_incremental(f.path(), 0, 3).unwrap();
+        assert_eq!(batch.events.len(), 3);
+        assert_eq!(batch.new_position, 3);
+        assert_eq!(batch.events[0]["id"], 0);
+        assert_eq!(batch.events[2]["id"], 2);
+    }
+
+    #[test]
+    fn test_jsonl_mixed_valid_invalid_and_empty() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"id":1}}"#).unwrap();
+        writeln!(f).unwrap(); // empty
+        writeln!(f, "broken json").unwrap(); // malformed
+        writeln!(f, "   ").unwrap(); // whitespace-only
+        writeln!(f, r#"{{"id":2}}"#).unwrap();
+        writeln!(f, "{{not: valid}}").unwrap(); // malformed
+        writeln!(f, r#"{{"id":3}}"#).unwrap();
+        f.flush().unwrap();
+
+        let batch = read_jsonl_incremental(f.path(), 0, 100).unwrap();
+        assert_eq!(batch.events.len(), 3);
+        assert_eq!(batch.events[0]["id"], 1);
+        assert_eq!(batch.events[1]["id"], 2);
+        assert_eq!(batch.events[2]["id"], 3);
+    }
 }

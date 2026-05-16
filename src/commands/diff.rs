@@ -788,3 +788,277 @@ fn compute_commit_stats(
         "tool_model_breakdown": tool_model_breakdown,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // glob_matches tests
+    // =========================================================================
+
+    #[test]
+    fn glob_star_matches_chars_except_slash() {
+        assert!(glob_matches("*.lock", "Cargo.lock"));
+        assert!(glob_matches("*.lock", "package.lock"));
+        assert!(!glob_matches("*.lock", "dir/Cargo.lock"));
+    }
+
+    #[test]
+    fn glob_double_star_matches_path_separators() {
+        assert!(glob_matches("**/vendor/**", "some/vendor/file.js"));
+        assert!(glob_matches("**/vendor/**", "a/b/vendor/c/d"));
+        assert!(glob_matches(
+            "**/node_modules/**",
+            "project/node_modules/pkg/index.js"
+        ));
+    }
+
+    #[test]
+    fn glob_question_mark_matches_single_non_slash_char() {
+        assert!(glob_matches("?.txt", "a.txt"));
+        assert!(!glob_matches("?.txt", "ab.txt"));
+        assert!(!glob_matches("?.txt", "/a.txt"));
+    }
+
+    #[test]
+    fn glob_exact_match() {
+        assert!(glob_matches("Cargo.lock", "Cargo.lock"));
+        assert!(!glob_matches("Cargo.lock", "cargo.lock"));
+        assert!(!glob_matches("Cargo.lock", "Cargo.lock.bak"));
+    }
+
+    #[test]
+    fn glob_no_match_cases() {
+        assert!(!glob_matches("*.rs", "file.txt"));
+        assert!(!glob_matches("src/*.rs", "test/main.rs"));
+        assert!(!glob_matches("foo", "bar"));
+    }
+
+    #[test]
+    fn glob_empty_pattern_and_text() {
+        assert!(glob_matches("", ""));
+        assert!(!glob_matches("", "something"));
+        assert!(!glob_matches("something", ""));
+    }
+
+    #[test]
+    fn glob_star_at_end() {
+        assert!(glob_matches("src/*", "src/main.rs"));
+        assert!(!glob_matches("src/*", "src/sub/main.rs"));
+    }
+
+    #[test]
+    fn glob_double_star_at_end() {
+        assert!(glob_matches("src/**", "src/main.rs"));
+        assert!(glob_matches("src/**", "src/sub/main.rs"));
+    }
+
+    // =========================================================================
+    // should_ignore_file tests
+    // =========================================================================
+
+    #[test]
+    fn should_ignore_file_matches_full_path() {
+        let patterns = vec!["**/vendor/**".to_string()];
+        assert!(should_ignore_file("some/vendor/lib.js", &patterns));
+    }
+
+    #[test]
+    fn should_ignore_file_matches_filename_only() {
+        let patterns = vec!["*.lock".to_string()];
+        // The full path contains a directory, but the filename "Cargo.lock" matches "*.lock"
+        assert!(should_ignore_file("some/dir/Cargo.lock", &patterns));
+    }
+
+    #[test]
+    fn should_ignore_file_returns_false_when_no_match() {
+        let patterns = vec!["*.lock".to_string(), "**/vendor/**".to_string()];
+        assert!(!should_ignore_file("src/main.rs", &patterns));
+    }
+
+    #[test]
+    fn should_ignore_file_empty_patterns() {
+        let patterns: Vec<String> = vec![];
+        assert!(!should_ignore_file("anything.rs", &patterns));
+    }
+
+    // =========================================================================
+    // parse_diff_git_header tests
+    // =========================================================================
+
+    #[test]
+    fn parse_diff_git_header_normal_case() {
+        let result = parse_diff_git_header("diff --git a/src/foo.rs b/src/foo.rs");
+        assert_eq!(
+            result,
+            Some(("src/foo.rs".to_string(), "src/foo.rs".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_diff_git_header_rename() {
+        let result = parse_diff_git_header("diff --git a/old.rs b/new.rs");
+        assert_eq!(result, Some(("old.rs".to_string(), "new.rs".to_string())));
+    }
+
+    #[test]
+    fn parse_diff_git_header_nested_paths() {
+        let result =
+            parse_diff_git_header("diff --git a/src/commands/diff.rs b/src/commands/diff.rs");
+        assert_eq!(
+            result,
+            Some((
+                "src/commands/diff.rs".to_string(),
+                "src/commands/diff.rs".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_diff_git_header_invalid_input() {
+        assert_eq!(parse_diff_git_header("not a diff header"), None);
+        assert_eq!(parse_diff_git_header("diff --git a/foo"), None);
+        assert_eq!(parse_diff_git_header(""), None);
+    }
+
+    // =========================================================================
+    // parse_hunk_header_start tests
+    // =========================================================================
+
+    #[test]
+    fn parse_hunk_header_start_basic() {
+        assert_eq!(parse_hunk_header_start("@@ -1,5 +3,7 @@"), Some(3));
+    }
+
+    #[test]
+    fn parse_hunk_header_start_single_line() {
+        assert_eq!(parse_hunk_header_start("@@ -0,0 +1 @@"), Some(1));
+    }
+
+    #[test]
+    fn parse_hunk_header_start_with_function_context() {
+        assert_eq!(
+            parse_hunk_header_start("@@ -10 +20,5 @@ fn foo()"),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn parse_hunk_header_start_large_numbers() {
+        assert_eq!(parse_hunk_header_start("@@ -100,50 +200,60 @@"), Some(200));
+    }
+
+    #[test]
+    fn parse_hunk_header_start_invalid_input() {
+        assert_eq!(parse_hunk_header_start("not a hunk header"), None);
+        assert_eq!(parse_hunk_header_start(""), None);
+        assert_eq!(parse_hunk_header_start("--- a/file.rs"), None);
+    }
+
+    // =========================================================================
+    // split_diff_into_sections tests
+    // =========================================================================
+
+    #[test]
+    fn split_diff_single_file() {
+        let diff = "\
+diff --git a/src/main.rs b/src/main.rs
+index abc1234..def5678 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,4 @@
+ fn main() {
++    println!(\"hello\");
+ }
+";
+        let sections = split_diff_into_sections(diff);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0, "src/main.rs");
+    }
+
+    #[test]
+    fn split_diff_multiple_files() {
+        let diff = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,2 +1,3 @@
+ line1
++line2
+diff --git a/src/b.rs b/src/b.rs
+--- a/src/b.rs
++++ b/src/b.rs
+@@ -1,2 +1,3 @@
+ foo
++bar
+";
+        let sections = split_diff_into_sections(diff);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].0, "src/a.rs");
+        assert_eq!(sections[1].0, "src/b.rs");
+    }
+
+    #[test]
+    fn split_diff_filters_binary_sections() {
+        let diff = "\
+diff --git a/image.png b/image.png
+Binary files a/image.png and b/image.png differ
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,2 +1,3 @@
+ fn main() {}
++// comment
+";
+        let sections = split_diff_into_sections(diff);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0, "src/main.rs");
+    }
+
+    #[test]
+    fn split_diff_empty_input() {
+        let sections = split_diff_into_sections("");
+        assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn split_diff_detects_new_file_path_from_plus_plus_b() {
+        let diff = "\
+diff --git a/old_name.rs b/new_name.rs
+similarity index 90%
+rename from old_name.rs
+rename to new_name.rs
+--- a/old_name.rs
++++ b/new_name.rs
+@@ -1,2 +1,3 @@
+ fn foo() {}
++fn bar() {}
+";
+        let sections = split_diff_into_sections(diff);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0, "new_name.rs");
+    }
+
+    // =========================================================================
+    // is_binary_diff_section tests
+    // =========================================================================
+
+    #[test]
+    fn is_binary_diff_section_true() {
+        let section =
+            "diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n";
+        assert!(is_binary_diff_section(section));
+    }
+
+    #[test]
+    fn is_binary_diff_section_false() {
+        let section = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,2 @@\n+hello\n";
+        assert!(!is_binary_diff_section(section));
+    }
+
+    #[test]
+    fn is_binary_diff_section_empty() {
+        assert!(!is_binary_diff_section(""));
+    }
+}

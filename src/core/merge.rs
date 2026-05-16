@@ -588,4 +588,258 @@ mod tests {
         assert!(result.prompts.contains_key("abc123"));
         assert!(result.humans.contains_key("h_def456"));
     }
+
+    // ------------------------------------------------------------------
+    // Additional tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_line_mapping_forward_deletions() {
+        // Parent has "b" which is deleted in merge
+        let parent = vec!["a", "b", "c", "d"];
+        let merge = vec!["a", "c", "d"];
+
+        let mapping = compute_line_mapping_forward(&parent, &merge);
+
+        // parent[0]="a" -> merge[0]="a"
+        assert_eq!(mapping.get(&0), Some(&0));
+        // parent[1]="b" is deleted, should not be in mapping
+        assert_eq!(mapping.get(&1), None);
+        // parent[2]="c" -> merge[1]="c"
+        assert_eq!(mapping.get(&2), Some(&1));
+        // parent[3]="d" -> merge[2]="d"
+        assert_eq!(mapping.get(&3), Some(&2));
+    }
+
+    #[test]
+    fn test_compute_line_mapping_forward_reordering() {
+        // Parent: a, b, c — Merge: c, a, b
+        // LCS of [a,b,c] and [c,a,b] — the longest common subsequence is length 2.
+        // Possible LCS: [a,b] (positions 0,1 in parent map to 1,2 in merge)
+        let parent = vec!["a", "b", "c"];
+        let merge = vec!["c", "a", "b"];
+
+        let mapping = compute_line_mapping_forward(&parent, &merge);
+
+        // The LCS should be "a","b" mapping parent[0]->merge[1], parent[1]->merge[2]
+        assert_eq!(mapping.get(&0), Some(&1));
+        assert_eq!(mapping.get(&1), Some(&2));
+        // "c" at parent[2] cannot be part of this LCS since it would need to be before a,b
+        assert_eq!(mapping.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_line_mapping_forward_duplicates() {
+        // Parent: a, a, b — Merge: a, b, a
+        let parent = vec!["a", "a", "b"];
+        let merge = vec!["a", "b", "a"];
+
+        let mapping = compute_line_mapping_forward(&parent, &merge);
+
+        // LCS length should be at least 2 (e.g. "a","b" or "a","a")
+        assert!(mapping.len() >= 2);
+        // All mapped indices in parent and merge should be valid
+        for (&p_idx, &m_idx) in mapping.iter() {
+            assert!(p_idx < parent.len());
+            assert!(m_idx < merge.len());
+            assert_eq!(parent[p_idx], merge[m_idx]);
+        }
+    }
+
+    #[test]
+    fn test_compute_line_mapping_forward_large_identical() {
+        // 10 identical lines — all should map 1:1
+        let lines: Vec<&str> = vec![
+            "line0", "line1", "line2", "line3", "line4", "line5", "line6", "line7", "line8",
+            "line9",
+        ];
+        let parent = lines.clone();
+        let merge = lines.clone();
+
+        let mapping = compute_line_mapping_forward(&parent, &merge);
+
+        assert_eq!(mapping.len(), 10);
+        for i in 0..10 {
+            assert_eq!(mapping.get(&i), Some(&i));
+        }
+    }
+
+    #[test]
+    fn test_find_line_author_line_not_in_attestation() {
+        // Attestation covers lines 1-3 only
+        let file_att = FileAttestation {
+            file_path: "test.rs".to_string(),
+            entries: vec![AttestationEntry {
+                hash: "ai_abc".to_string(),
+                line_ranges: vec![LineRange::Range(1, 3)],
+            }],
+        };
+
+        let parent_content = "line1\nline2\nline3\nline4\nline5\n".to_string();
+        let parent_data: Vec<(Option<String>, Option<&FileAttestation>)> =
+            vec![(Some(parent_content), Some(&file_att))];
+
+        let merge_lines = vec!["line1", "line2", "line3", "line4", "line5"];
+
+        // Query line 5 — attestation only covers 1-3, so should return None
+        let author = find_line_author(&file_att, 5, &parent_data, 0, &merge_lines);
+        assert_eq!(author, None);
+    }
+
+    #[test]
+    fn test_find_line_author_multiple_entries_different_ranges() {
+        // Entry "ai_1" covers lines 1-5, entry "h_human" covers lines 6-10
+        let file_att = FileAttestation {
+            file_path: "test.rs".to_string(),
+            entries: vec![
+                AttestationEntry {
+                    hash: "ai_1".to_string(),
+                    line_ranges: vec![LineRange::Range(1, 5)],
+                },
+                AttestationEntry {
+                    hash: "h_human".to_string(),
+                    line_ranges: vec![LineRange::Range(6, 10)],
+                },
+            ],
+        };
+
+        let parent_content = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n".to_string();
+        let parent_data: Vec<(Option<String>, Option<&FileAttestation>)> =
+            vec![(Some(parent_content), Some(&file_att))];
+
+        let merge_lines = vec!["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10"];
+
+        // Query line 7 in merge → maps to parent line 7 → "h_human"
+        let author = find_line_author(&file_att, 7, &parent_data, 0, &merge_lines);
+        assert_eq!(author, Some("h_human".to_string()));
+
+        // Query line 3 in merge → maps to parent line 3 → "ai_1"
+        let author = find_line_author(&file_att, 3, &parent_data, 0, &merge_lines);
+        assert_eq!(author, Some("ai_1".to_string()));
+    }
+
+    #[test]
+    fn test_combine_metadata_overlapping_keys_prefer_first_parent() {
+        use crate::core::authorship_log::{
+            AUTHORSHIP_LOG_VERSION, AgentId, GIT_AI_VERSION, PromptRecord,
+        };
+        use std::collections::BTreeMap;
+
+        // Both parents have the same prompt ID "shared_id" but different content
+        let shared_record_parent1 = PromptRecord {
+            agent_id: AgentId {
+                tool: "claude".to_string(),
+                id: "session_1".to_string(),
+                model: "opus".to_string(),
+            },
+            human_author: Some("dev1@test.com".to_string()),
+            messages_url: None,
+            total_additions: 10,
+            total_deletions: 2,
+            accepted_lines: 8,
+            overriden_lines: 0,
+            custom_attributes: None,
+        };
+
+        let shared_record_parent2 = PromptRecord {
+            agent_id: AgentId {
+                tool: "copilot".to_string(),
+                id: "session_2".to_string(),
+                model: "gpt4".to_string(),
+            },
+            human_author: Some("dev2@test.com".to_string()),
+            messages_url: Some("https://example.com".to_string()),
+            total_additions: 99,
+            total_deletions: 99,
+            accepted_lines: 99,
+            overriden_lines: 99,
+            custom_attributes: None,
+        };
+
+        let mut prompts1 = BTreeMap::new();
+        prompts1.insert("shared_id".to_string(), shared_record_parent1.clone());
+
+        let mut prompts2 = BTreeMap::new();
+        prompts2.insert("shared_id".to_string(), shared_record_parent2.clone());
+
+        let log1 = AuthorshipLog {
+            attestations: vec![],
+            metadata: Metadata {
+                schema_version: AUTHORSHIP_LOG_VERSION.to_string(),
+                git_ai_version: Some(GIT_AI_VERSION.to_string()),
+                base_commit_sha: "parent1".to_string(),
+                prompts: prompts1,
+                sessions: BTreeMap::new(),
+                humans: BTreeMap::new(),
+            },
+        };
+
+        let log2 = AuthorshipLog {
+            attestations: vec![],
+            metadata: Metadata {
+                schema_version: AUTHORSHIP_LOG_VERSION.to_string(),
+                git_ai_version: Some(GIT_AI_VERSION.to_string()),
+                base_commit_sha: "parent2".to_string(),
+                prompts: prompts2,
+                sessions: BTreeMap::new(),
+                humans: BTreeMap::new(),
+            },
+        };
+
+        let parent_notes = vec![("parent1".to_string(), log1), ("parent2".to_string(), log2)];
+
+        let result = combine_metadata("merge_xyz", &parent_notes);
+
+        // The first parent's version should win (entry_or_insert behavior)
+        let record = result.prompts.get("shared_id").unwrap();
+        assert_eq!(record.agent_id.tool, "claude");
+        assert_eq!(record.agent_id.id, "session_1");
+        assert_eq!(record.agent_id.model, "opus");
+        assert_eq!(record.human_author, Some("dev1@test.com".to_string()));
+        assert_eq!(record.total_additions, 10);
+    }
+
+    #[test]
+    fn test_combine_metadata_empty_parents() {
+        use crate::core::authorship_log::{AUTHORSHIP_LOG_VERSION, GIT_AI_VERSION};
+        use std::collections::BTreeMap;
+
+        // Both parents have empty metadata (no prompts, sessions, or humans)
+        let log1 = AuthorshipLog {
+            attestations: vec![],
+            metadata: Metadata {
+                schema_version: AUTHORSHIP_LOG_VERSION.to_string(),
+                git_ai_version: Some(GIT_AI_VERSION.to_string()),
+                base_commit_sha: "parent1".to_string(),
+                prompts: BTreeMap::new(),
+                sessions: BTreeMap::new(),
+                humans: BTreeMap::new(),
+            },
+        };
+
+        let log2 = AuthorshipLog {
+            attestations: vec![],
+            metadata: Metadata {
+                schema_version: AUTHORSHIP_LOG_VERSION.to_string(),
+                git_ai_version: Some(GIT_AI_VERSION.to_string()),
+                base_commit_sha: "parent2".to_string(),
+                prompts: BTreeMap::new(),
+                sessions: BTreeMap::new(),
+                humans: BTreeMap::new(),
+            },
+        };
+
+        let parent_notes = vec![("parent1".to_string(), log1), ("parent2".to_string(), log2)];
+
+        let result = combine_metadata("merge_empty", &parent_notes);
+
+        // Schema fields should be populated
+        assert_eq!(result.schema_version, AUTHORSHIP_LOG_VERSION);
+        assert_eq!(result.git_ai_version, Some(GIT_AI_VERSION.to_string()));
+        assert_eq!(result.base_commit_sha, "merge_empty");
+        // All maps should be empty
+        assert!(result.prompts.is_empty());
+        assert!(result.sessions.is_empty());
+        assert!(result.humans.is_empty());
+    }
 }

@@ -173,4 +173,79 @@ mod tests {
         let result = git_in_repo(&bad_path, &["rev-parse", "--git-dir"]);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_git_in_repo_error_message_includes_command() {
+        let bad_path = PathBuf::from("/nonexistent/path");
+        let result = git_in_repo(&bad_path, &["log", "--format=%H", "-1"]);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        // The error should contain the command args for debugging
+        assert!(
+            err_msg.contains("log") || err_msg.contains("failed"),
+            "error message should be informative: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_process_commit_nonexistent_repo_returns_error() {
+        let bad_path = PathBuf::from("/tmp/nonexistent_repo_for_test_xyz");
+        let result = process_commit(&bad_path);
+        assert!(
+            result.is_err(),
+            "process_commit on nonexistent repo should error"
+        );
+    }
+
+    #[test]
+    fn test_process_commit_no_working_log_data_returns_ok_false() {
+        // Create a real git repo with a commit but no working log data
+        let dir = tempfile::tempdir().unwrap();
+        let repo_path = dir.path();
+
+        // Init and create a commit
+        Command::new("git")
+            .args(["init", repo_path.to_str().unwrap()])
+            .env("GIT_TRACE2_EVENT", "0")
+            .output()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["config", "user.email", "test@test.com"])
+            .env("GIT_TRACE2_EVENT", "0")
+            .output()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["config", "user.name", "Test"])
+            .env("GIT_TRACE2_EVENT", "0")
+            .output()
+            .unwrap();
+        std::fs::write(repo_path.join("file.txt"), b"hello").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["add", "."])
+            .env("GIT_TRACE2_EVENT", "0")
+            .output()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["commit", "-m", "initial"])
+            .env("GIT_TRACE2_EVENT", "0")
+            .output()
+            .unwrap();
+
+        // No working log data exists, so process_commit should return Ok(false)
+        let result = process_commit(repo_path);
+        assert_eq!(
+            result,
+            Ok(false),
+            "no working log data should mean nothing to annotate"
+        );
+    }
 }

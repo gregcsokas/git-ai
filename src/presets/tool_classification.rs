@@ -201,4 +201,197 @@ mod tests {
         assert_eq!(classify_tool(Agent::Amp, "Bash"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::Amp, "Read"), ToolClass::Skip);
     }
+
+    #[test]
+    fn unknown_tool_names_return_skip_for_all_agents() {
+        let agents = [
+            Agent::Claude,
+            Agent::Gemini,
+            Agent::ContinueCli,
+            Agent::Droid,
+            Agent::Amp,
+            Agent::OpenCode,
+            Agent::Firebender,
+            Agent::Codex,
+            Agent::Pi,
+            Agent::Windsurf,
+            Agent::Cursor,
+            Agent::GithubCopilot,
+        ];
+        for agent in agents {
+            assert_eq!(
+                classify_tool(agent, "completely_unknown_tool_xyz"),
+                ToolClass::Skip,
+                "Agent {:?} should return Skip for unknown tool",
+                agent
+            );
+        }
+    }
+
+    #[test]
+    fn aitab_always_returns_file_edit() {
+        // AiTab returns FileEdit regardless of tool name
+        assert_eq!(classify_tool(Agent::AiTab, "anything"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::AiTab, ""), ToolClass::FileEdit);
+        assert_eq!(
+            classify_tool(Agent::AiTab, "unknown_tool"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(classify_tool(Agent::AiTab, "Bash"), ToolClass::FileEdit);
+    }
+
+    #[test]
+    fn tool_names_are_case_sensitive() {
+        // Claude tools are PascalCase - lowercase should skip
+        assert_eq!(classify_tool(Agent::Claude, "write"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Claude, "edit"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Claude, "bash"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Claude, "WRITE"), ToolClass::Skip);
+
+        // Gemini tools are snake_case - PascalCase should skip
+        assert_eq!(classify_tool(Agent::Gemini, "Write_file"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Gemini, "Shell"), ToolClass::Skip);
+
+        // Cursor's Shell is PascalCase
+        assert_eq!(classify_tool(Agent::Cursor, "shell"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Cursor, "SHELL"), ToolClass::Skip);
+    }
+
+    #[test]
+    fn continue_cli_tools() {
+        assert_eq!(
+            classify_tool(Agent::ContinueCli, "edit"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::ContinueCli, "terminal"),
+            ToolClass::Bash
+        );
+        assert_eq!(
+            classify_tool(Agent::ContinueCli, "local_shell_call"),
+            ToolClass::Bash
+        );
+        assert_eq!(classify_tool(Agent::ContinueCli, "read"), ToolClass::Skip);
+    }
+
+    #[test]
+    fn droid_tools() {
+        assert_eq!(
+            classify_tool(Agent::Droid, "ApplyPatch"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(classify_tool(Agent::Droid, "Edit"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Droid, "Write"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Droid, "Create"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Droid, "Bash"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Droid, "Read"), ToolClass::Skip);
+    }
+
+    #[test]
+    fn opencode_tools() {
+        assert_eq!(classify_tool(Agent::OpenCode, "edit"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::OpenCode, "write"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::OpenCode, "bash"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::OpenCode, "shell"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::OpenCode, "read"), ToolClass::Skip);
+    }
+
+    #[test]
+    fn firebender_tools() {
+        assert_eq!(
+            classify_tool(Agent::Firebender, "Write"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Firebender, "Edit"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Firebender, "Delete"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Firebender, "RenameSymbol"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Firebender, "DeleteSymbol"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(classify_tool(Agent::Firebender, "Bash"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Firebender, "Read"), ToolClass::Skip);
+    }
+
+    #[test]
+    fn pi_tools() {
+        assert_eq!(classify_tool(Agent::Pi, "edit"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Pi, "write"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Pi, "replace"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Pi, "rename"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Pi, "bash"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Pi, "read"), ToolClass::Skip);
+    }
+
+    #[test]
+    fn codex_shell_variants() {
+        // All shell-like tool variants for Codex
+        assert_eq!(classify_tool(Agent::Codex, "Bash"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Codex, "exec_command"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Codex, "shell"), ToolClass::Bash);
+        assert_eq!(
+            classify_tool(Agent::Codex, "shell_command"),
+            ToolClass::Bash
+        );
+        // File edit
+        assert_eq!(
+            classify_tool(Agent::Codex, "apply_patch"),
+            ToolClass::FileEdit
+        );
+        // Others skip
+        assert_eq!(classify_tool(Agent::Codex, "read_file"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Codex, "search"), ToolClass::Skip);
+    }
+
+    #[test]
+    fn copilot_empty_tool_name_is_file_edit() {
+        // Empty tool_name for GithubCopilot implies file edit (before_edit/after_edit events)
+        assert_eq!(classify_tool(Agent::GithubCopilot, ""), ToolClass::FileEdit);
+    }
+
+    #[test]
+    fn copilot_all_file_edit_variants() {
+        let file_edit_tools = [
+            "copilot_replaceString",
+            "create_file",
+            "apply_patch",
+            "editFiles",
+            "insert_edit",
+            "replace_edit",
+            "delete_edit",
+            "replace_string_in_file",
+            "replaceStringInFile",
+            "edit",
+            "create",
+        ];
+        for tool in file_edit_tools {
+            assert_eq!(
+                classify_tool(Agent::GithubCopilot, tool),
+                ToolClass::FileEdit,
+                "GithubCopilot tool '{}' should be FileEdit",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn copilot_terminal_variants() {
+        assert_eq!(
+            classify_tool(Agent::GithubCopilot, "runInTerminal"),
+            ToolClass::Bash
+        );
+        assert_eq!(
+            classify_tool(Agent::GithubCopilot, "run_in_terminal"),
+            ToolClass::Bash
+        );
+    }
 }

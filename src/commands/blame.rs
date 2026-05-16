@@ -520,3 +520,379 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git_ai::core::authorship_log::{
+        AgentId, AttestationEntry, AuthorshipLog, FileAttestation, LineRange, Metadata,
+        PromptRecord, SessionRecord,
+    };
+    use std::collections::BTreeMap;
+
+    // =========================================================================
+    // detect_agent_from_email tests
+    // =========================================================================
+
+    #[test]
+    fn detect_agent_anthropic() {
+        assert_eq!(
+            detect_agent_from_email("noreply@anthropic.com"),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn detect_agent_openai() {
+        assert_eq!(detect_agent_from_email("noreply@openai.com"), Some("codex"));
+    }
+
+    #[test]
+    fn detect_agent_case_insensitive() {
+        assert_eq!(
+            detect_agent_from_email("NOREPLY@ANTHROPIC.COM"),
+            Some("claude")
+        );
+        assert_eq!(detect_agent_from_email("Noreply@OpenAI.com"), Some("codex"));
+    }
+
+    #[test]
+    fn detect_agent_copilot() {
+        assert_eq!(
+            detect_agent_from_email("copilot@github.com"),
+            Some("github-copilot")
+        );
+        assert_eq!(
+            detect_agent_from_email("github-copilot@users.noreply.github.com"),
+            Some("github-copilot")
+        );
+    }
+
+    #[test]
+    fn detect_agent_cursor() {
+        assert_eq!(detect_agent_from_email("user@cursor.com"), Some("cursor"));
+        assert_eq!(
+            detect_agent_from_email("noreply@cursor.com"),
+            Some("cursor")
+        );
+    }
+
+    #[test]
+    fn detect_agent_devin() {
+        assert_eq!(detect_agent_from_email("devin@cognition.ai"), Some("devin"));
+    }
+
+    #[test]
+    fn detect_agent_human_email_returns_none() {
+        assert_eq!(detect_agent_from_email("human@example.com"), None);
+        assert_eq!(detect_agent_from_email("developer@gmail.com"), None);
+        assert_eq!(detect_agent_from_email(""), None);
+    }
+
+    // =========================================================================
+    // format_blame_date tests
+    // =========================================================================
+
+    #[test]
+    fn format_blame_date_known_timestamp() {
+        // 2021-01-01 00:00:00 UTC = 1609459200
+        let result = format_blame_date(1609459200, "+0000");
+        assert_eq!(result, "2021-01-01 00:00:00 +0000");
+    }
+
+    #[test]
+    fn format_blame_date_positive_timezone() {
+        // 1609459200 UTC = 2021-01-01 00:00:00 UTC
+        // With +0530 offset, local time = 2021-01-01 05:30:00
+        let result = format_blame_date(1609459200, "+0530");
+        assert_eq!(result, "2021-01-01 05:30:00 +0530");
+    }
+
+    #[test]
+    fn format_blame_date_negative_timezone() {
+        // 1609459200 UTC = 2021-01-01 00:00:00 UTC
+        // With -0500 offset, local time = 2020-12-31 19:00:00
+        let result = format_blame_date(1609459200, "-0500");
+        assert_eq!(result, "2020-12-31 19:00:00 -0500");
+    }
+
+    #[test]
+    fn format_blame_date_epoch() {
+        let result = format_blame_date(0, "+0000");
+        assert_eq!(result, "1970-01-01 00:00:00 +0000");
+    }
+
+    // =========================================================================
+    // days_to_ymd tests
+    // =========================================================================
+
+    #[test]
+    fn days_to_ymd_epoch() {
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_known_date_2021() {
+        // 2021-01-01 is day 18628 since epoch
+        assert_eq!(days_to_ymd(18628), (2021, 1, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_leap_year_feb_29() {
+        // 2020-02-29: 2020 is a leap year
+        // Days from epoch to 2020-02-29:
+        // From 1970-01-01 to 2020-02-29
+        // 50 years of days minus adjustments... let's compute:
+        // 2020-01-01 is day 18262, Feb has 29 days in 2020, so Feb 29 = 18262 + 31 + 28 = 18321
+        // Actually: Jan=31 days, so Feb 1 = 18262+31=18293, Feb 29 = 18293+28=18321
+        assert_eq!(days_to_ymd(18321), (2020, 2, 29));
+    }
+
+    #[test]
+    fn days_to_ymd_known_date_2000() {
+        // 2000-01-01 is day 10957 since epoch
+        assert_eq!(days_to_ymd(10957), (2000, 1, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_negative_days() {
+        // Day -1 from epoch = 1969-12-31
+        assert_eq!(days_to_ymd(-1), (1969, 12, 31));
+    }
+
+    // =========================================================================
+    // resolve_line_author_with_prompt tests
+    // =========================================================================
+
+    fn make_test_authorship_log_with_prompt() -> AuthorshipLog {
+        let mut prompts = BTreeMap::new();
+        prompts.insert(
+            "abc123def4567890".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "cursor".to_string(),
+                    id: "sess_1".to_string(),
+                    model: "claude-3-sonnet".to_string(),
+                },
+                human_author: None,
+                messages_url: None,
+                total_additions: 10,
+                total_deletions: 2,
+                accepted_lines: 8,
+                overriden_lines: 0,
+                custom_attributes: None,
+            },
+        );
+
+        let metadata = Metadata {
+            schema_version: "authorship/3.0.0".to_string(),
+            git_ai_version: Some("development".to_string()),
+            base_commit_sha: "base123".to_string(),
+            prompts,
+            sessions: BTreeMap::new(),
+            humans: BTreeMap::new(),
+        };
+
+        AuthorshipLog {
+            attestations: vec![FileAttestation {
+                file_path: "src/main.rs".to_string(),
+                entries: vec![AttestationEntry {
+                    hash: "abc123def4567890".to_string(),
+                    line_ranges: vec![LineRange::Range(1, 20)],
+                }],
+            }],
+            metadata,
+        }
+    }
+
+    #[test]
+    fn resolve_line_author_with_prompt_matching_file_and_line() {
+        let log = make_test_authorship_log_with_prompt();
+        let mut commit_notes: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+        commit_notes.insert("commit_abc".to_string(), Some(log));
+
+        let (author, prompt_hash) = resolve_line_author_with_prompt(
+            "commit_abc",
+            5,
+            "Human Author",
+            "human@example.com",
+            "src/main.rs",
+            &commit_notes,
+            &[],
+        );
+
+        assert_eq!(author, "cursor");
+        assert_eq!(prompt_hash, Some("abc123def4567890".to_string()));
+    }
+
+    #[test]
+    fn resolve_line_author_with_prompt_human_hash() {
+        let metadata = Metadata {
+            schema_version: "authorship/3.0.0".to_string(),
+            git_ai_version: Some("development".to_string()),
+            base_commit_sha: "base123".to_string(),
+            prompts: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            humans: BTreeMap::new(),
+        };
+
+        let log = AuthorshipLog {
+            attestations: vec![FileAttestation {
+                file_path: "src/lib.rs".to_string(),
+                entries: vec![AttestationEntry {
+                    hash: "h_12345678901234".to_string(),
+                    line_ranges: vec![LineRange::Range(1, 10)],
+                }],
+            }],
+            metadata,
+        };
+
+        let mut commit_notes: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+        commit_notes.insert("commit_xyz".to_string(), Some(log));
+
+        let (author, prompt_hash) = resolve_line_author_with_prompt(
+            "commit_xyz",
+            5,
+            "Alice",
+            "alice@example.com",
+            "src/lib.rs",
+            &commit_notes,
+            &[],
+        );
+
+        assert_eq!(author, "Alice");
+        assert_eq!(prompt_hash, None);
+    }
+
+    #[test]
+    fn resolve_line_author_with_prompt_session_hash() {
+        let mut sessions = BTreeMap::new();
+        sessions.insert(
+            "s_12345678901234".to_string(),
+            SessionRecord {
+                agent_id: AgentId {
+                    tool: "windsurf".to_string(),
+                    id: "ws_session_1".to_string(),
+                    model: "gpt-4".to_string(),
+                },
+                human_author: None,
+                custom_attributes: None,
+            },
+        );
+
+        let metadata = Metadata {
+            schema_version: "authorship/3.0.0".to_string(),
+            git_ai_version: Some("development".to_string()),
+            base_commit_sha: "base123".to_string(),
+            prompts: BTreeMap::new(),
+            sessions,
+            humans: BTreeMap::new(),
+        };
+
+        let log = AuthorshipLog {
+            attestations: vec![FileAttestation {
+                file_path: "src/app.rs".to_string(),
+                entries: vec![AttestationEntry {
+                    hash: "s_12345678901234".to_string(),
+                    line_ranges: vec![LineRange::Range(10, 50)],
+                }],
+            }],
+            metadata,
+        };
+
+        let mut commit_notes: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+        commit_notes.insert("commit_sess".to_string(), Some(log));
+
+        let (author, prompt_hash) = resolve_line_author_with_prompt(
+            "commit_sess",
+            25,
+            "Bot User",
+            "bot@example.com",
+            "src/app.rs",
+            &commit_notes,
+            &[],
+        );
+
+        assert_eq!(author, "windsurf");
+        assert_eq!(prompt_hash, Some("s_12345678901234".to_string()));
+    }
+
+    #[test]
+    fn resolve_line_author_with_prompt_fallback_to_agent_email() {
+        let commit_notes: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+
+        let (author, prompt_hash) = resolve_line_author_with_prompt(
+            "commit_no_note",
+            1,
+            "Claude",
+            "noreply@anthropic.com",
+            "src/file.rs",
+            &commit_notes,
+            &[],
+        );
+
+        assert_eq!(author, "claude");
+        assert!(prompt_hash.is_some());
+        // The prompt hash is a deterministic 16-char hex string
+        assert_eq!(prompt_hash.as_ref().unwrap().len(), 16);
+    }
+
+    #[test]
+    fn resolve_line_author_with_prompt_no_note_human_email() {
+        let commit_notes: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+
+        let (author, prompt_hash) = resolve_line_author_with_prompt(
+            "commit_no_note",
+            1,
+            "Alice Developer",
+            "alice@company.com",
+            "src/file.rs",
+            &commit_notes,
+            &[],
+        );
+
+        assert_eq!(author, "Alice Developer");
+        assert_eq!(prompt_hash, None);
+    }
+
+    #[test]
+    fn resolve_line_author_with_prompt_note_present_but_no_matching_file() {
+        let log = make_test_authorship_log_with_prompt();
+        let mut commit_notes: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+        commit_notes.insert("commit_abc".to_string(), Some(log));
+
+        let (author, prompt_hash) = resolve_line_author_with_prompt(
+            "commit_abc",
+            5,
+            "Human Author",
+            "human@example.com",
+            "src/other_file.rs", // not in the attestation
+            &commit_notes,
+            &[],
+        );
+
+        // Falls through to git_author since no agent email detected
+        assert_eq!(author, "Human Author");
+        assert_eq!(prompt_hash, None);
+    }
+
+    #[test]
+    fn resolve_line_author_with_prompt_note_present_but_line_not_covered() {
+        let log = make_test_authorship_log_with_prompt();
+        let mut commit_notes: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+        commit_notes.insert("commit_abc".to_string(), Some(log));
+
+        let (author, prompt_hash) = resolve_line_author_with_prompt(
+            "commit_abc",
+            100, // line 100 is outside range 1-20
+            "Human Author",
+            "human@example.com",
+            "src/main.rs",
+            &commit_notes,
+            &[],
+        );
+
+        assert_eq!(author, "Human Author");
+        assert_eq!(prompt_hash, None);
+    }
+}

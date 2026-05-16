@@ -678,4 +678,323 @@ mod tests {
         let commit = result.expect("child cmd_name must not corrupt parent session");
         assert_eq!(commit.repo_path, PathBuf::from("/repo"));
     }
+
+    // -----------------------------------------------------------------------
+    // process_event_full tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn full_non_zero_exit_no_operation() {
+        let mut detector = CommitDetector::new();
+
+        detector.process_event_full(Trace2Event::Start {
+            sid: "sid-fail".to_string(),
+            argv: vec![
+                "git".to_string(),
+                "commit".to_string(),
+                "-m".to_string(),
+                "msg".to_string(),
+            ],
+        });
+        detector.process_event_full(Trace2Event::DefRepo {
+            sid: "sid-fail".to_string(),
+            repo_path: PathBuf::from("/repo"),
+        });
+        detector.process_event_full(Trace2Event::CmdName {
+            sid: "sid-fail".to_string(),
+            cmd_name: "commit".to_string(),
+        });
+
+        let result = detector.process_event_full(Trace2Event::CommandExit {
+            sid: "sid-fail".to_string(),
+            exit_code: 128,
+        });
+        assert!(
+            result.is_none(),
+            "non-zero exit should not emit a DetectedOperation"
+        );
+    }
+
+    #[test]
+    fn full_rebase_emits_rewrite_rebase() {
+        let mut detector = CommitDetector::new();
+
+        detector.process_event_full(Trace2Event::Start {
+            sid: "sid-rebase".to_string(),
+            argv: vec![
+                "git".to_string(),
+                "rebase".to_string(),
+                "master".to_string(),
+            ],
+        });
+        detector.process_event_full(Trace2Event::DefRepo {
+            sid: "sid-rebase".to_string(),
+            repo_path: PathBuf::from("/repo"),
+        });
+        detector.process_event_full(Trace2Event::CmdName {
+            sid: "sid-rebase".to_string(),
+            cmd_name: "rebase".to_string(),
+        });
+
+        let result = detector.process_event_full(Trace2Event::CommandExit {
+            sid: "sid-rebase".to_string(),
+            exit_code: 0,
+        });
+        match result {
+            Some(DetectedOperation::Rewrite {
+                repo_path,
+                kind,
+                argv,
+            }) => {
+                assert_eq!(repo_path, PathBuf::from("/repo"));
+                assert_eq!(kind, RewriteKind::Rebase);
+                assert_eq!(argv, vec!["git", "rebase", "master"]);
+            }
+            other => panic!("expected Rewrite/Rebase, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn full_amend_emits_rewrite_amend() {
+        let mut detector = CommitDetector::new();
+
+        detector.process_event_full(Trace2Event::Start {
+            sid: "sid-amend".to_string(),
+            argv: vec![
+                "git".to_string(),
+                "commit".to_string(),
+                "--amend".to_string(),
+                "-m".to_string(),
+                "fix".to_string(),
+            ],
+        });
+        detector.process_event_full(Trace2Event::DefRepo {
+            sid: "sid-amend".to_string(),
+            repo_path: PathBuf::from("/repo"),
+        });
+        detector.process_event_full(Trace2Event::CmdName {
+            sid: "sid-amend".to_string(),
+            cmd_name: "commit".to_string(),
+        });
+
+        let result = detector.process_event_full(Trace2Event::CommandExit {
+            sid: "sid-amend".to_string(),
+            exit_code: 0,
+        });
+        match result {
+            Some(DetectedOperation::Rewrite {
+                repo_path, kind, ..
+            }) => {
+                assert_eq!(repo_path, PathBuf::from("/repo"));
+                assert_eq!(kind, RewriteKind::Amend);
+            }
+            other => panic!("expected Rewrite/Amend, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn full_stash_push_emits_stash() {
+        let mut detector = CommitDetector::new();
+
+        detector.process_event_full(Trace2Event::Start {
+            sid: "sid-stash-push".to_string(),
+            argv: vec![
+                "git".to_string(),
+                "stash".to_string(),
+                "push".to_string(),
+                "-m".to_string(),
+                "wip".to_string(),
+            ],
+        });
+        detector.process_event_full(Trace2Event::DefRepo {
+            sid: "sid-stash-push".to_string(),
+            repo_path: PathBuf::from("/repo"),
+        });
+        detector.process_event_full(Trace2Event::CmdName {
+            sid: "sid-stash-push".to_string(),
+            cmd_name: "stash".to_string(),
+        });
+
+        let result = detector.process_event_full(Trace2Event::CommandExit {
+            sid: "sid-stash-push".to_string(),
+            exit_code: 0,
+        });
+        match result {
+            Some(DetectedOperation::Stash { repo_path, argv }) => {
+                assert_eq!(repo_path, PathBuf::from("/repo"));
+                assert!(argv.contains(&"push".to_string()));
+            }
+            other => panic!("expected Stash, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn full_stash_pop_emits_stash_pop() {
+        let mut detector = CommitDetector::new();
+
+        detector.process_event_full(Trace2Event::Start {
+            sid: "sid-stash-pop".to_string(),
+            argv: vec!["git".to_string(), "stash".to_string(), "pop".to_string()],
+        });
+        detector.process_event_full(Trace2Event::DefRepo {
+            sid: "sid-stash-pop".to_string(),
+            repo_path: PathBuf::from("/repo"),
+        });
+        detector.process_event_full(Trace2Event::CmdName {
+            sid: "sid-stash-pop".to_string(),
+            cmd_name: "stash".to_string(),
+        });
+
+        let result = detector.process_event_full(Trace2Event::CommandExit {
+            sid: "sid-stash-pop".to_string(),
+            exit_code: 0,
+        });
+        match result {
+            Some(DetectedOperation::StashPop { repo_path }) => {
+                assert_eq!(repo_path, PathBuf::from("/repo"));
+            }
+            other => panic!("expected StashPop, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn full_prune_stale_removes_old_sessions() {
+        let mut detector = CommitDetector::new();
+
+        detector.process_event_full(Trace2Event::Start {
+            sid: "sid-old".to_string(),
+            argv: vec!["git".to_string(), "commit".to_string()],
+        });
+        detector.process_event_full(Trace2Event::DefRepo {
+            sid: "sid-old".to_string(),
+            repo_path: PathBuf::from("/repo"),
+        });
+        detector.process_event_full(Trace2Event::CmdName {
+            sid: "sid-old".to_string(),
+            cmd_name: "commit".to_string(),
+        });
+
+        // Prune with zero duration makes everything stale
+        detector.prune_stale(Duration::from_secs(0));
+
+        // The session is gone, so exit produces nothing
+        let result = detector.process_event_full(Trace2Event::CommandExit {
+            sid: "sid-old".to_string(),
+            exit_code: 0,
+        });
+        assert!(
+            result.is_none(),
+            "pruned session should not emit an operation"
+        );
+    }
+
+    #[test]
+    fn full_child_process_event_does_not_emit_operation() {
+        let mut detector = CommitDetector::new();
+
+        // Start a parent session
+        detector.process_event_full(Trace2Event::Start {
+            sid: "parent-abc".to_string(),
+            argv: vec![
+                "git".to_string(),
+                "commit".to_string(),
+                "-m".to_string(),
+                "msg".to_string(),
+            ],
+        });
+        detector.process_event_full(Trace2Event::DefRepo {
+            sid: "parent-abc".to_string(),
+            repo_path: PathBuf::from("/repo"),
+        });
+        detector.process_event_full(Trace2Event::CmdName {
+            sid: "parent-abc".to_string(),
+            cmd_name: "commit".to_string(),
+        });
+
+        // Child process exit (non-root SID) should NOT emit an operation
+        let result = detector.process_event_full(Trace2Event::CommandExit {
+            sid: "parent-abc/child-def".to_string(),
+            exit_code: 0,
+        });
+        assert!(
+            result.is_none(),
+            "child process exit should not emit an operation"
+        );
+
+        // Parent session should still be intact and detect on its own exit
+        let result = detector.process_event_full(Trace2Event::CommandExit {
+            sid: "parent-abc".to_string(),
+            exit_code: 0,
+        });
+        assert!(
+            result.is_some(),
+            "parent should still emit operation after child exit"
+        );
+    }
+
+    #[test]
+    fn full_two_concurrent_sessions_independent() {
+        let mut detector = CommitDetector::new();
+
+        // Session 1: rebase
+        detector.process_event_full(Trace2Event::Start {
+            sid: "sid-1".to_string(),
+            argv: vec!["git".to_string(), "rebase".to_string(), "main".to_string()],
+        });
+        // Session 2: commit
+        detector.process_event_full(Trace2Event::Start {
+            sid: "sid-2".to_string(),
+            argv: vec![
+                "git".to_string(),
+                "commit".to_string(),
+                "-m".to_string(),
+                "feat".to_string(),
+            ],
+        });
+
+        detector.process_event_full(Trace2Event::DefRepo {
+            sid: "sid-1".to_string(),
+            repo_path: PathBuf::from("/repo-1"),
+        });
+        detector.process_event_full(Trace2Event::DefRepo {
+            sid: "sid-2".to_string(),
+            repo_path: PathBuf::from("/repo-2"),
+        });
+
+        detector.process_event_full(Trace2Event::CmdName {
+            sid: "sid-1".to_string(),
+            cmd_name: "rebase".to_string(),
+        });
+        detector.process_event_full(Trace2Event::CmdName {
+            sid: "sid-2".to_string(),
+            cmd_name: "commit".to_string(),
+        });
+
+        // Session 2 exits first - should get Commit
+        let result = detector.process_event_full(Trace2Event::CommandExit {
+            sid: "sid-2".to_string(),
+            exit_code: 0,
+        });
+        match result {
+            Some(DetectedOperation::Commit { repo_path }) => {
+                assert_eq!(repo_path, PathBuf::from("/repo-2"));
+            }
+            other => panic!("expected Commit for session 2, got {:?}", other),
+        }
+
+        // Session 1 exits - should get Rewrite/Rebase
+        let result = detector.process_event_full(Trace2Event::CommandExit {
+            sid: "sid-1".to_string(),
+            exit_code: 0,
+        });
+        match result {
+            Some(DetectedOperation::Rewrite {
+                repo_path, kind, ..
+            }) => {
+                assert_eq!(repo_path, PathBuf::from("/repo-1"));
+                assert_eq!(kind, RewriteKind::Rebase);
+            }
+            other => panic!("expected Rewrite/Rebase for session 1, got {:?}", other),
+        }
+    }
 }

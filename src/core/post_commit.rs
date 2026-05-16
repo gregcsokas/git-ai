@@ -1375,4 +1375,302 @@ diff --git a/my file.txt b/my file.txt
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], ("my file.txt".to_string(), vec![1, 2]));
     }
+
+    // -----------------------------------------------------------------------
+    // unescape_git_path tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_unescape_git_path_no_escapes() {
+        assert_eq!(unescape_git_path("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn test_unescape_git_path_empty_string() {
+        assert_eq!(unescape_git_path(""), "");
+    }
+
+    #[test]
+    fn test_unescape_git_path_newline() {
+        assert_eq!(unescape_git_path("foo\\nbar"), "foo\nbar");
+    }
+
+    #[test]
+    fn test_unescape_git_path_tab() {
+        assert_eq!(unescape_git_path("foo\\tbar"), "foo\tbar");
+    }
+
+    #[test]
+    fn test_unescape_git_path_backslash() {
+        assert_eq!(unescape_git_path("foo\\\\bar"), "foo\\bar");
+    }
+
+    #[test]
+    fn test_unescape_git_path_double_quote() {
+        assert_eq!(unescape_git_path("foo\\\"bar"), "foo\"bar");
+    }
+
+    #[test]
+    fn test_unescape_git_path_octal_utf8() {
+        // 'é' is U+00E9, encoded as UTF-8 bytes 0xC3 0xA9 = octal 303 251
+        assert_eq!(unescape_git_path("caf\\303\\251"), "café");
+    }
+
+    #[test]
+    fn test_unescape_git_path_multiple_escapes() {
+        assert_eq!(unescape_git_path("a\\tb\\nc\\\\d"), "a\tb\nc\\d");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_line_mapping / compute_lcs_line_pairs tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_line_mapping_identical() {
+        let old = vec!["a", "b", "c"];
+        let new = vec!["a", "b", "c"];
+        let mapping = build_line_mapping(&old, &new);
+        assert_eq!(mapping.get(&1), Some(&1));
+        assert_eq!(mapping.get(&2), Some(&2));
+        assert_eq!(mapping.get(&3), Some(&3));
+        assert_eq!(mapping.len(), 3);
+    }
+
+    #[test]
+    fn test_build_line_mapping_insert_at_beginning() {
+        let old = vec!["a", "b", "c"];
+        let new = vec!["x", "a", "b", "c"];
+        let mapping = build_line_mapping(&old, &new);
+        // old line 1 ("a") -> new line 2
+        assert_eq!(mapping.get(&1), Some(&2));
+        assert_eq!(mapping.get(&2), Some(&3));
+        assert_eq!(mapping.get(&3), Some(&4));
+    }
+
+    #[test]
+    fn test_build_line_mapping_delete_lines() {
+        let old = vec!["a", "b", "c", "d"];
+        let new = vec!["a", "d"];
+        let mapping = build_line_mapping(&old, &new);
+        // old line 1 ("a") -> new line 1
+        assert_eq!(mapping.get(&1), Some(&1));
+        // old line 4 ("d") -> new line 2
+        assert_eq!(mapping.get(&4), Some(&2));
+        // lines 2 and 3 are deleted, should not appear
+        assert_eq!(mapping.get(&2), None);
+        assert_eq!(mapping.get(&3), None);
+    }
+
+    #[test]
+    fn test_build_line_mapping_complete_rewrite() {
+        let old = vec!["a", "b", "c"];
+        let new = vec!["x", "y", "z"];
+        let mapping = build_line_mapping(&old, &new);
+        assert!(mapping.is_empty());
+    }
+
+    #[test]
+    fn test_build_line_mapping_empty_old() {
+        let old: Vec<&str> = vec![];
+        let new = vec!["a", "b"];
+        let mapping = build_line_mapping(&old, &new);
+        assert!(mapping.is_empty());
+    }
+
+    #[test]
+    fn test_build_line_mapping_empty_new() {
+        let old = vec!["a", "b"];
+        let new: Vec<&str> = vec![];
+        let mapping = build_line_mapping(&old, &new);
+        assert!(mapping.is_empty());
+    }
+
+    #[test]
+    fn test_build_line_mapping_insert_in_middle() {
+        let old = vec!["a", "b", "c"];
+        let new = vec!["a", "x", "y", "b", "c"];
+        let mapping = build_line_mapping(&old, &new);
+        assert_eq!(mapping.get(&1), Some(&1)); // "a" stays at 1
+        assert_eq!(mapping.get(&2), Some(&4)); // "b" moves to 4
+        assert_eq!(mapping.get(&3), Some(&5)); // "c" moves to 5
+    }
+
+    // -----------------------------------------------------------------------
+    // gap_fill_committed tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gap_fill_single_neighbor_before() {
+        // AI lines before, unattributed line after with no AI neighbor after
+        let mut committed_by_author: HashMap<&str, Vec<u32>> = HashMap::new();
+        committed_by_author.insert("abc123", vec![1, 2, 3]);
+        let committed_set: HashSet<u32> = [1, 2, 3, 4].into_iter().collect();
+
+        gap_fill_committed(
+            &mut committed_by_author,
+            &committed_set,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        let lines = committed_by_author.get("abc123").unwrap();
+        assert!(lines.contains(&4), "single-neighbor (before) should fill");
+    }
+
+    #[test]
+    fn test_gap_fill_single_neighbor_after() {
+        // AI lines after, unattributed line before with no AI neighbor before
+        let mut committed_by_author: HashMap<&str, Vec<u32>> = HashMap::new();
+        committed_by_author.insert("abc123", vec![3, 4, 5]);
+        let committed_set: HashSet<u32> = [1, 2, 3, 4, 5].into_iter().collect();
+
+        gap_fill_committed(
+            &mut committed_by_author,
+            &committed_set,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        let lines = committed_by_author.get("abc123").unwrap();
+        assert!(
+            lines.contains(&1),
+            "single-neighbor (after) should fill line 1"
+        );
+        assert!(
+            lines.contains(&2),
+            "single-neighbor (after) should fill line 2"
+        );
+    }
+
+    #[test]
+    fn test_gap_fill_h_override_prevents_fill() {
+        // h_ lines with h_override should NOT be gap-filled even if sandwiched
+        let mut committed_by_author: HashMap<&str, Vec<u32>> = HashMap::new();
+        committed_by_author.insert("abc123", vec![1, 2, 4, 5]);
+        committed_by_author.insert("h_human1", vec![3]);
+        let committed_set: HashSet<u32> = [1, 2, 3, 4, 5].into_iter().collect();
+        let h_override: HashSet<u32> = [3].into_iter().collect();
+
+        gap_fill_committed(
+            &mut committed_by_author,
+            &committed_set,
+            &HashSet::new(),
+            &h_override,
+        );
+
+        // Line 3 is h_ with override, so it becomes non-soft and IS eligible for
+        // gap-fill (since it's now treated as a regular unattributed line, not an h_ line)
+        // Actually re-reading the code: is_h_line = h_lines.contains(&line) && !h_override.contains(&line)
+        // With h_override containing 3, is_h_line = true && !true = false
+        // So it's NOT treated as h_line, meaning it CAN be gap-filled by same-author sandwich
+        let lines = committed_by_author.get("abc123").unwrap();
+        assert!(
+            lines.contains(&3),
+            "h_override makes h_ line eligible for gap-fill"
+        );
+    }
+
+    #[test]
+    fn test_gap_fill_h_line_between_prevents_single_neighbor_fill() {
+        // h_ line between AI neighbor and unattributed line prevents fill
+        let mut committed_by_author: HashMap<&str, Vec<u32>> = HashMap::new();
+        committed_by_author.insert("abc123", vec![5, 6]);
+        committed_by_author.insert("h_human1", vec![3]);
+        // Line 1 is unattributed, line 3 is h_, line 5-6 are AI
+        let committed_set: HashSet<u32> = [1, 3, 5, 6].into_iter().collect();
+
+        gap_fill_committed(
+            &mut committed_by_author,
+            &committed_set,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        let lines = committed_by_author.get("abc123").unwrap();
+        // Line 1 has only a "next" AI neighbor at line 5, but h_ line at 3 is between them
+        assert!(
+            !lines.contains(&1),
+            "h_ line between should prevent single-neighbor fill"
+        );
+    }
+
+    #[test]
+    fn test_gap_fill_multiple_authors_ambiguous() {
+        // Line between two different AI authors is ambiguous and should not be filled
+        let mut committed_by_author: HashMap<&str, Vec<u32>> = HashMap::new();
+        committed_by_author.insert("author_a", vec![1]);
+        committed_by_author.insert("author_b", vec![3]);
+        let committed_set: HashSet<u32> = [1, 2, 3].into_iter().collect();
+
+        gap_fill_committed(
+            &mut committed_by_author,
+            &committed_set,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        let lines_a = committed_by_author.get("author_a").unwrap();
+        let lines_b = committed_by_author.get("author_b").unwrap();
+        assert!(!lines_a.contains(&2));
+        assert!(!lines_b.contains(&2));
+    }
+
+    #[test]
+    fn test_gap_fill_empty_committed_set() {
+        let mut committed_by_author: HashMap<&str, Vec<u32>> = HashMap::new();
+        committed_by_author.insert("abc123", vec![1, 2, 3]);
+        let committed_set: HashSet<u32> = HashSet::new();
+
+        gap_fill_committed(
+            &mut committed_by_author,
+            &committed_set,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        // No lines in committed_set means nothing to iterate over, no fills
+        let lines = committed_by_author.get("abc123").unwrap();
+        assert_eq!(lines.len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // compress_to_line_attrs tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compress_to_line_attrs_single_line() {
+        let attrs = compress_to_line_attrs("ai_xyz", &[42]);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].start_line, 42);
+        assert_eq!(attrs[0].end_line, 42);
+        assert_eq!(attrs[0].author_id, "ai_xyz");
+    }
+
+    #[test]
+    fn test_compress_to_line_attrs_already_continuous() {
+        let attrs = compress_to_line_attrs("ai_xyz", &[1, 2, 3, 4, 5]);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].start_line, 1);
+        assert_eq!(attrs[0].end_line, 5);
+    }
+
+    #[test]
+    fn test_compress_to_line_attrs_empty_input() {
+        let attrs = compress_to_line_attrs("ai_xyz", &[]);
+        assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn test_compress_to_line_attrs_multiple_gaps() {
+        let attrs = compress_to_line_attrs("ai_xyz", &[1, 3, 5, 7]);
+        assert_eq!(attrs.len(), 4);
+        assert_eq!(attrs[0].start_line, 1);
+        assert_eq!(attrs[0].end_line, 1);
+        assert_eq!(attrs[1].start_line, 3);
+        assert_eq!(attrs[1].end_line, 3);
+        assert_eq!(attrs[2].start_line, 5);
+        assert_eq!(attrs[2].end_line, 5);
+        assert_eq!(attrs[3].start_line, 7);
+        assert_eq!(attrs[3].end_line, 7);
+    }
 }

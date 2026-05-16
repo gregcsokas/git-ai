@@ -1583,4 +1583,623 @@ mod tests {
         assert_owned(&result, 0, 3, "alice");
         assert_owned(&result, 4, 7, "bob");
     }
+
+    // -----------------------------------------------------------------------
+    // Move detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn move_detection_three_consecutive_lines_retain_attribution() {
+        // Old: lines A B C D E F, with A B C attributed to alice.
+        // New: lines D E F A B C (A B C moved to end).
+        let old = "aaa\nbbb\nccc\nddd\neee\nfff\n";
+        let new = "ddd\neee\nfff\naaa\nbbb\nccc\n";
+        let prev = vec![
+            attr(0, 12, "alice", 1), // aaa\nbbb\nccc\n
+            attr(12, 24, "bob", 1),  // ddd\neee\nfff\n
+        ];
+
+        let result = update_attributions(old, new, &prev, "carol", true);
+
+        // The moved block "aaa\nbbb\nccc\n" should retain alice's attribution
+        let aaa_pos = new.find("aaa").unwrap();
+        assert_owned(&result, aaa_pos, aaa_pos + 3, "alice");
+    }
+
+    #[test]
+    fn move_detection_below_threshold_not_detected() {
+        // Only 2 lines moved - below the 3-line threshold
+        let old = "aaa\nbbb\nccc\nddd\neee\n";
+        let new = "ccc\nddd\neee\naaa\nbbb\n";
+        let prev = vec![
+            attr(0, 8, "alice", 1), // aaa\nbbb\n
+            attr(8, 20, "bob", 1),  // ccc\nddd\neee\n
+        ];
+
+        let result = update_attributions(old, new, &prev, "carol", true);
+
+        // The 2-line block "aaa\nbbb\n" should NOT retain alice's attribution
+        // since it's below the 3-line threshold; it should be attributed to carol
+        let aaa_pos = new.find("aaa").unwrap();
+        assert_owned(&result, aaa_pos, aaa_pos + 3, "carol");
+    }
+
+    #[test]
+    fn move_detection_empty_lines_filtered_out() {
+        // Empty/whitespace-only lines don't count toward the threshold
+        let old = "aaa\n\nbbb\nccc\nddd\neee\n";
+        let new = "ccc\nddd\neee\naaa\n\nbbb\n";
+        let prev = vec![
+            attr(0, 12, "alice", 1), // aaa\n\nbbb\n
+            attr(12, 24, "bob", 1),  // ccc\nddd\neee\n
+        ];
+
+        let result = update_attributions(old, new, &prev, "carol", true);
+
+        // "aaa", "", "bbb" - only 2 non-empty lines, below threshold
+        // So the moved block should be attributed to carol (the current author)
+        let aaa_pos = new.find("aaa").unwrap();
+        assert_owned(&result, aaa_pos, aaa_pos + 3, "carol");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tokenizer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tokenize_string_literals() {
+        let content = r#"let s = "hello world";"#;
+        let tokens = tokenize(content, 0, content.len());
+
+        let lexemes: Vec<&str> = tokens.iter().map(|t| t.lexeme.as_str()).collect();
+        assert!(lexemes.contains(&"let"));
+        assert!(lexemes.contains(&"s"));
+        assert!(lexemes.contains(&r#""hello world""#));
+    }
+
+    #[test]
+    fn tokenize_string_with_escapes() {
+        let content = r#""hello \"world\"""#;
+        let tokens = tokenize(content, 0, content.len());
+
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].lexeme, r#""hello \"world\"""#);
+    }
+
+    #[test]
+    fn tokenize_identifiers() {
+        let content = "foo_bar _baz MyType";
+        let tokens = tokenize(content, 0, content.len());
+
+        let lexemes: Vec<&str> = tokens.iter().map(|t| t.lexeme.as_str()).collect();
+        assert_eq!(lexemes, vec!["foo_bar", "_baz", "MyType"]);
+    }
+
+    #[test]
+    fn tokenize_numbers_including_floats() {
+        let content = "42 3.14 0xFF 1_000";
+        let tokens = tokenize(content, 0, content.len());
+
+        let lexemes: Vec<&str> = tokens.iter().map(|t| t.lexeme.as_str()).collect();
+        assert_eq!(lexemes, vec!["42", "3.14", "0xFF", "1_000"]);
+    }
+
+    #[test]
+    fn tokenize_multi_char_operators() {
+        let content = "== != <= >= && || :: -> => .. ++ -- += -= *= /= << >>";
+        let tokens = tokenize(content, 0, content.len());
+
+        let lexemes: Vec<&str> = tokens.iter().map(|t| t.lexeme.as_str()).collect();
+        assert_eq!(
+            lexemes,
+            vec![
+                "==", "!=", "<=", ">=", "&&", "||", "::", "->", "=>", "..", "++", "--", "+=", "-=",
+                "*=", "/=", "<<", ">>"
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_single_char_operators() {
+        let content = "+ - * / ( ) { } [ ] ;";
+        let tokens = tokenize(content, 0, content.len());
+
+        let lexemes: Vec<&str> = tokens.iter().map(|t| t.lexeme.as_str()).collect();
+        assert_eq!(
+            lexemes,
+            vec!["+", "-", "*", "/", "(", ")", "{", "}", "[", "]", ";"]
+        );
+    }
+
+    #[test]
+    fn tokenize_utf8_identifiers() {
+        let content = "café naïve über_fn";
+        let tokens = tokenize(content, 0, content.len());
+
+        let lexemes: Vec<&str> = tokens.iter().map(|t| t.lexeme.as_str()).collect();
+        assert_eq!(lexemes, vec!["café", "naïve", "über_fn"]);
+    }
+
+    #[test]
+    fn tokenize_with_subrange() {
+        let content = "aaa bbb ccc ddd";
+        // Tokenize only "bbb ccc" (indices 4..11)
+        let tokens = tokenize(content, 4, 11);
+
+        let lexemes: Vec<&str> = tokens.iter().map(|t| t.lexeme.as_str()).collect();
+        assert_eq!(lexemes, vec!["bbb", "ccc"]);
+        assert_eq!(tokens[0].start, 4);
+        assert_eq!(tokens[0].end, 7);
+    }
+
+    #[test]
+    fn tokenize_empty_range() {
+        let content = "hello";
+        let tokens = tokenize(content, 3, 3);
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn tokenize_backtick_string() {
+        let content = "`template ${x}`";
+        let tokens = tokenize(content, 0, content.len());
+
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].lexeme, "`template ${x}`");
+    }
+
+    // -----------------------------------------------------------------------
+    // attribute_deletion_touched_lines tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn deletion_touched_lines_no_prior_attribution() {
+        // AI deletes part of a line; the remaining content has no prior attribution.
+        // The insertion ("bar") is attributed to AI via transform_attributions.
+        // attribute_deletion_touched_lines checks if the line has substantial
+        // (non-whitespace) coverage. Since "bar" (the Insert) already covers
+        // non-whitespace bytes, it counts as substantial coverage.
+        // The Equal bytes ("let x = " and ";\n") may or may not get re-attributed
+        // depending on whether the Insert covers non-whitespace on the line.
+        let old = "hello world\n";
+        let new = "hello\n";
+        let prev: Vec<Attribution> = vec![];
+
+        let result = update_attributions(old, new, &prev, "ai_agent", false);
+
+        // With no prior attributions and a deletion, the line should get AI attribution
+        // since there is no substantial prior coverage on the remaining Equal bytes.
+        // The algorithm attributes the line because the Equal bytes (" world" removed,
+        // "hello\n" remains) have no attribution, triggering the deletion-touched logic.
+        assert!(!result.is_empty());
+        // The AI should own something on this line
+        assert!(result.iter().all(|a| a.author_id == "ai_agent"));
+    }
+
+    #[test]
+    fn deletion_touched_lines_substantial_coverage_not_reattributed() {
+        // When a line already has substantial (non-whitespace) coverage,
+        // attribute_deletion_touched_lines should NOT re-attribute it
+        let old = "let x = foo_bar;\n";
+        let new = "let x = bar;\n";
+        // Pretend there IS prior attribution covering the content
+        let prev = vec![attr(0, old.len(), "alice", 1)];
+
+        let result = update_attributions(old, new, &prev, "ai_agent", false);
+
+        // alice should still own "let x = " since it was Equal
+        assert_owned(&result, 0, 3, "alice"); // "let" still alice's
+    }
+
+    // -----------------------------------------------------------------------
+    // attributions_to_line_attributions tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn line_attributions_empty_content_returns_empty() {
+        let result = attributions_to_line_attributions("", &[attr(0, 5, "alice", 1)]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn line_attributions_empty_attrs_returns_empty() {
+        let result = attributions_to_line_attributions("hello\n", &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn line_attributions_no_coverage_returns_empty_author() {
+        // Line exists but no attribution covers it
+        let content = "line1\nline2\n";
+        // Attribution only covers line1
+        let attrs = vec![attr(0, 6, "alice", 1)];
+
+        let line_attrs = attributions_to_line_attributions(content, &attrs);
+
+        // line2 should have an empty author_id
+        let line2 = line_attrs.iter().find(|la| la.start_line == 2).unwrap();
+        assert_eq!(line2.author_id, "");
+    }
+
+    #[test]
+    fn line_attributions_multiple_authors_most_recent_wins() {
+        // Two authors cover the same line; the one with the higher timestamp wins
+        let content = "hello world\n";
+        let attrs = vec![
+            attr(0, 5, "alice", 1), // "hello" - older
+            attr(6, 11, "bob", 2),  // "world" - newer
+        ];
+
+        let line_attrs = attributions_to_line_attributions(content, &attrs);
+
+        assert_eq!(line_attrs.len(), 1);
+        assert_eq!(line_attrs[0].author_id, "bob"); // most recent ts wins
+    }
+
+    #[test]
+    fn line_attributions_blank_lines_get_attributed() {
+        let content = "code\n\nmore\n";
+        // Attribution covers everything including the blank line
+        let attrs = vec![attr(0, 11, "alice", 1)];
+
+        let line_attrs = attributions_to_line_attributions(content, &attrs);
+
+        // The blank line (line 2) should be attributed
+        let blank = line_attrs
+            .iter()
+            .find(|la| la.start_line <= 2 && la.end_line >= 2);
+        assert!(blank.is_some());
+        assert_eq!(blank.unwrap().author_id, "alice");
+    }
+
+    #[test]
+    fn line_attributions_trailing_newline_only_ai_not_accepted() {
+        // AI only covers the trailing newline of a non-blank line
+        // This should NOT be enough for attribution
+        let content = "hello\n";
+        // Attribution covers only the newline at position 5
+        let attrs = vec![attr(5, 6, "ai_agent", 1)];
+
+        let line_attrs = attributions_to_line_attributions(content, &attrs);
+
+        // The line should have empty author since AI only covers trailing newline
+        assert_eq!(line_attrs.len(), 1);
+        assert_eq!(line_attrs[0].author_id, "");
+    }
+
+    #[test]
+    fn line_attributions_human_trailing_newline_accepted() {
+        // Human author covering only trailing newline IS accepted
+        let content = "hello\n";
+        let attrs = vec![attr(5, 6, "h_user1", 1)];
+
+        let line_attrs = attributions_to_line_attributions(content, &attrs);
+
+        assert_eq!(line_attrs.len(), 1);
+        assert_eq!(line_attrs[0].author_id, "h_user1");
+    }
+
+    #[test]
+    fn line_attributions_adjacent_same_author_merged() {
+        // Adjacent lines with same author should be merged into one range
+        let content = "line1\nline2\nline3\n";
+        let attrs = vec![
+            attr(0, 6, "alice", 1),
+            attr(6, 12, "alice", 1),
+            attr(12, 18, "alice", 1),
+        ];
+
+        let line_attrs = attributions_to_line_attributions(content, &attrs);
+
+        assert_eq!(line_attrs.len(), 1);
+        assert_eq!(line_attrs[0].start_line, 1);
+        assert_eq!(line_attrs[0].end_line, 3);
+        assert_eq!(line_attrs[0].author_id, "alice");
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_line_ranges tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compute_line_ranges_no_trailing_newline() {
+        let content = "hello";
+        let ranges = compute_line_ranges(content);
+
+        assert_eq!(ranges, vec![(0, 5)]);
+    }
+
+    #[test]
+    fn compute_line_ranges_multiple_lines() {
+        let content = "aaa\nbbb\nccc\n";
+        let ranges = compute_line_ranges(content);
+
+        assert_eq!(ranges, vec![(0, 4), (4, 8), (8, 12)]);
+    }
+
+    #[test]
+    fn compute_line_ranges_empty_content() {
+        let content = "";
+        let ranges = compute_line_ranges(content);
+
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn compute_line_ranges_single_newline() {
+        let content = "\n";
+        let ranges = compute_line_ranges(content);
+
+        assert_eq!(ranges, vec![(0, 1)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // merge_attributions tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_overlapping_ranges() {
+        let attrs = vec![attr(0, 10, "alice", 1), attr(5, 15, "alice", 1)];
+
+        let merged = merge_attributions(attrs);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].start, 0);
+        assert_eq!(merged[0].end, 15);
+        assert_eq!(merged[0].author_id, "alice");
+    }
+
+    #[test]
+    fn merge_zero_length_ranges_removed() {
+        let attrs = vec![
+            attr(0, 10, "alice", 1),
+            attr(5, 5, "bob", 2), // zero-length
+            attr(10, 20, "carol", 3),
+        ];
+
+        let merged = merge_attributions(attrs);
+
+        // Zero-length range should be removed
+        assert!(merged.iter().all(|a| a.start < a.end));
+        assert!(!merged.iter().any(|a| a.author_id == "bob"));
+    }
+
+    #[test]
+    fn merge_adjacent_same_author_same_ts() {
+        let attrs = vec![
+            attr(0, 5, "alice", 1),
+            attr(5, 10, "alice", 1),
+            attr(10, 15, "alice", 1),
+        ];
+
+        let merged = merge_attributions(attrs);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].start, 0);
+        assert_eq!(merged[0].end, 15);
+    }
+
+    #[test]
+    fn merge_different_authors_not_merged() {
+        let attrs = vec![attr(0, 5, "alice", 1), attr(5, 10, "bob", 1)];
+
+        let merged = merge_attributions(attrs);
+
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn merge_same_author_different_ts_not_merged() {
+        let attrs = vec![attr(0, 5, "alice", 1), attr(5, 10, "alice", 2)];
+
+        let merged = merge_attributions(attrs);
+
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn merge_empty_input() {
+        let attrs: Vec<Attribution> = vec![];
+        let merged = merge_attributions(attrs);
+        assert!(merged.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // diff_slices tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn diff_slices_basic_insert() {
+        let old: Vec<&str> = vec!["a", "b"];
+        let new: Vec<&str> = vec!["a", "x", "b"];
+
+        let ops = diff_slices(&old, &new);
+
+        // Should have an Equal for "a", Insert for "x", Equal for "b"
+        let has_insert = ops
+            .iter()
+            .any(|op| matches!(op, LineDiffOp::Insert { new_len: 1, .. }));
+        assert!(has_insert, "expected an insert op");
+    }
+
+    #[test]
+    fn diff_slices_basic_delete() {
+        let old: Vec<&str> = vec!["a", "b", "c"];
+        let new: Vec<&str> = vec!["a", "c"];
+
+        let ops = diff_slices(&old, &new);
+
+        let has_delete = ops
+            .iter()
+            .any(|op| matches!(op, LineDiffOp::Delete { old_len: 1, .. }));
+        assert!(has_delete, "expected a delete op");
+    }
+
+    #[test]
+    fn diff_slices_basic_replace() {
+        let old: Vec<&str> = vec!["a", "b", "c"];
+        let new: Vec<&str> = vec!["a", "x", "c"];
+
+        let ops = diff_slices(&old, &new);
+
+        let has_replace = ops
+            .iter()
+            .any(|op| matches!(op, LineDiffOp::Replace { .. }));
+        assert!(has_replace, "expected a replace op");
+    }
+
+    #[test]
+    fn diff_slices_empty_old() {
+        let old: Vec<&str> = vec![];
+        let new: Vec<&str> = vec!["a", "b"];
+
+        let ops = diff_slices(&old, &new);
+
+        let has_insert = ops
+            .iter()
+            .any(|op| matches!(op, LineDiffOp::Insert { new_len: 2, .. }));
+        assert!(has_insert, "expected insert of 2 items from empty");
+    }
+
+    #[test]
+    fn diff_slices_empty_new() {
+        let old: Vec<&str> = vec!["a", "b"];
+        let new: Vec<&str> = vec![];
+
+        let ops = diff_slices(&old, &new);
+
+        let has_delete = ops
+            .iter()
+            .any(|op| matches!(op, LineDiffOp::Delete { old_len: 2, .. }));
+        assert!(has_delete, "expected delete of 2 items to empty");
+    }
+
+    #[test]
+    fn diff_slices_both_empty() {
+        let old: Vec<&str> = vec![];
+        let new: Vec<&str> = vec![];
+
+        let ops = diff_slices(&old, &new);
+
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn diff_slices_identical() {
+        let old: Vec<&str> = vec!["a", "b", "c"];
+        let new: Vec<&str> = vec!["a", "b", "c"];
+
+        let ops = diff_slices(&old, &new);
+
+        // Should be a single Equal spanning all 3
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            LineDiffOp::Equal { len, .. } => assert_eq!(*len, 3),
+            _ => panic!("expected Equal op"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // update_attributions edge case tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn new_file_from_human_full_attribution() {
+        // Human creates a new file (h_ prefix, empty prev, empty prev_content)
+        let new = "fn main() {\n    println!(\"hi\");\n}\n";
+        let result = update_attributions("", new, &[], "h_user1", false);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].start, 0);
+        assert_eq!(result[0].end, new.len());
+        assert_eq!(result[0].author_id, "h_user1");
+    }
+
+    #[test]
+    fn new_file_from_ai_full_attribution() {
+        // AI creates a new file (non-h_ prefix, empty prev, empty prev_content)
+        let new = "fn main() {\n    println!(\"hi\");\n}\n";
+        let result = update_attributions("", new, &[], "ai_agent", false);
+
+        // AI path: should attribute via insertion ops
+        assert!(!result.is_empty());
+        // The entire file should be covered
+        let total_covered: usize = result.iter().map(|a| a.end - a.start).sum();
+        assert!(total_covered >= new.len());
+        assert!(result.iter().all(|a| a.author_id == "ai_agent"));
+    }
+
+    #[test]
+    fn replacing_entire_content_preserves_nothing_from_old() {
+        // Use content with zero token overlap to ensure complete replacement
+        let old = "aaa bbb ccc\n";
+        let new = "xxx yyy zzz\n";
+        let prev = vec![attr(0, old.len(), "alice", 1)];
+
+        let result = update_attributions(old, new, &prev, "bob", false);
+
+        // The only possible Equal match is the newline at the end.
+        // Alice's attribution on the newline may survive if the tokenizer treats
+        // it as a match. All non-whitespace content should be bob's.
+        let bob_bytes: usize = result
+            .iter()
+            .filter(|a| a.author_id == "bob")
+            .map(|a| a.end - a.start)
+            .sum();
+        // Bob should own at least the identifier tokens (9 bytes: xxx yyy zzz minus spaces)
+        assert!(
+            bob_bytes >= 9,
+            "bob should own most of the new content, got {} bytes",
+            bob_bytes
+        );
+    }
+
+    #[test]
+    fn multiple_insertions_at_different_positions() {
+        let old = "aaa\nccc\n";
+        let new = "aaa\nbbb\nccc\nddd\n";
+        let prev = vec![attr(0, old.len(), "alice", 1)];
+
+        let result = update_attributions(old, new, &prev, "bob", false);
+
+        // "aaa\n" and "ccc\n" should still be alice's
+        assert_owned(&result, 0, 3, "alice"); // "aaa"
+        let ccc_pos = new.find("ccc").unwrap();
+        assert_owned(&result, ccc_pos, ccc_pos + 3, "alice");
+
+        // "bbb\n" and "ddd\n" should be bob's
+        let bbb_pos = new.find("bbb").unwrap();
+        assert_owned(&result, bbb_pos, bbb_pos + 3, "bob");
+        let ddd_pos = new.find("ddd").unwrap();
+        assert_owned(&result, ddd_pos, ddd_pos + 3, "bob");
+    }
+
+    #[test]
+    fn new_file_from_human_keyword_author() {
+        // "human" keyword (not h_ prefix) also triggers human path
+        let new = "content\n";
+        let result = update_attributions("", new, &[], "human", false);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].start, 0);
+        assert_eq!(result[0].end, new.len());
+        assert_eq!(result[0].author_id, "human");
+    }
+
+    #[test]
+    fn update_attributions_preserves_equal_regions() {
+        // When content is partially unchanged, those regions keep old attribution
+        let old = "fn hello() {\n    world();\n}\n";
+        let new = "fn hello() {\n    universe();\n}\n";
+        let prev = vec![attr(0, old.len(), "alice", 1)];
+
+        let result = update_attributions(old, new, &prev, "bob", false);
+
+        // "fn hello() {\n" should remain alice's
+        assert_owned(&result, 0, 2, "alice"); // "fn"
+
+        // "universe" should be bob's
+        let uni_pos = new.find("universe").unwrap();
+        assert_owned(&result, uni_pos, uni_pos + 8, "bob");
+    }
 }
