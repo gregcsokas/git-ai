@@ -121,7 +121,7 @@ fn test_install_creates_hook_with_correct_content_and_permissions() {
 
     // Verify the stdout message
     assert!(
-        stdout.contains("installed post-commit hook"),
+        stdout.contains("installed post-commit and post-rewrite hooks"),
         "should print hook installation message, got: {}",
         stdout
     );

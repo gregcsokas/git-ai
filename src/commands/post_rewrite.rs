@@ -45,6 +45,15 @@ pub fn handle_post_rewrite(args: &[String]) {
     };
 
     for (old_sha, new_sha) in &mappings {
+        // Skip if the new commit already has a note (daemon may have handled it)
+        if git_cmd(&["notes", "--ref=ai", "show", new_sha]).is_ok() {
+            debug_log(&format!(
+                "post-rewrite: {} already has a note, skipping",
+                &new_sha[..7.min(new_sha.len())]
+            ));
+            continue;
+        }
+
         // Try to read the authorship note from the old commit
         let note = match git_cmd(&["notes", "--ref=ai", "show", old_sha]) {
             Ok(n) => n,

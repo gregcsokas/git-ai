@@ -24,10 +24,23 @@ pub fn handle_install() {
         process::exit(1);
     });
 
-    let hook_path = hooks_dir.join("post-commit");
-    let hook_content = "#!/bin/sh\ngit-ai post-commit\n";
-    fs::write(&hook_path, hook_content).unwrap_or_else(|e| {
-        eprintln!("git-ai install: failed to write hook: {}", e);
+    install_hook(&hooks_dir, "post-commit", "#!/bin/sh\ngit-ai post-commit\n");
+    install_hook(
+        &hooks_dir,
+        "post-rewrite",
+        "#!/bin/sh\ngit-ai post-rewrite --stdin\n",
+    );
+
+    println!("git-ai: installed post-commit and post-rewrite hooks");
+
+    // --- Step 3: Configure global trace2 to point to the v2 daemon socket ---
+    configure_trace2_global();
+}
+
+fn install_hook(hooks_dir: &PathBuf, name: &str, content: &str) {
+    let hook_path = hooks_dir.join(name);
+    fs::write(&hook_path, content).unwrap_or_else(|e| {
+        eprintln!("git-ai install: failed to write {} hook: {}", name, e);
         process::exit(1);
     });
 
@@ -35,15 +48,10 @@ pub fn handle_install() {
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| {
-            eprintln!("git-ai install: failed to chmod hook: {}", e);
+            eprintln!("git-ai install: failed to chmod {} hook: {}", name, e);
             process::exit(1);
         });
     }
-
-    println!("git-ai: installed post-commit hook");
-
-    // --- Step 3: Configure global trace2 to point to the v2 daemon socket ---
-    configure_trace2_global();
 }
 
 /// Stop the v1 daemon if it is running.
