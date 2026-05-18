@@ -18,7 +18,6 @@ pub mod internal;
 pub mod log;
 pub mod login;
 pub mod logout;
-pub mod migrate;
 pub mod perf;
 pub mod post_commit;
 pub mod post_rewrite;

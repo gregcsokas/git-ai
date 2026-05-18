@@ -95,12 +95,6 @@ fn main() {
                 process::exit(1);
             }
         }
-        Some("migrate") => {
-            if let Err(e) = commands::migrate::handle_migrate(&args[1..]) {
-                eprintln!("error: {}", e);
-                process::exit(1);
-            }
-        }
         Some("perf") => {
             if let Err(e) = commands::perf::handle_perf(&args[1..]) {
                 eprintln!("error: {}", e);
@@ -148,7 +142,6 @@ fn main() {
             println!("  stats         Show attribution statistics");
             println!("  bg            Daemon lifecycle (run, start, stop, status)");
             println!("  gc            Remove orphaned authorship notes");
-            println!("  migrate       Upgrade authorship note schemas in-place");
             println!("  perf          Performance baseline and regression detection");
             println!("  config        View and manage configuration");
             println!("  flush-metrics-db  Flush offline telemetry queue");

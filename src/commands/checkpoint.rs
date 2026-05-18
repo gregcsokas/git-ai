@@ -11,14 +11,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::helpers::{debug_log, find_repo_root_for_path, git_cmd, git_cmd_in};
 
-type CheckpointEventData = (
-    CheckpointKind,
-    PathBuf,
-    Vec<PathBuf>,
-    Option<AgentId>,
-    Option<HashMap<PathBuf, String>>,
-);
-
 /// Try to route the checkpoint through the daemon's control socket.
 /// Returns true if the daemon handled it, false if we need to fall back to local processing.
 #[cfg(not(unix))]
@@ -28,13 +20,11 @@ fn try_checkpoint_via_daemon(_args: &[String]) -> bool {
 
 #[cfg(unix)]
 fn try_checkpoint_via_daemon(args: &[String]) -> bool {
-    // Don't route to daemon if explicitly disabled
     if env::var("GIT_AI_NO_DAEMON").as_deref() == Ok("1") {
         return false;
     }
 
-    // Agent presets (claude, cursor, etc.) require local processing with hook input parsing;
-    // the daemon control socket doesn't support preset checkpoint requests.
+    // Agent presets require local processing with hook input parsing
     if let Some(first_arg) = args.first() {
         let name = first_arg.as_str();
         if git_ai::presets::known_presets().contains(&name)
@@ -49,119 +39,74 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
         return false;
     }
 
-    // Parse args to build request
-    let mut kind_str: Option<&str> = None;
-    let mut file_args: Vec<&str> = Vec::new();
-    let mut past_separator = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        let arg = args[i].as_str();
-        if arg == "--" {
-            past_separator = true;
-            i += 1;
-            continue;
-        }
-        if past_separator {
-            file_args.push(arg);
-        } else if kind_str.is_none() && matches!(arg, "human" | "mock_ai" | "mock_known_human") {
-            kind_str = Some(arg);
-        } else {
-            file_args.push(arg);
-        }
-        i += 1;
-    }
+    let (kind_str, file_args) = parse_simple_args(args);
 
     let kind = match kind_str {
         Some("mock_ai") => "ai",
         Some("mock_known_human") => "known_human",
-        Some("human") | None => "human",
         _ => "human",
     };
 
-    // Check if any file args are absolute paths (cross-repo scenario)
     let has_absolute_paths = file_args.iter().any(|f| PathBuf::from(f).is_absolute());
 
     if has_absolute_paths && !file_args.is_empty() {
-        // Cross-repo mode: group files by their containing repository and send
-        // separate daemon requests per repo
-        let mut repo_groups: HashMap<PathBuf, Vec<&str>> = HashMap::new();
-        for f in &file_args {
-            let p = PathBuf::from(f);
-            if !p.is_absolute() {
-                // Mix of absolute and relative -- fall back to local processing
-                return false;
-            }
-            if let Some(repo_root) = find_repo_root_for_path(&p) {
-                repo_groups.entry(repo_root).or_default().push(f);
-            }
+        return send_cross_repo_checkpoint(&paths, kind, kind_str, &file_args);
+    }
+
+    send_single_repo_checkpoint(&paths, kind, kind_str, &file_args)
+}
+
+fn send_cross_repo_checkpoint(
+    paths: &git_ai::daemon::DaemonPaths,
+    kind: &str,
+    kind_str: Option<&str>,
+    file_args: &[&str],
+) -> bool {
+    let mut repo_groups: HashMap<PathBuf, Vec<&str>> = HashMap::new();
+    for f in file_args {
+        let p = PathBuf::from(f);
+        if !p.is_absolute() {
+            return false;
         }
-
-        if repo_groups.is_empty() {
-            println!("0");
-            return true;
+        if let Some(repo_root) = find_repo_root_for_path(&p) {
+            repo_groups.entry(repo_root).or_default().push(f);
         }
+    }
 
-        let mut total_processed: u64 = 0;
-        for (repo_root, files) in &repo_groups {
-            let repo_root_str = repo_root.to_string_lossy().to_string();
-            let file_values: Vec<serde_json::Value> = files
-                .iter()
-                .map(|f| {
-                    // Make path relative to this repo root for the daemon
-                    let p = PathBuf::from(f);
-                    let rel = p
-                        .strip_prefix(repo_root)
-                        .unwrap_or(&p)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    serde_json::json!({"path": rel})
-                })
-                .collect();
-
-            let mut request = serde_json::json!({
-                "type": "checkpoint",
-                "repo_dir": repo_root_str,
-                "kind": kind,
-                "files": file_values,
-            });
-
-            if kind == "ai" {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
-                request["agent"] = serde_json::json!({
-                    "tool": kind_str.unwrap_or("mock_ai"),
-                    "id": format!("ai-thread-{}", ts),
-                    "model": "unknown"
-                });
-            }
-
-            let request_str = serde_json::to_string(&request).unwrap_or_default();
-
-            match git_ai::daemon::control_client::send_request(&paths.control_sock, &request_str) {
-                Ok(resp) if resp.ok => {
-                    total_processed += resp.processed.unwrap_or(0) as u64;
-                }
-                _ => return false,
-            }
-        }
-
-        println!("{}", total_processed);
-        write_checkpoint_debug_log(kind_str.unwrap_or("human"), total_processed as usize);
+    if repo_groups.is_empty() {
+        println!("0");
         return true;
     }
 
-    // Standard mode: single repo from CWD — resolve repo root without extra git spawn
-    // by walking up the directory tree (matching find_repo_root_for_path logic)
+    let mut total_processed: u64 = 0;
+    for (repo_root, files) in &repo_groups {
+        let request = build_daemon_request(repo_root, kind, kind_str, files);
+        let request_str = serde_json::to_string(&request).unwrap_or_default();
+        match git_ai::daemon::control_client::send_request(&paths.control_sock, &request_str) {
+            Ok(resp) if resp.ok => {
+                total_processed += resp.processed.unwrap_or(0) as u64;
+            }
+            _ => return false,
+        }
+    }
+
+    println!("{}", total_processed);
+    write_checkpoint_debug_log(kind_str.unwrap_or("human"), total_processed as usize);
+    true
+}
+
+fn send_single_repo_checkpoint(
+    paths: &git_ai::daemon::DaemonPaths,
+    kind: &str,
+    kind_str: Option<&str>,
+    file_args: &[&str],
+) -> bool {
     let cwd = env::current_dir().unwrap_or_default();
     let repo_root = match find_repo_root_for_path(&cwd) {
-        Some(root) => root.to_string_lossy().to_string(),
+        Some(root) => root,
         None => return false,
     };
 
-    let repo_root_path = PathBuf::from(&repo_root);
     let files: Vec<serde_json::Value> = if file_args.is_empty() {
         let status_output = git_cmd(&["status", "--porcelain", "-u"]).unwrap_or_default();
         status_output
@@ -176,7 +121,7 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
                 let p = PathBuf::from(f);
                 let abs = if p.is_absolute() { p } else { cwd.join(f) };
                 let rel = abs
-                    .strip_prefix(&repo_root_path)
+                    .strip_prefix(&repo_root)
                     .unwrap_or(&abs)
                     .to_string_lossy()
                     .replace('\\', "/");
@@ -192,25 +137,13 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
 
     let mut request = serde_json::json!({
         "type": "checkpoint",
-        "repo_dir": repo_root,
+        "repo_dir": repo_root.to_string_lossy(),
         "kind": kind,
         "files": files,
     });
-
-    if kind == "ai" {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        request["agent"] = serde_json::json!({
-            "tool": kind_str.unwrap_or("mock_ai"),
-            "id": format!("ai-thread-{}", ts),
-            "model": "unknown"
-        });
-    }
+    add_agent_metadata(&mut request, kind, kind_str);
 
     let request_str = serde_json::to_string(&request).unwrap_or_default();
-
     match git_ai::daemon::control_client::send_request(&paths.control_sock, &request_str) {
         Ok(resp) if resp.ok => {
             let processed = resp.processed.unwrap_or(0);
@@ -222,141 +155,186 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
     }
 }
 
-pub fn handle_checkpoint(args: &[String]) {
-    git_ai::daemon::run::ensure_daemon_running();
+fn build_daemon_request(
+    repo_root: &Path,
+    kind: &str,
+    kind_str: Option<&str>,
+    files: &[&str],
+) -> serde_json::Value {
+    let file_values: Vec<serde_json::Value> = files
+        .iter()
+        .map(|f| {
+            let p = PathBuf::from(f);
+            let rel = p
+                .strip_prefix(repo_root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            serde_json::json!({"path": rel})
+        })
+        .collect();
 
-    // Determine if this is an agent preset that must be processed locally
+    let mut request = serde_json::json!({
+        "type": "checkpoint",
+        "repo_dir": repo_root.to_string_lossy(),
+        "kind": kind,
+        "files": file_values,
+    });
+    add_agent_metadata(&mut request, kind, kind_str);
+    request
+}
+
+fn add_agent_metadata(request: &mut serde_json::Value, kind: &str, kind_str: Option<&str>) {
+    if kind == "ai" {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        request["agent"] = serde_json::json!({
+            "tool": kind_str.unwrap_or("mock_ai"),
+            "id": format!("ai-thread-{}", ts),
+            "model": "unknown"
+        });
+    }
+}
+
+fn parse_simple_args<'a>(args: &'a [String]) -> (Option<&'a str>, Vec<&'a str>) {
     let mut kind_str: Option<&str> = None;
     let mut file_args: Vec<&str> = Vec::new();
     let mut past_separator = false;
 
-    let mut i = 0;
-    while i < args.len() {
-        let arg = args[i].as_str();
-        if arg == "--" {
+    for arg in args {
+        let s = arg.as_str();
+        if s == "--" {
             past_separator = true;
-            i += 1;
-            continue;
-        }
-        if past_separator {
-            file_args.push(arg);
-        } else if kind_str.is_none() {
-            kind_str = Some(arg);
+        } else if past_separator {
+            file_args.push(s);
+        } else if kind_str.is_none() && matches!(s, "human" | "mock_ai" | "mock_known_human") {
+            kind_str = Some(s);
         } else {
-            file_args.push(arg);
+            file_args.push(s);
         }
-        i += 1;
     }
+    (kind_str, file_args)
+}
 
-    let agent_name = kind_str.unwrap_or("human");
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
-    // Check if this is a real agent preset (not a simple built-in kind)
+pub fn handle_checkpoint(args: &[String]) {
+    git_ai::daemon::run::ensure_daemon_running();
+
+    // Determine the agent/kind name from the first positional arg
+    let agent_name = args.first().map(String::as_str).unwrap_or("human");
+
     let is_agent_preset = git_ai::presets::known_presets().contains(&agent_name)
         && !matches!(agent_name, "human" | "mock_ai" | "mock_known_human");
 
     if is_agent_preset {
-        handle_agent_checkpoint(agent_name, &file_args);
+        handle_agent_checkpoint(agent_name, args);
         return;
     }
 
-    // Non-preset checkpoints MUST go through the daemon
+    // Try daemon first, fall back to local processing
     if !try_checkpoint_via_daemon(args) {
-        eprintln!("git-ai: checkpoint failed — could not connect to daemon");
-        eprintln!("Try restarting: git-ai bg restart");
-        std::process::exit(1);
+        let (kind_str, _) = parse_simple_args(args);
+        handle_simple_checkpoint_locally(kind_str.unwrap_or("human"), args);
     }
 }
 
-/// Write a checkpoint debug log entry if the checkpoint_debug_log feature flag is enabled.
-fn write_checkpoint_debug_log(preset_name: &str, event_count: usize) {
-    // Check if the feature flag is enabled via GIT_AI_TEST_CONFIG_PATCH
-    let enabled = if let Ok(patch_json) = env::var("GIT_AI_TEST_CONFIG_PATCH") {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&patch_json) {
-            parsed["feature_flags"]["checkpoint_debug_log"]
-                .as_bool()
-                .unwrap_or(false)
-        } else {
-            false
-        }
+// ---------------------------------------------------------------------------
+// Local fallback for simple kinds (human, mock_ai, mock_known_human)
+// ---------------------------------------------------------------------------
+
+fn handle_simple_checkpoint_locally(kind_str: &str, args: &[String]) {
+    let cwd = env::current_dir().unwrap_or_default();
+    let (_, file_args) = parse_simple_args(args);
+
+    let kind = match kind_str {
+        "mock_ai" => CheckpointKind::AiAgent,
+        "mock_known_human" => CheckpointKind::KnownHuman,
+        _ => CheckpointKind::Human,
+    };
+
+    let raw_files: Vec<PathBuf> = if !file_args.is_empty() {
+        file_args
+            .iter()
+            .map(|f| {
+                let p = PathBuf::from(f);
+                if p.is_absolute() { p } else { cwd.join(f) }
+            })
+            .collect()
     } else {
-        false
+        let repo_root_str = git_cmd_in(&cwd, &["rev-parse", "--show-toplevel"])
+            .unwrap_or_else(|_| cwd.to_string_lossy().to_string());
+        let repo_root = PathBuf::from(&repo_root_str);
+        let status_output = git_cmd_in(&cwd, &["status", "--porcelain", "-u"]).unwrap_or_default();
+        status_output
+            .lines()
+            .filter(|l| l.len() > 3)
+            .map(|l| repo_root.join(l[3..].trim()))
+            .filter(|p| p.exists())
+            .collect()
     };
 
-    if !enabled {
+    if raw_files.is_empty() {
+        println!("0");
         return;
     }
 
-    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let log_dir = PathBuf::from(&home)
-        .join(".git-ai")
-        .join("internal")
-        .join("checkpoint-debug-logs");
-    if let Err(e) = fs::create_dir_all(&log_dir) {
-        debug_log(&format!("failed to create checkpoint debug log dir: {}", e));
-        return;
-    }
+    let agent_id = if kind == CheckpointKind::AiAgent {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        Some(AgentId {
+            tool: kind_str.to_string(),
+            id: format!("ai-thread-{}", ts),
+            model: "unknown".to_string(),
+        })
+    } else {
+        None
+    };
 
-    // Generate today's date for the filename
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    // Simple date calculation (days since epoch)
-    let days = secs / 86400;
-    let filename = format!("{}.jsonl", days);
-    let log_file = log_dir.join(&filename);
+    let ev = EventData {
+        kind,
+        cwd: cwd.clone(),
+        file_paths: vec![],
+        agent_id,
+        dirty_files: None,
+    };
 
-    let trace_id = format!("trace-{}", now.as_nanos());
-    let timestamp = format!("{}Z", secs);
+    let repo_groups = group_files_by_repo(&cwd, &raw_files);
+    let mut processed = 0;
 
-    let entry = serde_json::json!({
-        "preset_name": preset_name,
-        "trace_id": trace_id,
-        "timestamp": timestamp,
-        "event_count": event_count,
-        "requests": [],
-    });
-
-    use std::io::Write;
-    let mut file = match fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_file)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            debug_log(&format!("failed to open checkpoint debug log: {}", e));
-            return;
+    for (repo_root_path, git_dir, base_commit, files) in repo_groups {
+        for file_path in &files {
+            let count = process_single_file(
+                file_path,
+                &repo_root_path,
+                &git_dir,
+                &base_commit,
+                &ev,
+                kind_str,
+            );
+            processed += count;
         }
-    };
-    let _ = writeln!(file, "{}", entry);
+    }
+
+    println!("{}", processed);
+    write_checkpoint_debug_log(kind_str, processed);
 }
 
+// ---------------------------------------------------------------------------
+// Agent preset checkpoint processing
+// ---------------------------------------------------------------------------
 
-/// Handle checkpoint for real agent presets (cursor, claude, agent-v1, etc.).
-/// Reads hook payload from stdin or --hook-input arg, parses it, and processes the resulting events.
-fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
+fn handle_agent_checkpoint(agent_name: &str, args: &[String]) {
     use git_ai::presets::ParsedHookEvent;
 
-    // Check if --hook-input is provided as a flag in file_args
-    let hook_input = {
-        let mut input: Option<String> = None;
-        let mut i = 0;
-        while i < file_args.len() {
-            if file_args[i] == "--hook-input" {
-                if i + 1 < file_args.len() {
-                    let value = file_args[i + 1];
-                    if value == "stdin" {
-                        break; // fall through to read from stdin
-                    }
-                    input = Some(value.to_string());
-                }
-                break;
-            }
-            i += 1;
-        }
-        input.unwrap_or_else(git_ai::presets::read_stdin)
-    };
+    // Extract --hook-input value or read from stdin
+    let hook_input = extract_hook_input(args);
 
     let events = match git_ai::presets::parse_hook_input(agent_name, &hook_input) {
         Ok(events) => events,
@@ -373,461 +351,40 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
         let is_pre_file_edit = matches!(&event, ParsedHookEvent::PreFileEdit(_));
         let is_post_file_edit = matches!(&event, ParsedHookEvent::PostFileEdit(_));
 
-        let (kind, cwd, file_paths, agent_id, dirty_files): CheckpointEventData = match event {
-            ParsedHookEvent::PreFileEdit(e) => (
-                CheckpointKind::Human,
-                e.context.cwd,
-                e.file_paths,
-                None,
-                e.dirty_files,
-            ),
-            ParsedHookEvent::PostFileEdit(e) => {
-                let aid = AgentId {
-                    tool: e.context.agent_tool.clone(),
-                    id: e.context.agent_session_id.clone(),
-                    model: e.context.agent_model.clone(),
-                };
-                (
-                    CheckpointKind::AiAgent,
-                    e.context.cwd,
-                    e.file_paths,
-                    Some(aid),
-                    e.dirty_files,
-                )
-            }
-            ParsedHookEvent::PreBashCall(e) => {
-                (CheckpointKind::Human, e.context.cwd, vec![], None, None)
-            }
-            ParsedHookEvent::PostBashCall(e) => {
-                let aid = AgentId {
-                    tool: e.context.agent_tool.clone(),
-                    id: e.context.agent_session_id.clone(),
-                    model: e.context.agent_model.clone(),
-                };
-                (
-                    CheckpointKind::AiAgent,
-                    e.context.cwd,
-                    vec![],
-                    Some(aid),
-                    None,
-                )
-            }
-            ParsedHookEvent::KnownHumanEdit(e) => (
-                CheckpointKind::KnownHuman,
-                e.cwd,
-                e.file_paths,
-                None,
-                e.dirty_files,
-            ),
-            ParsedHookEvent::UntrackedEdit(e) => {
-                (CheckpointKind::Human, e.cwd, e.file_paths, None, None)
-            }
-        };
+        let ev = destructure_event(event);
 
-        // Filter out --hook-input and its value from file_args
-        let actual_file_args: Vec<&str> = {
-            let mut result = Vec::new();
-            let mut skip_next = false;
-            for arg in file_args {
-                if skip_next {
-                    skip_next = false;
-                    continue;
-                }
-                if *arg == "--hook-input" {
-                    skip_next = true;
-                    continue;
-                }
-                result.push(*arg);
-            }
-            result
-        };
+        let raw_files = resolve_raw_files(&ev.cwd, &ev.file_paths, args);
 
-        // If preset provided file paths, use those. Otherwise use file_args or scan.
-        let raw_files: Vec<PathBuf> = if !file_paths.is_empty() {
-            file_paths.clone()
-        } else if !actual_file_args.is_empty() {
-            actual_file_args
-                .iter()
-                .map(|f| {
-                    let p = PathBuf::from(f);
-                    if p.is_absolute() { p } else { cwd.join(f) }
-                })
-                .collect()
-        } else {
-            // For bash tools, scan for all modified files from CWD
-            let status_output =
-                git_cmd_in(&cwd, &["status", "--porcelain", "-u"]).unwrap_or_default();
-            let cwd_repo_root = git_cmd_in(&cwd, &["rev-parse", "--show-toplevel"])
-                .unwrap_or_else(|_| cwd.to_string_lossy().to_string());
-            let cwd_root = PathBuf::from(&cwd_repo_root);
-            status_output
-                .lines()
-                .filter(|l| l.len() > 3)
-                .map(|l| cwd_root.join(l[3..].trim()))
-                .filter(|p| p.exists())
-                .collect()
-        };
+        // Group files by repository and process each group
+        let repo_groups = group_files_by_repo(&ev.cwd, &raw_files);
 
-        // Check if files contain absolute paths that might belong to different repos
-        let has_absolute = raw_files.iter().any(|f| f.is_absolute());
-
-        if has_absolute {
-            // Cross-repo mode: group files by their containing repository
-            let mut repo_groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-            for fp in &raw_files {
-                if !fp.exists() {
-                    continue;
-                }
-                let resolved = if fp.is_absolute() {
-                    find_repo_root_for_path(fp)
-                } else {
-                    find_repo_root_for_path(&cwd.join(fp))
-                };
-                if let Some(repo_root) = resolved {
-                    repo_groups.entry(repo_root).or_default().push(fp.clone());
-                }
-            }
-
-            for (repo_root_path, files) in &repo_groups {
-                let git_dir = match git_cmd_in(repo_root_path, &["rev-parse", "--git-dir"]) {
-                    Ok(d) => {
-                        let p = PathBuf::from(&d);
-                        if p.is_relative() {
-                            repo_root_path.join(p)
-                        } else {
-                            p
-                        }
-                    }
-                    Err(_) => continue,
-                };
-                let base_commit = git_cmd_in(repo_root_path, &["rev-parse", "HEAD"])
-                    .unwrap_or_else(|_| "initial".to_string());
-
-                // For PreFileEdit events, register pending AI edit markers
-                if is_pre_file_edit {
-                    for fp in files {
-                        let rel = fp
-                            .strip_prefix(repo_root_path)
-                            .unwrap_or(fp)
-                            .to_string_lossy()
-                            .replace('\\', "/");
-                        write_pending_ai_edit(&git_dir, &rel);
-                    }
-                }
-
-                // For PostFileEdit (AI) events, clear pending AI edit markers
-                if is_post_file_edit {
-                    for fp in files {
-                        let rel = fp
-                            .strip_prefix(repo_root_path)
-                            .unwrap_or(fp)
-                            .to_string_lossy()
-                            .replace('\\', "/");
-                        clear_pending_ai_edit(&git_dir, &rel);
-                    }
-                }
-
-                for file_path in files {
-                    // Allow processing even if file doesn't exist on disk
-                    // when dirty_files provides content (e.g., create_file pre-edit with empty content)
-                    let dirty_content = dirty_files.as_ref().and_then(|df| df.get(file_path));
-                    if !file_path.exists() && dirty_content.is_none() {
-                        continue;
-                    }
-
-                    let relative_path = file_path
-                        .strip_prefix(repo_root_path)
-                        .unwrap_or(file_path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-
-                    // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
-                    if kind == CheckpointKind::KnownHuman
-                        && has_pending_ai_edit(&git_dir, &relative_path)
-                    {
-                        debug_log(&format!(
-                            "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
-                            relative_path
-                        ));
-                        continue;
-                    }
-
-                    // Use dirty_files content if available, otherwise read from disk
-                    let content = if let Some(dc) = dirty_content {
-                        dc.clone()
-                    } else {
-                        match fs::read_to_string(file_path) {
-                            Ok(c) => c,
-                            Err(_) => continue,
-                        }
-                    };
-
-                    let blob_sha = git_ai::core::working_log::save_blob(
-                        &git_dir,
-                        &base_commit,
-                        content.as_bytes(),
-                    );
-
-                    let existing_checkpoints =
-                        git_ai::core::working_log::read_checkpoints(&git_dir, &base_commit);
-                    let previous_attributions =
-                        find_latest_attributions(&existing_checkpoints, &relative_path);
-                    let previous_content = find_latest_content(
-                        &existing_checkpoints,
-                        &relative_path,
-                        &git_dir,
-                        &base_commit,
-                    );
-
-                    // For KnownHuman, resolve the full git identity (Name <email>)
-                    let known_human_identity = if kind == CheckpointKind::KnownHuman {
-                        let name = git_cmd_in(repo_root_path, &["config", "user.name"])
-                            .unwrap_or_else(|_| "Unknown".to_string());
-                        let email = git_cmd_in(repo_root_path, &["config", "user.email"])
-                            .unwrap_or_else(|_| "unknown".to_string());
-                        Some(format!("{} <{}>", name, email))
-                    } else {
-                        None
-                    };
-
-                    let trace_value = if kind == CheckpointKind::AiAgent {
-                        Some(format!(
-                            "trace-{}",
-                            SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_nanos())
-                                .unwrap_or(0)
-                        ))
-                    } else {
-                        None
-                    };
-
-                    let author_id = match (&kind, &agent_id) {
-                        (CheckpointKind::AiAgent, Some(aid)) => {
-                            let session_id = git_ai::core::authorship_log::generate_session_id(
-                                &aid.tool, &aid.id,
-                            );
-                            let trace_hash = git_ai::core::authorship_log::generate_trace_hash(
-                                trace_value.as_deref().unwrap(),
-                            );
-                            format!("{}::{}", session_id, trace_hash)
-                        }
-                        (CheckpointKind::KnownHuman, _) => {
-                            git_ai::core::authorship_log::generate_human_hash(
-                                known_human_identity.as_deref().unwrap(),
-                            )
-                        }
-                        _ => "human".to_string(),
-                    };
-
-                    let enable_move_detection =
-                        kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
-                    let new_attributions = update_attributions(
-                        &previous_content,
-                        &content,
-                        &previous_attributions,
-                        &author_id,
-                        enable_move_detection,
-                    );
-                    let line_attributions =
-                        attributions_to_line_attributions(&content, &new_attributions);
-
-                    let entry = WorkingLogEntry {
-                        file: relative_path,
-                        blob_sha,
-                        attributions: new_attributions,
-                        line_attributions,
-                    };
-
-                    let checkpoint_author = if let Some(ref aid) = agent_id {
-                        aid.tool.clone()
-                    } else if let Some(ref identity) = known_human_identity {
-                        identity.clone()
-                    } else {
-                        agent_name.to_string()
-                    };
-
-                    let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
-                    checkpoint.agent_id = agent_id.clone();
-                    checkpoint.trace_id = trace_value;
-
-                    git_ai::core::working_log::append_checkpoint(
-                        &git_dir,
-                        &base_commit,
-                        &checkpoint,
-                    );
-                    processed += 1;
-                }
-            }
-        } else {
-            // Standard mode: all files relative to CWD repo
-            let repo_root_path = cwd;
-            let git_dir = match git_cmd_in(&repo_root_path, &["rev-parse", "--git-dir"]) {
-                Ok(d) => {
-                    let p = PathBuf::from(&d);
-                    if p.is_relative() {
-                        repo_root_path.join(p)
-                    } else {
-                        p
-                    }
-                }
-                Err(_) => continue,
-            };
-
-            let base_commit = git_cmd_in(&repo_root_path, &["rev-parse", "HEAD"])
-                .unwrap_or_else(|_| "initial".to_string());
-
-            let files_to_process = &raw_files;
-
-            // For PreFileEdit events, register pending AI edit markers
+        for (repo_root_path, git_dir, base_commit, files) in repo_groups {
+            // PreFileEdit: register pending AI edit markers
             if is_pre_file_edit {
-                for fp in files_to_process {
-                    let rel = fp
-                        .strip_prefix(&repo_root_path)
-                        .unwrap_or(fp)
-                        .to_string_lossy()
-                        .replace('\\', "/");
+                for fp in &files {
+                    let rel = make_relative(fp, &repo_root_path);
                     write_pending_ai_edit(&git_dir, &rel);
                 }
             }
 
-            // For PostFileEdit (AI) events, clear pending AI edit markers
+            // PostFileEdit: clear pending AI edit markers
             if is_post_file_edit {
-                for fp in files_to_process {
-                    let rel = fp
-                        .strip_prefix(&repo_root_path)
-                        .unwrap_or(fp)
-                        .to_string_lossy()
-                        .replace('\\', "/");
+                for fp in &files {
+                    let rel = make_relative(fp, &repo_root_path);
                     clear_pending_ai_edit(&git_dir, &rel);
                 }
             }
 
-            for file_path in files_to_process {
-                // Allow processing even if file doesn't exist on disk
-                // when dirty_files provides content (e.g., create_file pre-edit with empty content)
-                let dirty_content = dirty_files.as_ref().and_then(|df| df.get(file_path));
-                if !file_path.exists() && dirty_content.is_none() {
-                    continue;
-                }
-
-                let relative_path = file_path
-                    .strip_prefix(&repo_root_path)
-                    .unwrap_or(file_path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-
-                // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
-                if kind == CheckpointKind::KnownHuman
-                    && has_pending_ai_edit(&git_dir, &relative_path)
-                {
-                    debug_log(&format!(
-                        "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
-                        relative_path
-                    ));
-                    continue;
-                }
-
-                // Use dirty_files content if available, otherwise read from disk
-                let content = if let Some(dc) = dirty_content {
-                    dc.clone()
-                } else {
-                    match fs::read_to_string(file_path) {
-                        Ok(c) => c,
-                        Err(_) => continue,
-                    }
-                };
-
-                let blob_sha = git_ai::core::working_log::save_blob(
+            for file_path in &files {
+                let count = process_single_file(
+                    file_path,
+                    &repo_root_path,
                     &git_dir,
                     &base_commit,
-                    content.as_bytes(),
+                    &ev,
+                    agent_name,
                 );
-
-                let existing_checkpoints =
-                    git_ai::core::working_log::read_checkpoints(&git_dir, &base_commit);
-                let previous_attributions =
-                    find_latest_attributions(&existing_checkpoints, &relative_path);
-                let previous_content = find_latest_content(
-                    &existing_checkpoints,
-                    &relative_path,
-                    &git_dir,
-                    &base_commit,
-                );
-
-                // For KnownHuman, resolve the full git identity (Name <email>)
-                let known_human_identity = if kind == CheckpointKind::KnownHuman {
-                    let name = git_cmd_in(&repo_root_path, &["config", "user.name"])
-                        .unwrap_or_else(|_| "Unknown".to_string());
-                    let email = git_cmd_in(&repo_root_path, &["config", "user.email"])
-                        .unwrap_or_else(|_| "unknown".to_string());
-                    Some(format!("{} <{}>", name, email))
-                } else {
-                    None
-                };
-
-                let trace_value = if kind == CheckpointKind::AiAgent {
-                    Some(format!(
-                        "trace-{}",
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map(|d| d.as_nanos())
-                            .unwrap_or(0)
-                    ))
-                } else {
-                    None
-                };
-
-                let author_id = match (&kind, &agent_id) {
-                    (CheckpointKind::AiAgent, Some(aid)) => {
-                        let session_id =
-                            git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
-                        let trace_hash = git_ai::core::authorship_log::generate_trace_hash(
-                            trace_value.as_deref().unwrap(),
-                        );
-                        format!("{}::{}", session_id, trace_hash)
-                    }
-                    (CheckpointKind::KnownHuman, _) => {
-                        git_ai::core::authorship_log::generate_human_hash(
-                            known_human_identity.as_deref().unwrap(),
-                        )
-                    }
-                    _ => "human".to_string(),
-                };
-
-                let enable_move_detection =
-                    kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
-                let new_attributions = update_attributions(
-                    &previous_content,
-                    &content,
-                    &previous_attributions,
-                    &author_id,
-                    enable_move_detection,
-                );
-                let line_attributions =
-                    attributions_to_line_attributions(&content, &new_attributions);
-
-                let entry = WorkingLogEntry {
-                    file: relative_path,
-                    blob_sha,
-                    attributions: new_attributions,
-                    line_attributions,
-                };
-
-                let checkpoint_author = if let Some(ref aid) = agent_id {
-                    aid.tool.clone()
-                } else if let Some(ref identity) = known_human_identity {
-                    identity.clone()
-                } else {
-                    agent_name.to_string()
-                };
-
-                let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
-                checkpoint.agent_id = agent_id.clone();
-                checkpoint.trace_id = trace_value;
-
-                git_ai::core::working_log::append_checkpoint(&git_dir, &base_commit, &checkpoint);
-                processed += 1;
+                processed += count;
             }
         }
     }
@@ -835,21 +392,314 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
     println!("{}", processed);
 }
 
+struct EventData {
+    kind: CheckpointKind,
+    cwd: PathBuf,
+    file_paths: Vec<PathBuf>,
+    agent_id: Option<AgentId>,
+    dirty_files: Option<HashMap<PathBuf, String>>,
+}
+
+fn destructure_event(event: git_ai::presets::ParsedHookEvent) -> EventData {
+    use git_ai::presets::ParsedHookEvent;
+    match event {
+        ParsedHookEvent::PreFileEdit(e) => EventData {
+            kind: CheckpointKind::Human,
+            cwd: e.context.cwd,
+            file_paths: e.file_paths,
+            agent_id: None,
+            dirty_files: e.dirty_files,
+        },
+        ParsedHookEvent::PostFileEdit(e) => EventData {
+            kind: CheckpointKind::AiAgent,
+            cwd: e.context.cwd,
+            file_paths: e.file_paths,
+            agent_id: Some(AgentId {
+                tool: e.context.agent_tool.clone(),
+                id: e.context.agent_session_id.clone(),
+                model: e.context.agent_model.clone(),
+            }),
+            dirty_files: e.dirty_files,
+        },
+        ParsedHookEvent::PreBashCall(e) => EventData {
+            kind: CheckpointKind::Human,
+            cwd: e.context.cwd,
+            file_paths: vec![],
+            agent_id: None,
+            dirty_files: None,
+        },
+        ParsedHookEvent::PostBashCall(e) => EventData {
+            kind: CheckpointKind::AiAgent,
+            cwd: e.context.cwd,
+            file_paths: vec![],
+            agent_id: Some(AgentId {
+                tool: e.context.agent_tool.clone(),
+                id: e.context.agent_session_id.clone(),
+                model: e.context.agent_model.clone(),
+            }),
+            dirty_files: None,
+        },
+        ParsedHookEvent::KnownHumanEdit(e) => EventData {
+            kind: CheckpointKind::KnownHuman,
+            cwd: e.cwd,
+            file_paths: e.file_paths,
+            agent_id: None,
+            dirty_files: e.dirty_files,
+        },
+        ParsedHookEvent::UntrackedEdit(e) => EventData {
+            kind: CheckpointKind::Human,
+            cwd: e.cwd,
+            file_paths: e.file_paths,
+            agent_id: None,
+            dirty_files: None,
+        },
+    }
+}
+
+fn extract_hook_input(args: &[String]) -> String {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--hook-input" && i + 1 < args.len() && args[i + 1] != "stdin" {
+            return args[i + 1].clone();
+        }
+        i += 1;
+    }
+    git_ai::presets::read_stdin()
+}
+
+fn resolve_raw_files(cwd: &Path, file_paths: &[PathBuf], args: &[String]) -> Vec<PathBuf> {
+    if !file_paths.is_empty() {
+        return file_paths.to_vec();
+    }
+
+    // Collect non-flag file args
+    let actual_file_args: Vec<&str> = {
+        let mut result = Vec::new();
+        let mut skip_next = false;
+        let mut past_kind = false;
+        for arg in args {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg == "--hook-input" || arg == "--" {
+                skip_next = arg == "--hook-input";
+                continue;
+            }
+            if !past_kind && git_ai::presets::known_presets().contains(&arg.as_str()) {
+                past_kind = true;
+                continue;
+            }
+            result.push(arg.as_str());
+        }
+        result
+    };
+
+    if !actual_file_args.is_empty() {
+        return actual_file_args
+            .iter()
+            .map(|f| {
+                let p = PathBuf::from(f);
+                if p.is_absolute() { p } else { cwd.join(f) }
+            })
+            .collect();
+    }
+
+    // Scan for all modified files
+    let status_output = git_cmd_in(cwd, &["status", "--porcelain", "-u"]).unwrap_or_default();
+    let cwd_repo_root = git_cmd_in(cwd, &["rev-parse", "--show-toplevel"])
+        .unwrap_or_else(|_| cwd.to_string_lossy().to_string());
+    let cwd_root = PathBuf::from(&cwd_repo_root);
+    status_output
+        .lines()
+        .filter(|l| l.len() > 3)
+        .map(|l| cwd_root.join(l[3..].trim()))
+        .filter(|p| p.exists())
+        .collect()
+}
+
+/// Group files by their containing repository. Returns (repo_root, git_dir, base_commit, files).
+fn group_files_by_repo(
+    cwd: &Path,
+    raw_files: &[PathBuf],
+) -> Vec<(PathBuf, PathBuf, String, Vec<PathBuf>)> {
+    let has_absolute = raw_files.iter().any(|f| f.is_absolute());
+
+    if has_absolute {
+        let mut repo_groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for fp in raw_files {
+            if !fp.exists() {
+                continue;
+            }
+            let target = if fp.is_absolute() { fp.clone() } else { cwd.join(fp) };
+            if let Some(repo_root) = find_repo_root_for_path(&target) {
+                repo_groups.entry(repo_root).or_default().push(fp.clone());
+            }
+        }
+
+        repo_groups
+            .into_iter()
+            .filter_map(|(repo_root, files)| {
+                let git_dir = resolve_git_dir(&repo_root)?;
+                let base_commit = git_cmd_in(&repo_root, &["rev-parse", "HEAD"])
+                    .unwrap_or_else(|_| "initial".to_string());
+                Some((repo_root, git_dir, base_commit, files))
+            })
+            .collect()
+    } else {
+        // Single repo from CWD
+        let repo_root = cwd.to_path_buf();
+        match resolve_git_dir(&repo_root) {
+            Some(git_dir) => {
+                let base_commit = git_cmd_in(&repo_root, &["rev-parse", "HEAD"])
+                    .unwrap_or_else(|_| "initial".to_string());
+                vec![(repo_root, git_dir, base_commit, raw_files.to_vec())]
+            }
+            None => vec![],
+        }
+    }
+}
+
+fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
+    let d = git_cmd_in(repo_root, &["rev-parse", "--git-dir"]).ok()?;
+    let p = PathBuf::from(&d);
+    Some(if p.is_relative() { repo_root.join(p) } else { p })
+}
+
+fn make_relative(file_path: &Path, repo_root: &Path) -> String {
+    file_path
+        .strip_prefix(repo_root)
+        .unwrap_or(file_path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Process a single file for a checkpoint event. Returns 1 if processed, 0 if skipped.
+fn process_single_file(
+    file_path: &Path,
+    repo_root: &Path,
+    git_dir: &Path,
+    base_commit: &str,
+    ev: &EventData,
+    agent_name: &str,
+) -> usize {
+    let dirty_content = ev.dirty_files.as_ref().and_then(|df| df.get(file_path));
+    if !file_path.exists() && dirty_content.is_none() {
+        return 0;
+    }
+
+    let relative_path = make_relative(file_path, repo_root);
+
+    // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
+    if ev.kind == CheckpointKind::KnownHuman && has_pending_ai_edit(git_dir, &relative_path) {
+        debug_log(&format!(
+            "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
+            relative_path
+        ));
+        return 0;
+    }
+
+    let content = if let Some(dc) = dirty_content {
+        dc.clone()
+    } else {
+        match fs::read_to_string(file_path) {
+            Ok(c) => c,
+            Err(_) => return 0,
+        }
+    };
+
+    let blob_sha =
+        git_ai::core::working_log::save_blob(git_dir, base_commit, content.as_bytes());
+
+    let existing_checkpoints =
+        git_ai::core::working_log::read_checkpoints(git_dir, base_commit);
+    let previous_attributions = find_latest_attributions(&existing_checkpoints, &relative_path);
+    let previous_content =
+        find_latest_content(&existing_checkpoints, &relative_path, git_dir, base_commit);
+
+    let known_human_identity = if ev.kind == CheckpointKind::KnownHuman {
+        let name = git_cmd_in(repo_root, &["config", "user.name"])
+            .unwrap_or_else(|_| "Unknown".to_string());
+        let email = git_cmd_in(repo_root, &["config", "user.email"])
+            .unwrap_or_else(|_| "unknown".to_string());
+        Some(format!("{} <{}>", name, email))
+    } else {
+        None
+    };
+
+    let trace_value = if ev.kind == CheckpointKind::AiAgent {
+        Some(format!(
+            "trace-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ))
+    } else {
+        None
+    };
+
+    let author_id = match (&ev.kind, &ev.agent_id) {
+        (CheckpointKind::AiAgent, Some(aid)) => {
+            let session_id =
+                git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
+            let trace_hash = git_ai::core::authorship_log::generate_trace_hash(
+                trace_value.as_deref().unwrap(),
+            );
+            format!("{}::{}", session_id, trace_hash)
+        }
+        (CheckpointKind::KnownHuman, _) => git_ai::core::authorship_log::generate_human_hash(
+            known_human_identity.as_deref().unwrap(),
+        ),
+        _ => "human".to_string(),
+    };
+
+    let enable_move_detection =
+        ev.kind == CheckpointKind::Human || ev.kind == CheckpointKind::KnownHuman;
+    let new_attributions = update_attributions(
+        &previous_content,
+        &content,
+        &previous_attributions,
+        &author_id,
+        enable_move_detection,
+    );
+    let line_attributions = attributions_to_line_attributions(&content, &new_attributions);
+
+    let entry = WorkingLogEntry {
+        file: relative_path,
+        blob_sha,
+        attributions: new_attributions,
+        line_attributions,
+    };
+
+    let checkpoint_author = if let Some(ref aid) = ev.agent_id {
+        aid.tool.clone()
+    } else if let Some(ref identity) = known_human_identity {
+        identity.clone()
+    } else {
+        agent_name.to_string()
+    };
+
+    let mut checkpoint = Checkpoint::new(ev.kind, checkpoint_author, vec![entry]);
+    checkpoint.agent_id = ev.agent_id.clone();
+    checkpoint.trace_id = trace_value;
+
+    git_ai::core::working_log::append_checkpoint(git_dir, base_commit, &checkpoint);
+    1
+}
+
 // ---------------------------------------------------------------------------
 // Pending AI edit markers
 // ---------------------------------------------------------------------------
 
-/// Directory for pending AI edit markers: .git/ai/pending_ai_edits/
 fn pending_ai_edits_dir(git_dir: &Path) -> PathBuf {
     git_dir.join("ai").join("pending_ai_edits")
 }
 
-/// Convert a relative file path to a safe marker filename (replace / and \ with __)
 fn marker_filename(relative_path: &str) -> String {
     relative_path.replace(['/', '\\'], "__")
 }
 
-/// Write a pending AI edit marker for the given file.
 fn write_pending_ai_edit(git_dir: &Path, relative_path: &str) {
     let dir = pending_ai_edits_dir(git_dir);
     let _ = fs::create_dir_all(&dir);
@@ -857,17 +707,20 @@ fn write_pending_ai_edit(git_dir: &Path, relative_path: &str) {
     let _ = fs::write(&marker_path, "");
 }
 
-/// Check if a file has a pending AI edit marker.
 fn has_pending_ai_edit(git_dir: &Path, relative_path: &str) -> bool {
-    let marker_path = pending_ai_edits_dir(git_dir).join(marker_filename(relative_path));
-    marker_path.exists()
+    pending_ai_edits_dir(git_dir)
+        .join(marker_filename(relative_path))
+        .exists()
 }
 
-/// Clear the pending AI edit marker for the given file.
 fn clear_pending_ai_edit(git_dir: &Path, relative_path: &str) {
     let marker_path = pending_ai_edits_dir(git_dir).join(marker_filename(relative_path));
     let _ = fs::remove_file(&marker_path);
 }
+
+// ---------------------------------------------------------------------------
+// Working log helpers
+// ---------------------------------------------------------------------------
 
 fn find_latest_attributions(checkpoints: &[Checkpoint], relative_path: &str) -> Vec<Attribution> {
     for cp in checkpoints.iter().rev() {
@@ -905,4 +758,47 @@ fn find_latest_content(
     }
 
     String::new()
+}
+
+// ---------------------------------------------------------------------------
+// Debug logging
+// ---------------------------------------------------------------------------
+
+fn write_checkpoint_debug_log(preset_name: &str, event_count: usize) {
+    let enabled = if let Ok(patch_json) = env::var("GIT_AI_TEST_CONFIG_PATCH") {
+        serde_json::from_str::<serde_json::Value>(&patch_json)
+            .ok()
+            .and_then(|v| v["feature_flags"]["checkpoint_debug_log"].as_bool())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if !enabled {
+        return;
+    }
+
+    let log_dir = git_ai::paths::git_ai_internal_dir().join("checkpoint-debug-logs");
+    if fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let filename = format!("{}.jsonl", now.as_secs() / 86400);
+    let log_file = log_dir.join(&filename);
+
+    let entry = serde_json::json!({
+        "preset_name": preset_name,
+        "trace_id": format!("trace-{}", now.as_nanos()),
+        "timestamp": format!("{}Z", now.as_secs()),
+        "event_count": event_count,
+        "requests": [],
+    });
+
+    use std::io::Write;
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+        let _ = writeln!(file, "{}", entry);
+    }
 }
