@@ -436,12 +436,12 @@ pub(super) fn read_event_stream(
     // Read lines from watermark position
     let mut line = String::new();
     loop {
-        match crate::transcripts::types::read_jsonl_line(&mut reader, &mut line).map_err(
-            |e| TranscriptError::Transient {
+        match crate::transcripts::types::read_jsonl_line(&mut reader, &mut line).map_err(|e| {
+            TranscriptError::Transient {
                 message: format!("I/O error reading line: {}", e),
                 retry_after: std::time::Duration::from_secs(5),
-            },
-        )? {
+            }
+        })? {
             crate::transcripts::types::JsonlLineState::Eof => break,
             crate::transcripts::types::JsonlLineState::Partial => break,
             crate::transcripts::types::JsonlLineState::Complete(bytes_read) => {
