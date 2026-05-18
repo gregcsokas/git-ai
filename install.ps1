@@ -659,6 +659,16 @@ try {
     Write-Host "Warning: Failed to write config.json: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
+# Persist API_KEY if provided
+if ($env:API_KEY) {
+    & $finalExe config set api_key $env:API_KEY 2>$null | Out-Null
+}
+
+# Persist API_BASE as api_base_url if provided
+if ($env:API_BASE) {
+    & $finalExe config set api_base_url $env:API_BASE 2>$null | Out-Null
+}
+
 Write-Host 'Close and reopen your terminal and IDE sessions to use git-ai.' -ForegroundColor Yellow
 
 # If nonce exchange failed, run interactive login

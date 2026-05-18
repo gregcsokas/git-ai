@@ -167,6 +167,7 @@ fn dispatch_commit(
                 .fetch_add(1, Ordering::Relaxed);
 
             emit_commit_telemetry(resolved, telemetry);
+            sweep_and_upload_transcripts(resolved, telemetry);
 
             eprintln!(
                 "[git-ai daemon] successfully processed commit in {}",
@@ -217,7 +218,7 @@ fn emit_commit_telemetry(repo_path: &std::path::Path, telemetry: &TelemetryHandl
         None => return,
     };
 
-    let remote_url = git(&["remote", "get-url", "origin"]).unwrap_or_default();
+    let remote_url = strip_url_credentials(&git(&["remote", "get-url", "origin"]).unwrap_or_default());
 
     // Read the authorship note we just wrote
     let note_content = git(&["notes", "--ref=ai", "show", &commit_sha]);
@@ -312,6 +313,45 @@ fn dispatch_stash(resolved: &std::path::Path, argv: &[String], daemon_stats: &st
             );
         }
     }
+}
+
+fn sweep_and_upload_transcripts(repo_path: &std::path::Path, telemetry: &TelemetryHandle) {
+    let git_dir = repo_path.join(".git");
+    if !git_dir.is_dir() {
+        return;
+    }
+
+    let updates = crate::transcripts::sweep::sweep_transcripts(&git_dir);
+    for update in updates {
+        if update.new_events.is_empty() {
+            continue;
+        }
+        let content = serde_json::json!({
+            "type": "transcript",
+            "agent": update.agent,
+            "session_id": update.session_id,
+            "events": update.new_events,
+        });
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("agent".to_string(), update.agent.clone());
+        metadata.insert("session_id".to_string(), update.session_id.clone());
+        telemetry.submit_cas(content, metadata);
+    }
+}
+
+/// Strip credentials from a git remote URL.
+/// Handles both HTTPS URLs (https://user:token@host/...) and SSH URLs.
+fn strip_url_credentials(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("https://") {
+        if let Some(at_pos) = rest.find('@') {
+            return format!("https://{}", &rest[at_pos + 1..]);
+        }
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        if let Some(at_pos) = rest.find('@') {
+            return format!("http://{}", &rest[at_pos + 1..]);
+        }
+    }
+    url.to_string()
 }
 
 fn dispatch_stash_pop(resolved: &std::path::Path, daemon_stats: &stats::DaemonStats) {

@@ -3,7 +3,52 @@ mod commands;
 use std::env;
 use std::process;
 
+const GIT_HOOK_NAMES: &[&str] = &[
+    "applypatch-msg",
+    "pre-applypatch",
+    "post-applypatch",
+    "pre-commit",
+    "pre-merge-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "pre-rebase",
+    "post-checkout",
+    "post-merge",
+    "pre-push",
+    "pre-auto-gc",
+    "post-rewrite",
+    "sendemail-validate",
+];
+
 fn main() {
+    let binary_name = env::args_os()
+        .next()
+        .and_then(|arg| arg.into_string().ok())
+        .and_then(|path| {
+            std::path::Path::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "git-ai".to_string());
+
+    // Legacy hook symlink detection: if invoked as a git hook name, show deprecation.
+    if GIT_HOOK_NAMES.contains(&binary_name.as_str()) {
+        eprintln!(
+            "git-ai: the git core hooks feature has been sunset.\n\
+             To remove the deprecated git-ai hook symlinks from this repository, run:\n\
+             \n\
+             \x20 git-ai git-hooks remove\n"
+        );
+        process::exit(0);
+    }
+
+    // Git proxy passthrough: if invoked as "git", exec the real git binary.
+    if binary_name == "git" || binary_name == "git.exe" {
+        proxy_to_real_git();
+    }
+
     let args: Vec<String> = env::args().skip(1).collect();
 
     match args.first().map(String::as_str) {
@@ -23,7 +68,8 @@ fn main() {
         }
         Some("push-notes") | Some("push") => commands::push_notes::handle_push_notes(&args[1..]),
         Some("search") => commands::search::handle_search(&args[1..]),
-        Some("install") => commands::install::handle_install(),
+        Some("install") | Some("install-hooks") => commands::install::handle_install(),
+        Some("git-hooks") => commands::git_hooks::handle_git_hooks(&args[1..]),
         Some("status") => commands::status::handle_status(&args[1..]),
         Some("stats") => commands::stats::handle_stats(&args[1..]),
         Some("log") => {
@@ -116,5 +162,32 @@ fn main() {
             eprintln!("git-ai: unknown command '{}'", cmd);
             process::exit(1);
         }
+    }
+}
+
+/// Proxy all arguments to the real git binary. Used when this binary is
+/// symlinked as "git" to avoid breaking legacy installations.
+fn proxy_to_real_git() -> ! {
+    let git = git_ai::core::git_binary::git_path();
+    let args: Vec<String> = env::args().skip(1).collect();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = process::Command::new(git).args(&args).exec();
+        eprintln!("git-ai: failed to exec git: {}", err);
+        process::exit(127);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = process::Command::new(git)
+            .args(&args)
+            .status()
+            .unwrap_or_else(|e| {
+                eprintln!("git-ai: failed to run git: {}", e);
+                process::exit(127);
+            });
+        process::exit(status.code().unwrap_or(1));
     }
 }

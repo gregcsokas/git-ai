@@ -2620,7 +2620,16 @@ impl TestRepo {
         command
             .args(args)
             .current_dir(working_dir)
-            .env("GIT_TRACE2_EVENT", "/dev/null");
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .env("HOME", self._tempdir.path());
+        for (key, value) in &self.daemon_env {
+            command.env(key, value);
+        }
+        if let Some(ref patch) = self.config_patch
+            && let Ok(json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", json);
+        }
         let output = command
             .output()
             .unwrap_or_else(|_| panic!("Failed to execute git-ai command: {:?}", args));

@@ -1,20 +1,15 @@
 use git_ai::core::attribution::{
     Attribution, attributions_to_line_attributions, update_attributions,
 };
-use git_ai::core::git_binary::git_cmd as git_command;
 use git_ai::core::working_log::{AgentId, Checkpoint, CheckpointKind, WorkingLogEntry};
 
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::commands::helpers::{
-    debug_log, discover_repo_and_gitdir, find_repo_root_for_path, git_cmd, git_cmd_in,
-    read_head_sha, resolve_repo_info_in,
-};
+use crate::commands::helpers::{debug_log, find_repo_root_for_path, git_cmd, git_cmd_in};
 
 type CheckpointEventData = (
     CheckpointKind,
@@ -230,11 +225,7 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
 pub fn handle_checkpoint(args: &[String]) {
     git_ai::daemon::run::ensure_daemon_running();
 
-    // Try routing through the daemon's control socket for lower latency
-    if try_checkpoint_via_daemon(args) {
-        return;
-    }
-
+    // Determine if this is an agent preset that must be processed locally
     let mut kind_str: Option<&str> = None;
     let mut file_args: Vec<&str> = Vec::new();
     let mut past_separator = false;
@@ -268,106 +259,11 @@ pub fn handle_checkpoint(args: &[String]) {
         return;
     }
 
-    let kind = match agent_name {
-        "mock_ai" => CheckpointKind::AiAgent,
-        "mock_known_human" => CheckpointKind::KnownHuman,
-        _ => CheckpointKind::Human,
-    };
-
-    // Check if any file args are absolute paths (cross-repo scenario)
-    let has_absolute_paths = file_args.iter().any(|f| PathBuf::from(f).is_absolute());
-
-    if has_absolute_paths && !file_args.is_empty() {
-        // Cross-repo mode: group files by their containing repository and process each group
-        let mut processed = 0;
-        // Group files by repo root
-        let mut repo_groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        for f in &file_args {
-            let p = PathBuf::from(f);
-            if !p.is_absolute() || !p.exists() {
-                continue;
-            }
-            if let Some(repo_root) = find_repo_root_for_path(&p) {
-                repo_groups.entry(repo_root).or_default().push(p);
-            }
-        }
-
-        for (repo_root_path, files) in &repo_groups {
-            let (git_dir, base_commit) = match resolve_repo_info_in(repo_root_path) {
-                Ok((_, gd, head)) => (gd, head),
-                Err(_) => continue,
-            };
-
-            for file_path in files {
-                processed += process_checkpoint_file(
-                    file_path,
-                    repo_root_path,
-                    &git_dir,
-                    &base_commit,
-                    kind,
-                    kind_str,
-                );
-            }
-        }
-        println!("{}", processed);
-        write_checkpoint_debug_log(agent_name, processed);
-    } else {
-        // Standard mode: all files relative to CWD repo
-        // Single git process spawn for all repo info (saves ~6ms vs 3 separate calls)
-        // Discover repo info from filesystem — zero git process spawns
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let (repo_root_path, git_dir) = match discover_repo_and_gitdir(&cwd) {
-            Some(pair) => pair,
-            None => {
-                eprintln!("git-ai: not a git repository");
-                std::process::exit(1);
-            }
-        };
-        let base_commit = read_head_sha(&git_dir).unwrap_or_else(|| "initial".to_string());
-
-        let files_to_process: Vec<PathBuf> = if file_args.is_empty() {
-            let status_output = git_cmd(&["status", "--porcelain", "-u"]).unwrap_or_default();
-            status_output
-                .lines()
-                .filter(|l| !l.is_empty())
-                .filter_map(|l| {
-                    if l.len() > 3 {
-                        Some(repo_root_path.join(l[3..].trim()))
-                    } else {
-                        None
-                    }
-                })
-                .filter(|p| p.exists())
-                .collect()
-        } else {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root_path.clone());
-            file_args
-                .iter()
-                .map(|f| {
-                    let p = PathBuf::from(f);
-                    if p.is_absolute() { p } else { cwd.join(f) }
-                })
-                .filter(|p| p.exists())
-                .collect()
-        };
-
-        let mut processed = 0;
-
-        for file_path in &files_to_process {
-            processed += process_checkpoint_file(
-                file_path,
-                &repo_root_path,
-                &git_dir,
-                &base_commit,
-                kind,
-                kind_str,
-            );
-        }
-
-        println!("{}", processed);
-
-        // Write checkpoint debug log if feature flag is enabled
-        write_checkpoint_debug_log(agent_name, processed);
+    // Non-preset checkpoints MUST go through the daemon
+    if !try_checkpoint_via_daemon(args) {
+        eprintln!("git-ai: checkpoint failed — could not connect to daemon");
+        eprintln!("Try restarting: git-ai bg restart");
+        std::process::exit(1);
     }
 }
 
@@ -436,147 +332,6 @@ fn write_checkpoint_debug_log(preset_name: &str, event_count: usize) {
     let _ = writeln!(file, "{}", entry);
 }
 
-/// Process a single file for checkpoint, writing to the given repo's working log.
-/// Returns 1 if processed, 0 if skipped.
-fn process_checkpoint_file(
-    file_path: &Path,
-    repo_root_path: &Path,
-    git_dir: &Path,
-    base_commit: &str,
-    kind: CheckpointKind,
-    kind_str: Option<&str>,
-) -> usize {
-    let relative_path = file_path
-        .strip_prefix(repo_root_path)
-        .unwrap_or(file_path)
-        .to_string_lossy()
-        .replace('\\', "/");
-
-    // Skip conflicted files (UU status in merge conflicts)
-    if is_file_conflicted(repo_root_path, &relative_path) {
-        debug_log(&format!("skipping conflicted file: {}", relative_path));
-        return 0;
-    }
-
-    // Skip binary files (non-UTF8 content that's being replaced)
-    if let Ok(bytes) = fs::read(file_path) {
-        // Check if content is binary by looking for null bytes in first 8KB
-        let check_len = bytes.len().min(8192);
-        if bytes[..check_len].contains(&0) {
-            debug_log(&format!("skipping binary file: {}", relative_path));
-            return 0;
-        }
-    }
-
-    // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
-    if kind == CheckpointKind::KnownHuman && has_pending_ai_edit(git_dir, &relative_path) {
-        debug_log(&format!(
-            "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
-            relative_path
-        ));
-        return 0;
-    }
-
-    // For AI checkpoints, clear the pending AI edit marker
-    if kind == CheckpointKind::AiAgent {
-        clear_pending_ai_edit(git_dir, &relative_path);
-    }
-
-    let content = match fs::read_to_string(file_path) {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
-
-    let blob_sha = git_ai::core::working_log::save_blob(git_dir, base_commit, content.as_bytes());
-
-    let existing_checkpoints = git_ai::core::working_log::read_checkpoints(git_dir, base_commit);
-    let previous_attributions = find_latest_attributions(&existing_checkpoints, &relative_path);
-
-    let previous_content =
-        find_latest_content(&existing_checkpoints, &relative_path, git_dir, base_commit);
-
-    let checkpoint_agent_id = if kind == CheckpointKind::AiAgent {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        Some(AgentId {
-            tool: kind_str.unwrap_or("mock_ai").to_string(),
-            id: format!("ai-thread-{}", ts),
-            model: "unknown".to_string(),
-        })
-    } else {
-        None
-    };
-
-    // For KnownHuman, resolve the git user identity for both the author_id hash
-    // and the checkpoint.author field — they must be consistent.
-    let known_human_identity = if kind == CheckpointKind::KnownHuman {
-        let name = git_cmd_in(repo_root_path, &["config", "user.name"])
-            .unwrap_or_else(|_| "Unknown".to_string());
-        let email = git_cmd_in(repo_root_path, &["config", "user.email"])
-            .unwrap_or_else(|_| "unknown".to_string());
-        Some(format!("{} <{}>", name, email))
-    } else {
-        None
-    };
-
-    let trace_value = if kind == CheckpointKind::AiAgent {
-        Some(format!(
-            "trace-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ))
-    } else {
-        None
-    };
-
-    let author_id = match &kind {
-        CheckpointKind::AiAgent => {
-            let aid = checkpoint_agent_id.as_ref().unwrap();
-            let session_id = git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
-            let trace_hash =
-                git_ai::core::authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
-            format!("{}::{}", session_id, trace_hash)
-        }
-        CheckpointKind::KnownHuman => git_ai::core::authorship_log::generate_human_hash(
-            known_human_identity.as_deref().unwrap(),
-        ),
-        CheckpointKind::Human => "human".to_string(),
-    };
-    let enable_move_detection = kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
-    let new_attributions = update_attributions(
-        &previous_content,
-        &content,
-        &previous_attributions,
-        &author_id,
-        enable_move_detection,
-    );
-
-    let line_attributions = attributions_to_line_attributions(&content, &new_attributions);
-
-    let entry = WorkingLogEntry {
-        file: relative_path.clone(),
-        blob_sha,
-        attributions: new_attributions,
-        line_attributions,
-    };
-
-    let checkpoint_author = if let Some(ref identity) = known_human_identity {
-        identity.clone()
-    } else {
-        kind_str.unwrap_or("human").to_string()
-    };
-
-    let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
-    checkpoint.agent_id = checkpoint_agent_id.clone();
-    checkpoint.trace_id = trace_value;
-
-    git_ai::core::working_log::append_checkpoint(git_dir, base_commit, &checkpoint);
-    1
-}
 
 /// Handle checkpoint for real agent presets (cursor, claude, agent-v1, etc.).
 /// Reads hook payload from stdin or --hook-input arg, parses it, and processes the resulting events.
@@ -1100,30 +855,6 @@ fn write_pending_ai_edit(git_dir: &Path, relative_path: &str) {
     let _ = fs::create_dir_all(&dir);
     let marker_path = dir.join(marker_filename(relative_path));
     let _ = fs::write(&marker_path, "");
-}
-
-/// Check if a file is in a conflicted state (e.g., UU during merge conflict).
-fn is_file_conflicted(repo_root: &Path, relative_path: &str) -> bool {
-    let output = git_command()
-        .arg("-C")
-        .arg(repo_root)
-        .args(["status", "--porcelain", "--", relative_path])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
-    if let Ok(out) = output {
-        let status = String::from_utf8_lossy(&out.stdout);
-        for line in status.lines() {
-            if line.len() >= 2 {
-                let xy = &line[..2];
-                // UU = both modified (conflict), AA = both added, etc.
-                if xy == "UU" || xy == "AA" || xy == "DU" || xy == "UD" {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Check if a file has a pending AI edit marker.

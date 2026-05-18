@@ -367,6 +367,16 @@ EOF
     mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
 fi
 
+# Persist API_KEY if provided
+if [ -n "${API_KEY:-}" ]; then
+    ${INSTALL_DIR}/git-ai config set api_key "$API_KEY" >/dev/null 2>&1 || true
+fi
+
+# Persist API_BASE as api_base_url if provided
+if [ -n "${API_BASE:-}" ]; then
+    ${INSTALL_DIR}/git-ai config set api_base_url "$API_BASE" >/dev/null 2>&1 || true
+fi
+
 # Add to PATH in all detected shell configurations
 SHELLS_CONFIGURED=""
 SHELLS_ALREADY_CONFIGURED=""

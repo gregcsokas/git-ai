@@ -152,6 +152,7 @@ fn test_daemon_detects_commit_and_writes_note() {
     let cp_output = Command::new(binary)
         .current_dir(&repo_path)
         .args(["checkpoint", "mock_ai", "hello.txt"])
+        .env("HOME", daemon_home.path())
         .env("GIT_TRACE2_EVENT", "/dev/null")
         .output()
         .expect("checkpoint failed");
@@ -336,6 +337,7 @@ fn test_daemon_is_idempotent() {
     Command::new(binary)
         .current_dir(&repo_path)
         .args(["checkpoint", "mock_ai", "hello.txt"])
+        .env("HOME", daemon_home.path())
         .env("GIT_TRACE2_EVENT", "/dev/null")
         .output()
         .unwrap();
@@ -481,6 +483,7 @@ fn test_daemon_handles_rapid_sequential_commits() {
         Command::new(binary)
             .current_dir(&repo_path)
             .args(["checkpoint", "mock_ai", &format!("file{}.txt", i)])
+            .env("HOME", daemon_home.path())
             .env("GIT_TRACE2_EVENT", "/dev/null")
             .output()
             .unwrap();
@@ -878,6 +881,7 @@ fn test_daemon_rewrite_amend_copies_note() {
     Command::new(binary)
         .current_dir(&repo_path)
         .args(["checkpoint", "mock_ai", "hello.txt"])
+        .env("HOME", daemon_home.path())
         .env("GIT_TRACE2_EVENT", "/dev/null")
         .output()
         .unwrap();
@@ -1037,6 +1041,7 @@ fn test_daemon_rewrite_rebase_copies_notes() {
     Command::new(binary)
         .current_dir(&repo_path)
         .args(["checkpoint", "mock_ai", "feat.txt"])
+        .env("HOME", daemon_home.path())
         .env("GIT_TRACE2_EVENT", "/dev/null")
         .output()
         .unwrap();
@@ -1225,6 +1230,7 @@ fn test_daemon_handles_concurrent_multi_repo_commits() {
         Command::new(binary)
             .current_dir(repo)
             .args(["checkpoint", "mock_ai", &filename])
+            .env("HOME", daemon_home.path())
             .env("GIT_TRACE2_EVENT", "/dev/null")
             .output()
             .unwrap();
@@ -1354,6 +1360,7 @@ fn test_daemon_resolves_symlinked_repo() {
     Command::new(binary)
         .current_dir(&link_path)
         .args(["checkpoint", "mock_ai", "hello.txt"])
+        .env("HOME", daemon_home.path())
         .env("GIT_TRACE2_EVENT", "/dev/null")
         .output()
         .unwrap();

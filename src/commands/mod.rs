@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod exchange_nonce;
 pub mod fetch_notes;
 pub mod gc;
+pub mod git_hooks;
 pub mod helpers;
 pub mod install;
 pub mod internal;
