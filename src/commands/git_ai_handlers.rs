@@ -53,6 +53,10 @@ pub fn handle_git_ai(args: &[String]) {
             | "install-hooks"
             | "install"
             | "uninstall-hooks"
+            // post-commit-hook MUST NOT exit non-zero if the daemon is down
+            // (it would mark the user's commit as failed). It opens its own
+            // short-lived control connection only when the daemon is up.
+            | "post-commit-hook"
     );
     if needs_daemon {
         use crate::daemon::telemetry_handle::{
@@ -105,6 +109,9 @@ pub fn handle_git_ai(args: &[String]) {
                 log_message("stats", "info", None)
             }
             handle_stats(&args[1..]);
+        }
+        "post-commit-hook" => {
+            commands::post_commit_hook::handle_post_commit_hook(&args[1..]);
         }
         "status" => {
             commands::status::handle_status(&args[1..]);
@@ -333,6 +340,9 @@ fn print_help() {
     );
     eprintln!("  stats [commit]     Show AI authorship statistics for a commit");
     eprintln!("    --json                 Output in JSON format");
+    eprintln!(
+        "  post-commit-hook   Render the AI/human graph for HEAD; intended for `.git/hooks/post-commit`"
+    );
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  show <rev|range>   Display authorship logs for a revision or range");

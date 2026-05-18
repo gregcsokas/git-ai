@@ -85,8 +85,19 @@ pub fn post_commit_with_final_state(
     // This matches the convention in checkpoint.rs
     let parent_sha = base_commit.unwrap_or_else(|| "initial".to_string());
 
-    // Initialize the new storage system
     let repo_storage = &repo.storage;
+
+    // Idempotency guard: if a note already exists for this commit, this function
+    // has already run successfully. Skip the expensive recompute and just return
+    // the existing log. Also opportunistically clean up the parent working log
+    // in case the prior run crashed between notes_add and delete_working_log.
+    if let Some(existing) = crate::git::notes_api::read_note(repo, &commit_sha)
+        && let Ok(parsed) = AuthorshipLog::deserialize_from_string(&existing)
+    {
+        let _ = repo_storage.delete_working_log_for_base_commit(&parent_sha);
+        return Ok((commit_sha, parsed));
+    }
+
     let working_log = repo_storage.working_log_for_base_commit(&parent_sha)?;
 
     let parent_working_log = working_log.read_all_checkpoints()?;
@@ -624,6 +635,63 @@ mod tests {
     #[test]
     fn test_count_line_ranges_all_scattered() {
         assert_eq!(count_line_ranges(&[1, 10, 20, 30]), 4);
+    }
+
+    /// `post_commit_with_final_state` must be safe to call twice in a row.
+    /// The first call writes the authorship note and deletes the parent
+    /// working log. Without the idempotency guard the second call would fail
+    /// (no parent working log to read) or silently regenerate. With the guard
+    /// it short-circuits and returns the existing log unchanged.
+    ///
+    /// This protects against the race between the daemon's trace2 path and
+    /// the `commit.ensure_processed` RPC for the same commit.
+    #[test]
+    fn post_commit_with_final_state_is_idempotent_when_note_exists() {
+        use crate::git::notes_api::read_note;
+        use crate::git::test_utils::TmpRepo;
+
+        let tmp = TmpRepo::new().expect("TmpRepo::new");
+        tmp.write_file("a.txt", "hello\n", false).expect("write a");
+        let parent_sha = tmp.commit_all("initial").expect("initial commit");
+
+        tmp.write_file("a.txt", "hello\nworld\n", false)
+            .expect("write a 2");
+        let commit_sha = tmp.commit_all("second").expect("second commit");
+
+        // First call: writes a real note and deletes the parent working log.
+        let (first_sha, _first_log) = post_commit_with_final_state(
+            tmp.gitai_repo(),
+            Some(parent_sha.clone()),
+            commit_sha.clone(),
+            "test@git-ai.local".to_string(),
+            true,
+            None,
+        )
+        .expect("first call");
+        assert_eq!(first_sha, commit_sha);
+        assert!(
+            read_note(tmp.gitai_repo(), &commit_sha).is_some(),
+            "note must exist after first call"
+        );
+
+        // Second call: parent working log is gone (the first call deleted it).
+        // Without the idempotency guard, `working_log_for_base_commit` would
+        // fail or return empty data and we'd regenerate / error. With the
+        // guard, the function short-circuits and returns the existing log.
+        let (second_sha, _second_log) = post_commit_with_final_state(
+            tmp.gitai_repo(),
+            Some(parent_sha),
+            commit_sha.clone(),
+            "test@git-ai.local".to_string(),
+            true,
+            None,
+        )
+        .expect("second call must succeed via idempotency guard");
+        assert_eq!(second_sha, commit_sha);
+        assert!(
+            read_note(tmp.gitai_repo(), &commit_sha).is_some(),
+            "note must still exist after second call"
+        );
     }
 
     #[test]

@@ -86,6 +86,7 @@ mod pending_ai_edit_suppression;
 mod performance;
 mod performance_targets;
 mod pi;
+mod post_commit_hook_subcommand;
 mod post_commit_unit;
 mod pre_commit_unit;
 mod prompt_across_commit;

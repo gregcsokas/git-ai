@@ -84,8 +84,8 @@ pub mod transcript_redaction;
 pub mod transcript_worker;
 
 pub use control_api::{
-    BashSessionQueryResponse, BashSnapshotQueryResponse, ControlRequest, ControlResponse,
-    FamilyStatus, TelemetryEnvelope,
+    BashSessionQueryResponse, BashSnapshotQueryResponse, CommitEnsureProcessedResponse,
+    ControlRequest, ControlResponse, FamilyStatus, TelemetryEnvelope,
 };
 
 const PID_META_FILE: &str = "daemon.pid.json";
@@ -2792,14 +2792,23 @@ fn apply_rewrite_side_effect(
         RewriteLogEvent::Commit { commit } => {
             let final_state_override =
                 normalized_carryover_snapshot_ref.or(committed_final_state.as_ref());
-            post_commit_with_final_state(
+            // Serialize against any concurrent `commit.ensure_processed` RPC for
+            // the same commit so we don't both race on `delete_working_log`.
+            // The early-return guard in `post_commit_with_final_state` makes
+            // this a no-op if the RPC raced ahead, but we still want exclusive
+            // access while we do the expensive work.
+            let slot = coordinator.acquire_commit_processing_slot(&commit.commit_sha);
+            let _guard = slot.lock().unwrap();
+            let result = post_commit_with_final_state(
                 &repo,
                 commit.base_commit.clone(),
                 commit.commit_sha.clone(),
                 author.clone(),
                 true,
                 final_state_override,
-            )?;
+            );
+            coordinator.maybe_drop_commit_processing_slot(&commit.commit_sha, &slot);
+            result?;
         }
         RewriteLogEvent::CommitAmend { commit_amend } => {
             let final_state_override =
@@ -3864,6 +3873,10 @@ pub struct ActorDaemonCoordinator {
         Mutex<HashMap<String, VecDeque<RecentReplayPrerequisite>>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    /// Per-commit serialization for `ensure_commit_processed`. Prevents the
+    /// trace2 path and a concurrent `commit.ensure_processed` RPC from racing
+    /// on `post_commit_with_final_state` for the same commit.
+    commit_processing: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     carryover_snapshots_by_id: Mutex<HashMap<String, HashMap<String, String>>>,
     carryover_snapshot_ids_by_root: Mutex<HashMap<String, Vec<String>>>,
     bash_sessions: Mutex<crate::daemon::bash_sessions::BashSessionState>,
@@ -3956,6 +3969,7 @@ impl ActorDaemonCoordinator {
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
+            commit_processing: Mutex::new(HashMap::new()),
             carryover_snapshots_by_id: Mutex::new(HashMap::new()),
             carryover_snapshot_ids_by_root: Mutex::new(HashMap::new()),
             bash_sessions: Mutex::new(crate::daemon::bash_sessions::BashSessionState::new()),
@@ -7433,6 +7447,125 @@ impl ActorDaemonCoordinator {
         })
     }
 
+    /// Ensure `commit_sha` has an authorship note. Idempotent and safe to call
+    /// from multiple threads concurrently for the same commit. Used by both the
+    /// trace2 path (when it transitions through the Commit rewrite event) and
+    /// the `commit.ensure_processed` RPC (called by `git-ai post-commit-hook`).
+    ///
+    /// Returns `note_exists=true` when the note is present after this call.
+    /// `did_process=true` indicates this caller did the work; `false` means a
+    /// peer had already produced the note or was producing it concurrently.
+    fn ensure_commit_processed(
+        &self,
+        worktree: &str,
+        commit_sha: &str,
+    ) -> CommitEnsureProcessedResponse {
+        let repo = match find_repository_in_path(worktree) {
+            Ok(r) => r,
+            Err(e) => {
+                return CommitEnsureProcessedResponse {
+                    note_exists: false,
+                    did_process: false,
+                    error: Some(format!("failed to open repo at {}: {}", worktree, e)),
+                };
+            }
+        };
+
+        // Fast path: note already present.
+        if crate::git::notes_api::read_note(&repo, commit_sha).is_some() {
+            return CommitEnsureProcessedResponse {
+                note_exists: true,
+                did_process: false,
+                error: None,
+            };
+        }
+
+        // Get-or-insert a per-commit serialization slot.
+        let slot = self.acquire_commit_processing_slot(commit_sha);
+
+        // Block until any in-flight writer for this commit completes.
+        let _guard = slot.lock().unwrap();
+
+        // Re-check: a peer may have written the note while we waited.
+        if crate::git::notes_api::read_note(&repo, commit_sha).is_some() {
+            self.maybe_drop_commit_processing_slot(commit_sha, &slot);
+            return CommitEnsureProcessedResponse {
+                note_exists: true,
+                did_process: false,
+                error: None,
+            };
+        }
+
+        // We are the writer. Resolve parent + author and run the post-commit work.
+        let author = repo.git_author_identity().formatted_or_unknown();
+        let base_commit = match repo.find_commit(commit_sha.to_string()) {
+            Ok(commit) => {
+                if commit.parent_count().unwrap_or(0) > 0 {
+                    commit.parent(0).ok().map(|p| p.id())
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                self.maybe_drop_commit_processing_slot(commit_sha, &slot);
+                return CommitEnsureProcessedResponse {
+                    note_exists: false,
+                    did_process: false,
+                    error: Some(format!("find_commit {} failed: {}", commit_sha, e)),
+                };
+            }
+        };
+
+        let result = post_commit_with_final_state(
+            &repo,
+            base_commit,
+            commit_sha.to_string(),
+            author,
+            true, // suppress_output: daemon never prints
+            None,
+        );
+
+        self.maybe_drop_commit_processing_slot(commit_sha, &slot);
+
+        match result {
+            Ok(_) => CommitEnsureProcessedResponse {
+                note_exists: true,
+                did_process: true,
+                error: None,
+            },
+            Err(e) => CommitEnsureProcessedResponse {
+                note_exists: crate::git::notes_api::read_note(&repo, commit_sha).is_some(),
+                did_process: false,
+                error: Some(e.to_string()),
+            },
+        }
+    }
+
+    /// Get-or-insert a per-commit serialization slot in the commit-processing
+    /// registry. The returned `Arc<Mutex<()>>` should be `lock()`ed before
+    /// running `post_commit_with_final_state`, and the slot dropped via
+    /// `maybe_drop_commit_processing_slot` once the work is complete.
+    fn acquire_commit_processing_slot(&self, commit_sha: &str) -> Arc<Mutex<()>> {
+        let mut map = self.commit_processing.lock().unwrap();
+        map.entry(commit_sha.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Remove our slot from the registry if no other caller is currently
+    /// holding a reference to it. Called while still holding the inner lock,
+    /// so the slot's strong count is exactly `ours + map = 2` when we are the
+    /// only user.
+    fn maybe_drop_commit_processing_slot(&self, commit_sha: &str, slot: &Arc<Mutex<()>>) {
+        let mut map = self.commit_processing.lock().unwrap();
+        if let Some(entry) = map.get(commit_sha)
+            && Arc::ptr_eq(entry, slot)
+            && Arc::strong_count(slot) <= 2
+        {
+            map.remove(commit_sha);
+        }
+    }
+
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
         let result = match request {
             ControlRequest::CheckpointRun { request } => {
@@ -7609,6 +7742,14 @@ impl ActorDaemonCoordinator {
                     }
                 };
                 Ok(response)
+            }
+            ControlRequest::CommitEnsureProcessed {
+                repo_working_dir,
+                commit_sha,
+            } => {
+                let response = self.ensure_commit_processed(&repo_working_dir, &commit_sha);
+                let data = serde_json::to_value(&response).ok();
+                Ok(ControlResponse::ok(None, data))
             }
             ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None)),
         };
@@ -8659,6 +8800,15 @@ fn checkpoint_control_response_timeout(
         }
         ControlRequest::CheckpointRun { .. } => DAEMON_CONTROL_RESPONSE_TIMEOUT,
         ControlRequest::SnapshotWatermarks { .. } => Duration::from_millis(500),
+        // The daemon may need to run a full post-commit pass (read working log,
+        // diff, write note). Give it the longer checkpoint budget under
+        // CI/test, and the standard control budget in product mode — long
+        // enough for typical commits but bounded so a stuck daemon doesn't
+        // hang the user's terminal.
+        ControlRequest::CommitEnsureProcessed { .. } if use_ci_or_test_budget => {
+            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
+        }
+        ControlRequest::CommitEnsureProcessed { .. } => DAEMON_CONTROL_RESPONSE_TIMEOUT,
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
 }

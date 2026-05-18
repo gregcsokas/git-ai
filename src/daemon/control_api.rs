@@ -56,8 +56,26 @@ pub enum ControlRequest {
         session_id: String,
         tool_use_id: String,
     },
+    /// Ensure the authorship note for `commit_sha` has been produced.
+    /// Idempotent: returns immediately if the note already exists. Otherwise
+    /// the daemon runs `post_commit_with_final_state` synchronously, serialized
+    /// against the trace2 path via the in-process commit-processing coordinator.
+    #[serde(rename = "commit.ensure_processed")]
+    CommitEnsureProcessed {
+        repo_working_dir: String,
+        commit_sha: String,
+    },
     #[serde(rename = "shutdown")]
     Shutdown,
+}
+
+/// Response payload for `commit.ensure_processed`. Returned as `ControlResponse::data`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitEnsureProcessedResponse {
+    pub note_exists: bool,
+    pub did_process: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

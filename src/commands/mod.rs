@@ -18,6 +18,7 @@ pub mod login;
 pub mod logout;
 pub mod notes_migrate;
 pub mod personal_dashboard;
+pub mod post_commit_hook;
 pub mod show;
 pub mod show_prompt;
 pub mod squash_authorship;
