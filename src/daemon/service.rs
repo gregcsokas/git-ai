@@ -71,6 +71,7 @@ fn get_git_ai_bin_path() -> String {
         .unwrap_or_else(|_| "git-ai".to_string())
 }
 
+#[allow(dead_code)]
 fn get_home_dir() -> PathBuf {
     crate::paths::home_dir_or_tmp()
 }

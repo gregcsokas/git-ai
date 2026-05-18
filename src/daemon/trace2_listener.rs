@@ -111,7 +111,8 @@ fn handle_connection(
     let _ = stream.set_nonblocking(false);
     if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(5))) {
         eprintln!("[git-ai daemon] failed to set read timeout: {}", e);
-        return;
+        // On macOS, EINVAL can occur transiently; proceed without timeout
+        // rather than dropping the connection entirely.
     }
 
     let mut reader = std::io::BufReader::new(&stream);

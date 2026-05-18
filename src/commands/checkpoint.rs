@@ -56,6 +56,7 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
     send_single_repo_checkpoint(&paths, kind, kind_str, &file_args)
 }
 
+#[cfg(unix)]
 fn send_cross_repo_checkpoint(
     paths: &git_ai::daemon::DaemonPaths,
     kind: &str,
@@ -95,6 +96,17 @@ fn send_cross_repo_checkpoint(
     true
 }
 
+#[cfg(not(unix))]
+fn send_cross_repo_checkpoint(
+    _paths: &git_ai::daemon::DaemonPaths,
+    _kind: &str,
+    _kind_str: Option<&str>,
+    _file_args: &[&str],
+) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn send_single_repo_checkpoint(
     paths: &git_ai::daemon::DaemonPaths,
     kind: &str,
@@ -153,6 +165,16 @@ fn send_single_repo_checkpoint(
         }
         _ => false,
     }
+}
+
+#[cfg(not(unix))]
+fn send_single_repo_checkpoint(
+    _paths: &git_ai::daemon::DaemonPaths,
+    _kind: &str,
+    _kind_str: Option<&str>,
+    _file_args: &[&str],
+) -> bool {
+    false
 }
 
 fn build_daemon_request(
