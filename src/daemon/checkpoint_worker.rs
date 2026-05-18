@@ -46,13 +46,32 @@ pub fn process_checkpoint(req: &CheckpointRequest) -> Result<u32, String> {
             repo_root_path.join(&file_entry.path)
         };
 
+        // Detect if this file belongs to a nested repo/submodule.
+        // If so, use that repo's git dir and base commit instead.
+        let (effective_repo_path, effective_git_dir, effective_base, effective_root) =
+            if let Some(actual_root) = find_file_repo_root(&file_path)
+                && actual_root != repo_root_path
+            {
+                let gd = resolve_git_dir_for(&actual_root);
+                let bc = git_in_repo(&actual_root, &["rev-parse", "HEAD"])
+                    .unwrap_or_else(|_| "initial".to_string());
+                (actual_root.clone(), gd, bc, actual_root)
+            } else {
+                (
+                    repo_path.clone(),
+                    git_dir.clone(),
+                    base_commit.clone(),
+                    repo_root_path.clone(),
+                )
+            };
+
         let relative_path = file_path
-            .strip_prefix(&repo_root_path)
+            .strip_prefix(&effective_root)
             .unwrap_or(&file_path)
             .to_string_lossy()
             .replace('\\', "/");
 
-        if is_file_conflicted(&repo_path, &relative_path) {
+        if is_file_conflicted(&effective_repo_path, &relative_path) {
             continue;
         }
 
@@ -73,26 +92,30 @@ pub fn process_checkpoint(req: &CheckpointRequest) -> Result<u32, String> {
             }
         }
 
-        let blob_sha = working_log::save_blob(&git_dir, &base_commit, content.as_bytes());
+        let blob_sha =
+            working_log::save_blob(&effective_git_dir, &effective_base, content.as_bytes());
 
         // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
-        if kind == CheckpointKind::KnownHuman && has_pending_ai_edit(&git_dir, &relative_path) {
+        if kind == CheckpointKind::KnownHuman
+            && has_pending_ai_edit(&effective_git_dir, &relative_path)
+        {
             continue;
         }
 
         // For AI checkpoints, clear the pending AI edit marker
         if kind == CheckpointKind::AiAgent {
-            clear_pending_ai_edit(&git_dir, &relative_path);
+            clear_pending_ai_edit(&effective_git_dir, &relative_path);
         }
 
-        let existing_checkpoints = working_log::read_checkpoints(&git_dir, &base_commit);
+        let existing_checkpoints =
+            working_log::read_checkpoints(&effective_git_dir, &effective_base);
         let previous_attributions = find_latest_attributions(&existing_checkpoints, &relative_path);
         let previous_content = find_latest_content(
             &existing_checkpoints,
             &relative_path,
-            &git_dir,
-            &base_commit,
-            &repo_path,
+            &effective_git_dir,
+            &effective_base,
+            &effective_repo_path,
         );
 
         let checkpoint_agent_id = if kind == CheckpointKind::AiAgent {
@@ -117,9 +140,9 @@ pub fn process_checkpoint(req: &CheckpointRequest) -> Result<u32, String> {
         };
 
         let known_human_identity = if kind == CheckpointKind::KnownHuman {
-            let name = git_in_repo(&repo_path, &["config", "user.name"])
+            let name = git_in_repo(&effective_repo_path, &["config", "user.name"])
                 .unwrap_or_else(|_| "Unknown".to_string());
-            let email = git_in_repo(&repo_path, &["config", "user.email"])
+            let email = git_in_repo(&effective_repo_path, &["config", "user.email"])
                 .unwrap_or_else(|_| "unknown".to_string());
             Some(format!("{} <{}>", name, email))
         } else {
@@ -186,7 +209,7 @@ pub fn process_checkpoint(req: &CheckpointRequest) -> Result<u32, String> {
         checkpoint.agent_id = checkpoint_agent_id;
         checkpoint.trace_id = trace_value;
 
-        working_log::append_checkpoint(&git_dir, &base_commit, &checkpoint);
+        working_log::append_checkpoint(&effective_git_dir, &effective_base, &checkpoint);
         processed += 1;
     }
 
@@ -227,6 +250,39 @@ pub fn get_status(req: &StatusRequest) -> Result<StatusResponse, String> {
         checkpoint_count: checkpoints.len() as u32,
         files,
     })
+}
+
+/// Walk up from a file path to find its containing git repository root.
+/// Returns the innermost repo (handles nested repos/submodules).
+fn find_file_repo_root(file_path: &Path) -> Option<PathBuf> {
+    let start = if file_path.is_dir() {
+        file_path.to_path_buf()
+    } else {
+        file_path.parent()?.to_path_buf()
+    };
+    let mut current = start.as_path();
+    loop {
+        if current.join(".git").exists() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
+/// Resolve the git dir for a given repo root path.
+fn resolve_git_dir_for(repo_root: &Path) -> PathBuf {
+    match git_in_repo(repo_root, &["rev-parse", "--git-dir"]) {
+        Ok(d) => {
+            let p = PathBuf::from(&d);
+            let abs = if p.is_relative() {
+                repo_root.join(p)
+            } else {
+                p
+            };
+            fs::canonicalize(&abs).unwrap_or(abs)
+        }
+        Err(_) => repo_root.join(".git"),
+    }
 }
 
 fn find_latest_attributions(
