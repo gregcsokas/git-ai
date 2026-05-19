@@ -301,14 +301,9 @@ fn cat_file_batch(
     })?;
 
     let blob_shas_owned: Vec<String> = blob_shas.to_vec();
-    let writer_thread = std::thread::spawn(move || -> Result<(), String> {
+    let writer_thread = std::thread::spawn(move || -> Result<(), std::io::Error> {
         for sha in &blob_shas_owned {
-            if let Err(e) = writeln!(stdin, "{}", sha) {
-                return Err(format!(
-                    "failed to write to git cat-file --batch stdin: {}",
-                    e
-                ));
-            }
+            writeln!(stdin, "{}", sha)?;
         }
         Ok(())
     });
@@ -317,8 +312,10 @@ fn cat_file_batch(
         .wait_with_output()
         .map_err(|e| GitAiError::Generic(format!("git cat-file --batch failed: {}", e)))?;
 
-    if let Err(e) = writer_thread.join().expect("stdin writer thread panicked") {
-        return Err(GitAiError::Generic(e));
+    if let Err(e) = writer_thread.join().expect("stdin writer thread panicked")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(GitAiError::IoError(e));
     }
 
     if !output.status.success() {
