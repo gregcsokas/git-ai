@@ -33,8 +33,6 @@ mod checkpoint_unit;
 mod cherry_pick;
 mod chinese_text_edits;
 mod ci_context_unit;
-mod ci_local_skip_fetch;
-mod ci_local_skip_push;
 mod ci_partial_clone;
 mod claude_code;
 mod codex;
