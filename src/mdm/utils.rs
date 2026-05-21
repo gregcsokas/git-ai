@@ -1380,5 +1380,4 @@ mod tests {
         let path = Path::new("standalone_file.txt");
         ensure_parent_dir(path).unwrap();
     }
-
 }
