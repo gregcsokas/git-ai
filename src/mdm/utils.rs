@@ -663,30 +663,30 @@ pub fn clean_path(path: PathBuf) -> PathBuf {
     path
 }
 
-/// Convert a Windows path to git bash (MSYS/MinGW) style path.
-/// e.g. `C:\Users\Administrator\.git-ai\bin\git-ai.exe` → `/c/Users/Administrator/.git-ai/bin/git-ai.exe`
-/// This is needed because Claude Code runs hooks in git bash shell on Windows.
+/// Normalize a Windows path to use forward slashes while preserving the drive letter.
+/// e.g. `C:\Users\Administrator\.git-ai\bin\git-ai.exe` → `C:/Users/Administrator/.git-ai/bin/git-ai.exe`
+/// Forward-slash paths work in both git bash and PowerShell on Windows.
 /// Non-Windows paths (or paths that don't match `X:\...` pattern) are returned unchanged.
-pub fn to_git_bash_path(path: &Path) -> String {
+pub fn normalize_windows_path_for_shell(path: &Path) -> String {
     let s = path.to_string_lossy();
-    // Match a Windows absolute path like "C:\..." or "D:\..."
     let bytes = s.as_bytes();
+    // Match a Windows absolute path like "C:\..." or "D:\..."
     if bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && (bytes[2] == b'\\' || bytes[2] == b'/')
     {
-        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+        let drive_letter = (bytes[0] as char).to_ascii_uppercase();
         let rest = &s[2..]; // skip "C:"
-        let rest_unix = rest.replace('\\', "/");
-        return format!("/{}{}", drive_letter, rest_unix);
+        let rest_fwd = rest.replace('\\', "/");
+        return format!("{}:{}", drive_letter, rest_fwd);
     }
-    // Also handle the case where the path has no separator after the drive letter (e.g. C:foo)
+    // Handle drive-relative path (e.g. C:foo)
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+        let drive_letter = (bytes[0] as char).to_ascii_uppercase();
         let rest = &s[2..];
-        let rest_unix = rest.replace('\\', "/");
-        return format!("/{}/{}", drive_letter, rest_unix);
+        let rest_fwd = rest.replace('\\', "/");
+        return format!("{}:/{}", drive_letter, rest_fwd);
     }
     // For non-Windows paths, just return as-is
     s.into_owned()
@@ -1216,29 +1216,30 @@ mod tests {
     }
 
     #[test]
-    fn test_to_git_bash_path_converts_windows_path() {
+    fn test_normalize_windows_path_for_shell_converts_windows_path() {
+        // Fixes #1413: use forward-slash Windows paths that work in both git bash AND PowerShell
         let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
-            result, "/c/Users/Administrator/.git-ai/bin/git-ai.exe",
-            "should convert Windows path to git bash format"
+            result, "C:/Users/Administrator/.git-ai/bin/git-ai.exe",
+            "should convert Windows path to forward-slash format"
         );
     }
 
     #[test]
-    fn test_to_git_bash_path_converts_different_drive_letter() {
+    fn test_normalize_windows_path_for_shell_converts_different_drive_letter() {
         let path = PathBuf::from(r"D:\Projects\code\app.exe");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
-            result, "/d/Projects/code/app.exe",
-            "should convert D: drive path to git bash format"
+            result, "D:/Projects/code/app.exe",
+            "should convert D: drive path to forward-slash format"
         );
     }
 
     #[test]
-    fn test_to_git_bash_path_preserves_unix_path() {
+    fn test_normalize_windows_path_for_shell_preserves_unix_path() {
         let path = PathBuf::from("/usr/local/bin/git-ai");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
             result, "/usr/local/bin/git-ai",
             "should preserve unix paths unchanged"
@@ -1246,24 +1247,24 @@ mod tests {
     }
 
     #[test]
-    fn test_to_git_bash_path_handles_extended_prefix_after_clean() {
+    fn test_normalize_windows_path_for_shell_handles_extended_prefix_after_clean() {
         // After clean_path strips \\?\ prefix, the path looks like C:\...
         let raw = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
         let cleaned = clean_path(raw);
-        let result = to_git_bash_path(&cleaned);
+        let result = normalize_windows_path_for_shell(&cleaned);
         assert_eq!(
-            result, "/c/Users/USERNAME/.git-ai/bin/git-ai.exe",
-            "should convert cleaned Windows path to git bash format"
+            result, "C:/Users/USERNAME/.git-ai/bin/git-ai.exe",
+            "should convert cleaned Windows path to forward-slash format"
         );
     }
 
     #[test]
-    fn test_to_git_bash_path_handles_drive_relative_path() {
+    fn test_normalize_windows_path_for_shell_handles_drive_relative_path() {
         // Drive-relative path like C:foo (no separator after colon)
         let path = PathBuf::from("C:foo");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
-            result, "/c/foo",
+            result, "C:/foo",
             "should insert separator between drive letter and relative path"
         );
     }
