@@ -976,6 +976,7 @@ pub struct Repository {
     /// Canonical (absolute, resolved) version of workdir for reliable path comparisons
     /// On Windows, this uses the \\?\ UNC prefix format
     canonical_workdir: PathBuf,
+    is_bare: bool,
     /// Cached git author identity resolved via `git var GIT_COMMITTER_IDENT`.
     cached_author_identity: std::sync::OnceLock<GitAuthorIdentity>,
     gix: GixBackend,
@@ -1117,12 +1118,7 @@ impl Repository {
 
     /// Returns true when this repository is bare.
     pub fn is_bare_repository(&self) -> Result<bool, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("rev-parse".to_string());
-        args.push("--is-bare-repository".to_string());
-        let output = exec_git(&args)?;
-        let value = String::from_utf8(output.stdout)?;
-        Ok(value.trim() == "true")
+        Ok(self.is_bare)
     }
 
     /// Get the canonical (absolute, resolved) path of the working directory
@@ -2019,6 +2015,7 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         pre_update_ref_affects_checked_out_branch: None,
         workdir,
         canonical_workdir,
+        is_bare,
         cached_author_identity: std::sync::OnceLock::new(),
     })
 }
@@ -2337,6 +2334,7 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
         pre_update_ref_affects_checked_out_branch: None,
         workdir,
         canonical_workdir,
+        is_bare: true,
         cached_author_identity: std::sync::OnceLock::new(),
     })
 }
@@ -2395,6 +2393,7 @@ fn repository_from_discovered_paths(
         pre_update_ref_affects_checked_out_branch: None,
         workdir: workdir.to_path_buf(),
         canonical_workdir,
+        is_bare: false,
         cached_author_identity: std::sync::OnceLock::new(),
     })
 }
