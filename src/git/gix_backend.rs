@@ -325,7 +325,7 @@ impl GixBackend {
 
     /// Read a git note for a given object under a notes ref.
     /// Notes are stored in a tree under the notes ref, with the path being
-    /// either flat (<sha>) or fanout (<sha[0:2]>/<sha[2:]>).
+    /// either flat (sha) or fanout (xx/yyyyyyyy...).
     pub fn read_note(&self, notes_ref: &str, object_sha: &str) -> Result<Vec<u8>, GitAiError> {
         let repo = self.get_repo()?;
 
