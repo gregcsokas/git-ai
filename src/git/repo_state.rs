@@ -77,9 +77,9 @@ pub fn common_dir_for_repo_path(path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn read_ref_oid_from_paths(refname: &str, git_dir: &Path, common_dir: &Path) -> Option<String> {
-    let reader = crate::git::fast_reader::FastRefReader::new(git_dir, common_dir);
-    reader.try_resolve_ref(refname)
+fn read_ref_oid_from_paths(refname: &str, git_dir: &Path, _common_dir: &Path) -> Option<String> {
+    let backend = crate::git::gix_backend::GixBackend::new(git_dir);
+    backend.try_resolve_ref(refname)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,26 +194,30 @@ pub fn resolve_worktree_head_reflog_old_oid_for_new_head(
 }
 
 pub fn read_head_state_for_worktree(worktree: &Path) -> Option<HeadState> {
-    use crate::git::fast_reader::{FastRefReader, HeadKind};
     let git_dir = git_dir_for_worktree(worktree)?;
-    let common_dir = common_dir_for_git_dir(&git_dir)?;
-    let reader = FastRefReader::new(&git_dir, &common_dir);
-    match reader.try_read_head()? {
-        HeadKind::Symbolic(refname) => {
+    let _common_dir = common_dir_for_git_dir(&git_dir)?;
+    let backend = crate::git::gix_backend::GixBackend::new(&git_dir);
+
+    match backend.head_ref_name() {
+        Ok(Some(refname)) => {
             let branch = refname.strip_prefix("refs/heads/").map(|s| s.to_string());
             let detached = branch.is_none();
-            let head = reader.try_resolve_ref(&refname);
+            let head = backend.try_resolve_ref(&refname);
             Some(HeadState {
                 head,
                 branch,
                 detached,
             })
         }
-        HeadKind::Detached(oid) => Some(HeadState {
-            head: Some(oid),
-            branch: None,
-            detached: true,
-        }),
+        Ok(None) => {
+            let head = backend.head_commit_oid().ok();
+            Some(HeadState {
+                head,
+                branch: None,
+                detached: true,
+            })
+        }
+        Err(_) => None,
     }
 }
 

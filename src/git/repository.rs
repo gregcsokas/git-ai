@@ -830,20 +830,13 @@ impl<'a> Reference<'a> {
     }
 
     pub fn target(&self) -> Result<String, GitAiError> {
-        use crate::git::fast_reader::{FastRefReader, HeadKind};
-        let reader = FastRefReader::new(&self.repo.git_dir, &self.repo.git_common_dir);
+        if let Some(oid) = self.repo.gix.try_resolve_ref(&self.ref_name) {
+            return Ok(oid);
+        }
         if self.ref_name == "HEAD" {
-            match reader.try_read_head() {
-                Some(HeadKind::Detached(oid)) => return Ok(oid),
-                Some(HeadKind::Symbolic(refname)) => {
-                    if let Some(sha) = reader.try_resolve_ref(&refname) {
-                        return Ok(sha);
-                    }
-                }
-                None => {}
+            if let Ok(oid) = self.repo.gix.head_commit_oid() {
+                return Ok(oid);
             }
-        } else if let Some(sha) = reader.try_resolve_ref(&self.ref_name) {
-            return Ok(sha);
         }
 
         let mut args = self.repo.global_args_for_exec();
@@ -1085,30 +1078,25 @@ impl Repository {
     // If HEAD is a symbolic ref, return the refname (e.g., "refs/heads/main").
     // Otherwise, return "HEAD".
     pub fn head<'a>(&'a self) -> Result<Reference<'a>, GitAiError> {
-        use crate::git::fast_reader::{FastRefReader, HeadKind};
-        let reader = FastRefReader::new(&self.git_dir, &self.git_common_dir);
-        match reader.try_read_head() {
-            Some(HeadKind::Symbolic(refname)) => {
-                return Ok(Reference {
-                    repo: self,
-                    ref_name: refname,
-                });
-            }
-            Some(HeadKind::Detached(_)) => {
-                return Ok(Reference {
-                    repo: self,
-                    ref_name: "HEAD".to_string(),
-                });
-            }
-            None => {}
+        if let Ok(Some(refname)) = self.gix.head_ref_name() {
+            return Ok(Reference {
+                repo: self,
+                ref_name: refname,
+            });
+        }
+        if self.gix.head_commit_oid().is_ok() {
+            return Ok(Reference {
+                repo: self,
+                ref_name: "HEAD".to_string(),
+            });
         }
 
+        // CLI fallback for edge cases (empty repo, etc.)
         let mut args = self.global_args_for_exec();
         args.push("symbolic-ref".to_string());
         args.push("HEAD".to_string());
 
         let output = exec_git(&args);
-
         match output {
             Ok(output) if output.status.success() => {
                 let refname = String::from_utf8(output.stdout)?;
