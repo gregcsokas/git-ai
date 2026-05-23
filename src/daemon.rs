@@ -3523,6 +3523,27 @@ fn remove_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     Ok(())
 }
 
+/// Remove daemon artifacts that may be inaccessible due to ownership mismatch
+/// (e.g. left by a prior root invocation). Called only from `run_daemon()` at
+/// startup — never from probe functions — so it cannot break flock visibility
+/// for read-only lock checks.
+#[cfg(unix)]
+fn remove_stale_daemon_files(config: &DaemonConfig) {
+    for path in [
+        &config.lock_path,
+        &config.control_socket_path,
+        &config.trace_socket_path,
+        &pid_metadata_path(config),
+    ] {
+        if path.exists() && std::fs::OpenOptions::new().write(true).open(path).is_err() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn remove_stale_daemon_files(_config: &DaemonConfig) {}
+
 #[cfg(not(windows))]
 fn daemon_is_test_mode() -> bool {
     std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
@@ -8451,6 +8472,7 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
+    remove_stale_daemon_files(&config);
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
     write_pid_metadata(&config)?;
