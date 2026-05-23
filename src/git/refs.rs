@@ -379,40 +379,54 @@ pub fn get_commits_with_notes_from_list(
         return Ok(Vec::new());
     }
 
-    // Get the git authors for all commits using git rev-list
-    // This approach works in both bare and normal repositories
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-list".to_string());
-    args.push("--no-walk".to_string());
-    args.push("--pretty=format:%H%n%an%n%ae".to_string());
-    for sha in commit_shas {
-        args.push(sha.clone());
-    }
-
-    let output = exec_git(&args)?;
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|_| GitAiError::Generic("Failed to parse git rev-list output".to_string()))?;
-
+    // Try gix to get commit authors (avoids subprocess)
     let mut commit_authors = HashMap::new();
-    let lines: Vec<&str> = stdout.lines().collect();
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        // Skip commit headers (start with "commit ")
-        if line.starts_with("commit ") {
-            i += 1;
-            if i + 2 < lines.len() {
-                let sha = lines[i].to_string();
-                let name = lines[i + 1].to_string();
-                let email = lines[i + 2].to_string();
-                let author = format!("{} <{}>", name, email);
-                commit_authors.insert(sha, author);
-                i += 3;
-            } else {
+    let mut gix_failed = false;
+    for sha in commit_shas {
+        match repo.gix.commit_author(sha) {
+            Ok((name, email)) => {
+                commit_authors.insert(sha.clone(), format!("{} <{}>", name, email));
+            }
+            Err(_) => {
+                gix_failed = true;
                 break;
             }
-        } else {
-            i += 1;
+        }
+    }
+
+    if gix_failed {
+        commit_authors.clear();
+        let mut args = repo.global_args_for_exec();
+        args.push("rev-list".to_string());
+        args.push("--no-walk".to_string());
+        args.push("--pretty=format:%H%n%an%n%ae".to_string());
+        for sha in commit_shas {
+            args.push(sha.clone());
+        }
+
+        let output = exec_git(&args)?;
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|_| GitAiError::Generic("Failed to parse git rev-list output".to_string()))?;
+
+        let lines: Vec<&str> = stdout.lines().collect();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            if line.starts_with("commit ") {
+                i += 1;
+                if i + 2 < lines.len() {
+                    let sha = lines[i].to_string();
+                    let name = lines[i + 1].to_string();
+                    let email = lines[i + 2].to_string();
+                    let author = format!("{} <{}>", name, email);
+                    commit_authors.insert(sha, author);
+                    i += 3;
+                } else {
+                    break;
+                }
+            } else {
+                i += 1;
+            }
         }
     }
 

@@ -207,6 +207,30 @@ impl GixBackend {
         Ok((summary, body))
     }
 
+    /// Get the author name and email from a commit.
+    pub fn commit_author(&self, commit_oid_hex: &str) -> Result<(String, String), GitAiError> {
+        let repo = self.get_repo()?;
+        let oid = Self::parse_oid(commit_oid_hex)?;
+        let object = repo.find_object(oid).map_err(|e| {
+            GitAiError::GixError(format!("find commit '{}': {}", commit_oid_hex, e))
+        })?;
+        let commit = object.try_into_commit().map_err(|e| {
+            GitAiError::GixError(format!(
+                "object '{}' is not a commit: {}",
+                commit_oid_hex, e
+            ))
+        })?;
+        let author = commit.author().map_err(|e| {
+            GitAiError::GixError(format!(
+                "read author from commit '{}': {}",
+                commit_oid_hex, e
+            ))
+        })?;
+        let name = author.name.to_string();
+        let email = author.email.to_string();
+        Ok((name, email))
+    }
+
     pub fn rev_parse(&self, spec: &str) -> Result<String, GitAiError> {
         let repo = self.get_repo()?;
         let bstr_spec: &BStr = spec.into();
