@@ -181,23 +181,11 @@ impl Drop for LockFile {
 #[allow(clippy::suspicious_open_options)]
 fn try_lock_exclusive(path: &std::path::Path) -> Option<std::fs::File> {
     use std::os::unix::io::AsRawFd;
-    let open = || {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(path)
-    };
-    let file = match open() {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && path.exists() => {
-            // Stale lock file owned by another user (e.g. root). Remove it and
-            // retry — unlink permission comes from the parent directory, not the
-            // file itself, so this succeeds when the directory is user-owned.
-            std::fs::remove_file(path).ok()?;
-            open().ok()?
-        }
-        Err(_) => return None,
-    };
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(path)
+        .ok()?;
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc != 0 {
         return None;
