@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use gix::bstr::BStr;
 use gix::ObjectId;
+use gix::bstr::BStr;
 
 use crate::error::GitAiError;
 
@@ -12,7 +12,7 @@ use crate::error::GitAiError;
 /// support, eliminating the need to spawn `git` subprocesses for packed objects.
 pub struct GixBackend {
     git_dir: PathBuf,
-    repo: OnceLock<gix::ThreadSafeRepository>,
+    repo: OnceLock<Result<gix::ThreadSafeRepository, String>>,
 }
 
 impl std::fmt::Debug for GixBackend {
@@ -41,11 +41,16 @@ impl GixBackend {
     }
 
     fn get_repo(&self) -> Result<gix::Repository, GitAiError> {
-        let ts_repo = self.repo.get_or_init(|| {
+        let result = self.repo.get_or_init(|| {
             let opts = gix::open::Options::isolated();
-            gix::open_opts(&self.git_dir, opts).expect("failed to open git repository with gix").into()
+            gix::open_opts(&self.git_dir, opts)
+                .map(|r| r.into())
+                .map_err(|e| e.to_string())
         });
-        Ok(ts_repo.to_thread_local())
+        match result {
+            Ok(ts_repo) => Ok(ts_repo.to_thread_local()),
+            Err(e) => Err(GitAiError::GixError(e.clone())),
+        }
     }
 
     fn parse_oid(oid_hex: &str) -> Result<ObjectId, GitAiError> {
@@ -82,9 +87,12 @@ impl GixBackend {
                 commit_oid_hex, e
             ))
         })?;
-        Ok(commit.tree_id().map_err(|e| {
-            GitAiError::GixError(format!("read tree from commit '{}': {}", commit_oid_hex, e))
-        })?.to_string())
+        Ok(commit
+            .tree_id()
+            .map_err(|e| {
+                GitAiError::GixError(format!("read tree from commit '{}': {}", commit_oid_hex, e))
+            })?
+            .to_string())
     }
 
     pub fn object_kind(&self, oid_hex: &str) -> Result<String, GitAiError> {
@@ -132,12 +140,12 @@ impl GixBackend {
 
     pub fn resolve_ref(&self, refname: &str) -> Result<String, GitAiError> {
         let repo = self.get_repo()?;
-        let reference = repo.find_reference(refname).map_err(|e| {
-            GitAiError::GixError(format!("find reference '{}': {}", refname, e))
-        })?;
-        let oid = reference.into_fully_peeled_id().map_err(|e| {
-            GitAiError::GixError(format!("peel reference '{}': {}", refname, e))
-        })?;
+        let reference = repo
+            .find_reference(refname)
+            .map_err(|e| GitAiError::GixError(format!("find reference '{}': {}", refname, e)))?;
+        let oid = reference
+            .into_fully_peeled_id()
+            .map_err(|e| GitAiError::GixError(format!("peel reference '{}': {}", refname, e)))?;
         Ok(oid.to_string())
     }
 
@@ -169,10 +177,7 @@ impl GixBackend {
                 commit_oid_hex, e
             ))
         })?;
-        let parent_ids: Vec<String> = commit
-            .parent_ids()
-            .map(|id| id.to_string())
-            .collect();
+        let parent_ids: Vec<String> = commit.parent_ids().map(|id| id.to_string()).collect();
         Ok(parent_ids)
     }
 

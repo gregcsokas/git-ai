@@ -77,9 +77,71 @@ pub fn common_dir_for_repo_path(path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn read_ref_oid_from_paths(refname: &str, git_dir: &Path, _common_dir: &Path) -> Option<String> {
-    let backend = crate::git::gix_backend::GixBackend::new(git_dir);
-    backend.try_resolve_ref(refname)
+fn read_ref_oid_from_paths(refname: &str, git_dir: &Path, common_dir: &Path) -> Option<String> {
+    try_resolve_ref_from_filesystem(refname, git_dir, common_dir)
+}
+
+fn try_resolve_ref_from_filesystem(
+    refname: &str,
+    git_dir: &Path,
+    common_dir: &Path,
+) -> Option<String> {
+    if refname == "HEAD" {
+        let head_content = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+        let trimmed = head_content.trim();
+        if let Some(target) = trimmed.strip_prefix("ref: ") {
+            let target = target.trim();
+            return try_resolve_ref_from_filesystem(target, git_dir, common_dir);
+        }
+        if is_valid_git_oid(trimmed) {
+            return Some(trimmed.to_string());
+        }
+        return None;
+    }
+
+    for base in [common_dir, git_dir] {
+        let path = base.join(refname);
+        if let Ok(contents) = fs::read_to_string(&path) {
+            let candidate = contents.trim();
+            if is_valid_git_oid(candidate) {
+                return Some(candidate.to_string());
+            }
+            if let Some(target) = candidate.strip_prefix("ref: ") {
+                let target = target.trim();
+                // One level of indirection only
+                for inner_base in [common_dir, git_dir] {
+                    let inner_path = inner_base.join(target);
+                    if let Ok(inner) = fs::read_to_string(&inner_path) {
+                        let inner_candidate = inner.trim();
+                        if is_valid_git_oid(inner_candidate) {
+                            return Some(inner_candidate.to_string());
+                        }
+                    }
+                }
+                return try_packed_ref(common_dir, target);
+            }
+        }
+    }
+
+    try_packed_ref(common_dir, refname)
+}
+
+fn try_packed_ref(common_dir: &Path, refname: &str) -> Option<String> {
+    let packed_refs_path = common_dir.join("packed-refs");
+    let contents = fs::read_to_string(packed_refs_path).ok()?;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let oid = parts.next()?;
+        let name = parts.next()?;
+        if name == refname && is_valid_git_oid(oid) {
+            return Some(oid.to_string());
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,29 +257,30 @@ pub fn resolve_worktree_head_reflog_old_oid_for_new_head(
 
 pub fn read_head_state_for_worktree(worktree: &Path) -> Option<HeadState> {
     let git_dir = git_dir_for_worktree(worktree)?;
-    let _common_dir = common_dir_for_git_dir(&git_dir)?;
-    let backend = crate::git::gix_backend::GixBackend::new(&git_dir);
+    let common_dir = common_dir_for_git_dir(&git_dir)?;
 
-    match backend.head_ref_name() {
-        Ok(Some(refname)) => {
-            let branch = refname.strip_prefix("refs/heads/").map(|s| s.to_string());
-            let detached = branch.is_none();
-            let head = backend.try_resolve_ref(&refname);
-            Some(HeadState {
-                head,
-                branch,
-                detached,
-            })
-        }
-        Ok(None) => {
-            let head = backend.head_commit_oid().ok();
-            Some(HeadState {
-                head,
-                branch: None,
-                detached: true,
-            })
-        }
-        Err(_) => None,
+    let head_path = git_dir.join("HEAD");
+    let head_content = fs::read_to_string(&head_path).ok()?;
+    let trimmed = head_content.trim();
+
+    if let Some(refname) = trimmed.strip_prefix("ref: ") {
+        let refname = refname.trim();
+        let branch = refname.strip_prefix("refs/heads/").map(|s| s.to_string());
+        let detached = branch.is_none();
+        let head = try_resolve_ref_from_filesystem(refname, &git_dir, &common_dir);
+        Some(HeadState {
+            head,
+            branch,
+            detached,
+        })
+    } else if is_valid_git_oid(trimmed) {
+        Some(HeadState {
+            head: Some(trimmed.to_string()),
+            branch: None,
+            detached: true,
+        })
+    } else {
+        None
     }
 }
 

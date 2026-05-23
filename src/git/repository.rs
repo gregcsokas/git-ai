@@ -817,10 +817,10 @@ impl<'a> Reference<'a> {
         if let Some(oid) = self.repo.gix.try_resolve_ref(&self.ref_name) {
             return Ok(oid);
         }
-        if self.ref_name == "HEAD" {
-            if let Ok(oid) = self.repo.gix.head_commit_oid() {
-                return Ok(oid);
-            }
+        if self.ref_name == "HEAD"
+            && let Ok(oid) = self.repo.gix.head_commit_oid()
+        {
+            return Ok(oid);
         }
 
         let mut args = self.repo.global_args_for_exec();
