@@ -6,7 +6,6 @@ use crate::git::cli_parser::{
     ParsedGitInvocation, explicit_rebase_branch_arg, parse_git_cli_args,
     stash_requires_target_resolution, stash_target_spec, summarize_rebase_args,
 };
-use crate::git::find_repository_in_path;
 use crate::git::repo_state::{
     HeadState, common_dir_for_worktree, git_dir_for_worktree, latest_reflog_old_oid_for_worktree,
     read_head_state_for_worktree, read_ref_oid_for_worktree,
@@ -1557,7 +1556,7 @@ fn apply_push_side_effect(
     command: Option<&str>,
     args: &[String],
 ) -> Result<(), GitAiError> {
-    let repo = find_repository_in_path(worktree)?;
+    let repo = discover_repository_in_path_no_git_exec(Path::new(worktree))?;
     let parsed = parsed_invocation_for_side_effect(command, args);
     push_hooks::run_pre_push_hook_managed(&parsed, &repo);
     Ok(())
@@ -1568,7 +1567,7 @@ fn apply_pull_notes_sync_side_effect(
     command: Option<&str>,
     args: &[String],
 ) -> Result<(), GitAiError> {
-    let repo = find_repository_in_path(worktree)?;
+    let repo = discover_repository_in_path_no_git_exec(Path::new(worktree))?;
     let parsed = parsed_invocation_for_side_effect(command, args);
     let remote = match fetch_remote_from_args(&repo, &parsed) {
         Ok(remote) => remote,
@@ -1592,7 +1591,7 @@ fn apply_pull_notes_sync_side_effect(
 }
 
 fn apply_clone_notes_sync_side_effect(worktree: &str) -> Result<(), GitAiError> {
-    let repo = find_repository_in_path(worktree)?;
+    let repo = discover_repository_in_path_no_git_exec(Path::new(worktree))?;
     if let Err(error) = fetch_authorship_notes(&repo, "origin") {
         tracing::debug!(
             %error,
@@ -1607,7 +1606,7 @@ fn apply_pull_fast_forward_working_log_side_effect(
     old_head: &str,
     new_head: &str,
 ) -> Result<(), GitAiError> {
-    let repo = find_repository_in_path(worktree)?;
+    let repo = discover_repository_in_path_no_git_exec(Path::new(worktree))?;
     repo.storage.rename_working_log(old_head, new_head)?;
     Ok(())
 }
@@ -1659,7 +1658,7 @@ fn apply_checkout_switch_working_log_side_effect(
     let Some(worktree) = cmd.worktree.as_ref() else {
         return Ok(());
     };
-    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+    let repo = discover_repository_in_path_no_git_exec(worktree)?;
     let parsed = parsed_invocation_for_normalized_command(cmd);
     let old_head = cmd
         .pre_repo
@@ -2689,7 +2688,7 @@ fn apply_rewrite_side_effect(
     carryover_snapshot: Option<&HashMap<String, String>>,
     reset_pathspecs: Option<&[String]>,
 ) -> Result<(), GitAiError> {
-    let mut repo = find_repository_in_path(worktree)?;
+    let mut repo = discover_repository_in_path_no_git_exec(Path::new(worktree))?;
     let author = repo.git_author_identity().formatted_or_unknown();
     ensure_rewrite_prerequisites(
         coordinator,
@@ -2989,9 +2988,11 @@ fn processed_rebase_new_heads(repository: &Repository) -> Result<HashSet<String>
     Ok(out)
 }
 
-/// Check whether `ancestor` is an ancestor of `descendant` using
-/// `git merge-base --is-ancestor`.
+/// Check whether `ancestor` is an ancestor of `descendant`.
 fn is_ancestor_commit(repository: &Repository, ancestor: &str, descendant: &str) -> bool {
+    if let Some(base) = repository.gix.try_merge_base(ancestor, descendant) {
+        return base == ancestor;
+    }
     let mut args = repository.global_args_for_exec();
     args.push("merge-base".to_string());
     args.push("--is-ancestor".to_string());
@@ -3123,7 +3124,22 @@ fn match_source_to_new_commits_by_message(
         return None;
     }
 
+    let gix_dir = {
+        let git_path = worktree.join(".git");
+        if git_path.is_dir() {
+            git_path
+        } else {
+            worktree.to_path_buf()
+        }
+    };
+    let gix = crate::git::gix_backend::GixBackend::new(&gix_dir);
+
     let get_subject = |sha: &str| -> Option<String> {
+        if let Ok((summary, _)) = gix.commit_message(sha)
+            && !summary.is_empty()
+        {
+            return Some(summary);
+        }
         let args = vec![
             "-C".to_string(),
             worktree.to_string_lossy().to_string(),
@@ -3213,7 +3229,7 @@ fn resolve_cherry_pick_source_refs(
     context: &str,
 ) -> Result<Vec<String>, GitAiError> {
     let mut resolved = Vec::new();
-    let repo = find_repository_in_path(worktree.to_string_lossy().as_ref())?;
+    let repo = discover_repository_in_path_no_git_exec(worktree)?;
     for src in source_refs {
         if is_valid_oid(src) && !is_zero_oid(src) {
             resolved.push(src.clone());
@@ -3338,7 +3354,7 @@ fn repository_for_rewrite_context(
     context: &str,
 ) -> Result<Repository, GitAiError> {
     if let Some(worktree) = cmd.worktree.as_ref()
-        && let Ok(repository) = find_repository_in_path(&worktree.to_string_lossy())
+        && let Ok(repository) = discover_repository_in_path_no_git_exec(worktree)
     {
         return Ok(repository);
     }
@@ -3353,6 +3369,9 @@ fn repo_is_ancestor(
     ancestor: &str,
     descendant: &str,
 ) -> bool {
+    if let Some(base) = repository.gix.try_merge_base(ancestor, descendant) {
+        return base == ancestor;
+    }
     let mut args = repository.global_args_for_exec();
     args.push("merge-base".to_string());
     args.push("--is-ancestor".to_string());
@@ -6261,7 +6280,7 @@ impl ActorDaemonCoordinator {
         if let Some(stash_sha) = stash_sha
             && let Some(worktree) = cmd.worktree.as_ref()
         {
-            let repo = find_repository_in_path(worktree.to_string_lossy().as_ref())?;
+            let repo = discover_repository_in_path_no_git_exec(worktree)?;
             let stash_commit = repo.find_commit(stash_sha.to_string())?;
             if let Ok(parent) = stash_commit.parent(0) {
                 return Ok(Some(parent.id().to_string()));
@@ -6355,7 +6374,7 @@ impl ActorDaemonCoordinator {
                 cmd.root_sid
             ))
         })?;
-        let repo = find_repository_in_path(worktree.to_string_lossy().as_ref())?;
+        let repo = discover_repository_in_path_no_git_exec(worktree)?;
         repo.revparse_single(source_ref)
             .and_then(|obj| obj.peel_to_commit())
             .map(|commit| commit.id())
@@ -7002,7 +7021,7 @@ impl ActorDaemonCoordinator {
             if needs_restore_after_rewrite {
                 let (old_head, new_head) = Self::resolve_heads_for_command(cmd);
                 if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
-                    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+                    let repo = discover_repository_in_path_no_git_exec(worktree)?;
                     let tracked_files = tracked_working_log_files(&repo, &old_head)?;
                     if tracked_files.is_empty() {
                         None
@@ -7031,7 +7050,7 @@ impl ActorDaemonCoordinator {
         {
             let (old_head, new_head) = Self::resolve_heads_for_command(cmd);
             if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
-                let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+                let repo = discover_repository_in_path_no_git_exec(worktree)?;
                 let tracked_files = tracked_working_log_files(&repo, &old_head)?;
                 if !tracked_files.is_empty() {
                     // No carryover snapshot was captured for the direct pre-command HEAD
@@ -7205,7 +7224,7 @@ impl ActorDaemonCoordinator {
         if let Some((new_head, carried_va, snapshot)) = deferred_rewrite_carryover
             && let Some(worktree) = cmd.worktree.as_ref()
         {
-            let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+            let repo = discover_repository_in_path_no_git_exec(worktree)?;
             restore_virtual_attribution_carryover(&repo, &new_head, carried_va, snapshot)?;
         }
 
@@ -7215,7 +7234,7 @@ impl ActorDaemonCoordinator {
             {
                 let family = family.map(std::borrow::ToOwned::to_owned).or_else(|| {
                     cmd.worktree.as_ref().and_then(|worktree| {
-                        find_repository_in_path(&worktree.to_string_lossy())
+                        discover_repository_in_path_no_git_exec(worktree)
                             .ok()
                             .map(|repo| family_key_for_repository(&repo))
                     })
@@ -7235,7 +7254,7 @@ impl ActorDaemonCoordinator {
             if !old_head.is_empty()
                 && !new_head.is_empty()
                 && old_head != new_head
-                && let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy())
+                && let Ok(repo) = discover_repository_in_path_no_git_exec(worktree)
                 && repo_is_ancestor(&repo, &old_head, &new_head)
             {
                 apply_pull_fast_forward_working_log_side_effect(
@@ -7275,7 +7294,7 @@ impl ActorDaemonCoordinator {
                             reference == &format!("refs/heads/{}", branch) || reference == branch
                         });
                     if affects_checked_out_branch
-                        && let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy())
+                        && let Ok(repo) = discover_repository_in_path_no_git_exec(worktree)
                         && repo_is_ancestor(&repo, old, new)
                     {
                         let _ = repo.storage.rename_working_log(old, new);

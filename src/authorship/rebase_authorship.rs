@@ -3130,16 +3130,22 @@ pub fn walk_commits_to_base(
 
     // Guard against pathological traversals when `base` is not actually an ancestor.
     // The old BFS fallback could walk huge histories in this case.
-    let mut is_ancestor_args = repository.global_args_for_exec();
-    is_ancestor_args.push("merge-base".to_string());
-    is_ancestor_args.push("--is-ancestor".to_string());
-    is_ancestor_args.push(base.to_string());
-    is_ancestor_args.push(head.to_string());
-    if exec_git(&is_ancestor_args).is_err() {
-        return Err(GitAiError::Generic(format!(
-            "Base commit {} is not an ancestor of {}",
-            base, head
-        )));
+    let is_ancestor = repository
+        .gix
+        .try_merge_base(base, head)
+        .is_some_and(|mb| mb == base);
+    if !is_ancestor {
+        let mut is_ancestor_args = repository.global_args_for_exec();
+        is_ancestor_args.push("merge-base".to_string());
+        is_ancestor_args.push("--is-ancestor".to_string());
+        is_ancestor_args.push(base.to_string());
+        is_ancestor_args.push(head.to_string());
+        if exec_git(&is_ancestor_args).is_err() {
+            return Err(GitAiError::Generic(format!(
+                "Base commit {} is not an ancestor of {}",
+                base, head
+            )));
+        }
     }
 
     // Use git's native graph walker instead of per-parent subprocess traversal.
