@@ -147,7 +147,7 @@ pub fn post_commit_with_final_state(
     };
 
     let diff_hunks =
-        crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
+        crate::commands::diff::get_diff_hunks_native_or_fallback(repo, diff_base, &commit_sha)?;
 
     // Derive committed_hunks from the diff, filtered by pathspecs.
     // Use NFC normalization for matching since git may output NFD paths on macOS.

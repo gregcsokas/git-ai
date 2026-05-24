@@ -480,7 +480,6 @@ pub fn get_diff_with_line_numbers(
     parse_diff_hunks(&diff_text)
 }
 
-#[allow(dead_code)]
 pub fn get_diff_hunks_native_or_fallback(
     repo: &Repository,
     from: &str,
@@ -496,28 +495,29 @@ pub fn get_diff_hunks_native_or_fallback(
 
 /// Attempt to compute DiffHunks natively using gix tree-diff + imara-diff.
 /// Returns None if the diff cannot be computed natively (e.g., rename scenarios
-/// or modified files where diff algorithm differences affect attribution).
+/// or modified files where git's indent-heuristic produces different hunk
+/// boundaries than raw Myers).
 fn try_native_diff_hunks(repo: &Repository, from: &str, to: &str) -> Option<Vec<DiffHunk>> {
     use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
     use crate::authorship::virtual_attribution::split_lines_preserving_terminators;
     use crate::git::diff_tree_to_tree::DiffStatus;
+    use unicode_normalization::UnicodeNormalization;
 
     let from_tree = repo.gix.try_read_commit_tree_oid(from)?;
     let to_tree = repo.gix.try_read_commit_tree_oid(to)?;
 
     let deltas = repo.gix.diff_tree_deltas(&from_tree, &to_tree).ok()?;
 
-    // Only use native path when ALL changes are pure additions or pure deletions
-    // of entire files. Modified files require the subprocess path because git's
-    // diff algorithm with --find-renames=1% produces different (and more correct
-    // for attribution) hunk boundaries than imara-diff's Myers.
+    // Fall back to subprocess when modifications exist. Git's indent-heuristic
+    // (enabled by default) shifts hunk boundaries for readability, producing
+    // different added-line sets than raw Myers for re-indentation scenarios.
     let has_modifications = deltas.iter().any(|d| d.status() == DiffStatus::Modified);
     if has_modifications {
         return None;
     }
 
-    // Check for potential renames: if we see both deletions and additions,
-    // fall back to subprocess which has rename detection.
+    // Fall back when both deletions and additions exist at the file level.
+    // Git's --find-renames=1% could merge a delete+add pair into a rename.
     let has_deletions = deltas.iter().any(|d| d.status() == DiffStatus::Deleted);
     let has_additions = deltas.iter().any(|d| d.status() == DiffStatus::Added);
     if has_deletions && has_additions {
@@ -528,13 +528,18 @@ fn try_native_diff_hunks(repo: &Repository, from: &str, to: &str) -> Option<Vec<
 
     for delta in &deltas {
         let status = delta.status();
-        let file_path = delta
+        let raw_path = delta
             .new_file()
             .path()
             .or_else(|| delta.old_file().path())
             .unwrap_or(std::path::Path::new(""))
             .to_string_lossy()
             .to_string();
+        let file_path: String = if raw_path.is_ascii() {
+            raw_path
+        } else {
+            raw_path.nfc().collect()
+        };
 
         match status {
             DiffStatus::Added => {
