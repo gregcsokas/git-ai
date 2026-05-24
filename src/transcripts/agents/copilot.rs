@@ -1,7 +1,7 @@
 //! GitHub Copilot agent implementation with sweep discovery.
 
 use crate::authorship::authorship_log_serialization::generate_session_id;
-use crate::transcripts::agent::Agent;
+use crate::transcripts::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{
@@ -134,6 +134,40 @@ impl CopilotAgent {
             TranscriptFormat::CopilotSessionJson
         }
     }
+
+    /// Resolve the path to the Copilot OTEL traces database.
+    ///
+    /// The DB lives in VS Code's globalStorage for the Copilot extension.
+    /// Transcript path: .../workspaceStorage/{hash}/GitHub.copilot-chat/transcripts/{id}.jsonl
+    /// OTEL DB: .../globalStorage/github.copilot-chat/agent-traces.db
+    fn resolve_otel_db_path(transcript_path: &Path) -> Option<PathBuf> {
+        if let Ok(path) = std::env::var("GIT_AI_COPILOT_OTEL_DB_PATH") {
+            let p = PathBuf::from(path);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+
+        // Navigate from transcript path to globalStorage
+        // transcript: .../workspaceStorage/{hash}/GitHub.copilot-chat/transcripts/{id}.jsonl
+        let workspace_storage_root = transcript_path
+            .parent()? // transcripts/
+            .parent()? // GitHub.copilot-chat/
+            .parent()? // {hash}/
+            .parent()?; // workspaceStorage/
+
+        let user_dir = workspace_storage_root.parent()?; // User/
+        let otel_db = user_dir
+            .join("globalStorage")
+            .join("github.copilot-chat")
+            .join("agent-traces.db");
+
+        if otel_db.exists() {
+            Some(otel_db)
+        } else {
+            None
+        }
+    }
 }
 
 /// Decode percent-encoded characters in a URI path (e.g., %20 -> space).
@@ -222,14 +256,38 @@ impl Agent for CopilotAgent {
         Ok(sessions)
     }
 
+    fn streams(&self) -> Vec<StreamDescriptor> {
+        vec![
+            StreamDescriptor {
+                stream_type: "transcript",
+                format: TranscriptFormat::CopilotEventStreamJsonl,
+                watermark_type: WatermarkType::ByteOffset,
+                path_resolver: PathResolverKind::Identity,
+            },
+            StreamDescriptor {
+                stream_type: "otel_traces",
+                format: TranscriptFormat::OtelSqliteTraces,
+                watermark_type: WatermarkType::Timestamp,
+                path_resolver: PathResolverKind::Custom(Box::new(Self::resolve_otel_db_path)),
+            },
+        ]
+    }
+
     fn read_incremental(
         &self,
         path: &Path,
         watermark: Box<dyn WatermarkStrategy>,
         session_id: &str,
     ) -> Result<TranscriptBatch, TranscriptError> {
-        // Migrated from formats/copilot.rs (will be removed in Phase 9)
-        // Determine which reader to use based on file extension
+        // OTEL SQLite DB files
+        if path.extension().and_then(|e| e.to_str()) == Some("db") {
+            return super::copilot_otel::read_otel_spans_incremental(
+                path,
+                watermark,
+                self.batch_size,
+            );
+        }
+        // Existing transcript reading logic
         let batch_limit = self.batch_size_hint();
         if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
             read_event_stream(path, watermark, session_id, batch_limit)
@@ -242,6 +300,11 @@ impl Agent for CopilotAgent {
         &self,
         event: &serde_json::Value,
     ) -> (Option<String>, Option<String>, Option<String>) {
+        // OTEL events have a "span" key at top level
+        if event.get("span").is_some() {
+            return super::copilot_otel::extract_otel_event_ids(event);
+        }
+        // Existing copilot transcript event ID extraction
         let id = event.get("id").and_then(|v| v.as_str()).map(String::from);
         let parent_id = event
             .get("parentId")
@@ -256,6 +319,12 @@ impl Agent for CopilotAgent {
         file_meta: &std::fs::Metadata,
         is_first_event: bool,
     ) -> u32 {
+        // OTEL events have their own timestamp extraction
+        if event.get("span").is_some() {
+            if let Some(ts) = super::copilot_otel::extract_otel_event_timestamp(event) {
+                return ts;
+            }
+        }
         crate::daemon::transcript_worker::extract_event_timestamp(event).unwrap_or_else(|| {
             crate::transcripts::agent::file_time_fallback(file_meta, is_first_event)
         })
