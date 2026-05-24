@@ -1,4 +1,6 @@
-use crate::repos::test_repo::{TestRepo, get_binary_path};
+use crate::repos::test_repo::TestRepo;
+#[cfg(unix)]
+use crate::repos::test_repo::get_binary_path;
 #[cfg(unix)]
 use std::process::Command;
 
