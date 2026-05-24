@@ -169,6 +169,39 @@ detect_all_shells() {
     printf '%b' "$shells" | sed '/^$/d'
 }
 
+# ============================================================
+# Block installation as root/sudo unless explicitly opted in.
+# Running as root creates files that normal-user processes
+# cannot access, causing persistent daemon lock failures.
+# ============================================================
+if [ "$(id -u)" = "0" ] && [ "${GIT_AI_ALLOW_SUPERUSER:-}" != "1" ]; then
+    # Auto-allow in CI environments, MDM deployments (JAMF, etc.),
+    # and daemon-triggered self-updates (GIT_AI_RELEASE_TAG is set by upgrade command)
+    IS_CI_OR_MDM=false
+    if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${GITLAB_CI:-}" ] \
+        || [ -n "${JENKINS_URL:-}" ] || [ -n "${BUILDKITE:-}" ] || [ -n "${CIRCLECI:-}" ] \
+        || [ -n "${CODEBUILD_BUILD_ID:-}" ] || [ -n "${AGENT_OS:-}" ] \
+        || [ -n "${KUBERNETES_SERVICE_HOST:-}" ] || [ -n "${INSTALL_USER:-}" ] \
+        || [ -n "${GIT_AI_RELEASE_TAG:-}" ]; then
+        IS_CI_OR_MDM=true
+    fi
+
+    if [ "$IS_CI_OR_MDM" = "false" ]; then
+        echo ""
+        echo -e "${RED}Error: git-ai should not be installed as root/sudo.${NC}"
+        echo ""
+        echo "Installing as superuser creates files owned by root that become"
+        echo "inaccessible to your normal user account, causing persistent failures."
+        echo ""
+        echo "Instead, run this installer as your normal user (without sudo)."
+        echo ""
+        echo "To override this check (not recommended):"
+        echo "  GIT_AI_ALLOW_SUPERUSER=1 curl -fsSL https://usegitai.com/install.sh | bash"
+        echo ""
+        exit 1
+    fi
+fi
+
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
