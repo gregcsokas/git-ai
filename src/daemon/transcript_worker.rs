@@ -336,7 +336,11 @@ impl TranscriptWorker {
         external_parent_session_id: Option<&str>,
         repo_work_dir: Option<&Path>,
     ) -> Result<(), TranscriptError> {
-        if self.transcripts_db.get_session(session_id)?.is_some() {
+        if self
+            .transcripts_db
+            .get_session(session_id, "transcript")?
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -346,6 +350,7 @@ impl TranscriptWorker {
         let initial_watermark = ByteOffsetWatermark::new(0);
         let record = SessionRecord {
             session_id: session_id.to_string(),
+            stream_type: "transcript".to_string(),
             tool: "claude".to_string(),
             transcript_path: path.display().to_string(),
             transcript_format: "ClaudeJsonl".to_string(),
@@ -442,7 +447,7 @@ impl TranscriptWorker {
         task: &ProcessingTask,
     ) -> Result<(), TranscriptError> {
         let session = db
-            .get_session(&task.session_id)?
+            .get_session(&task.session_id, "transcript")?
             .ok_or_else(|| TranscriptError::Fatal {
                 message: format!("session not found: {}", task.session_id),
             })?;
@@ -474,7 +479,7 @@ impl TranscriptWorker {
         if session.repo_work_dir.is_none()
             && let Some(ref work_dir) = resolved_work_dir
         {
-            let _ = db.update_repo_work_dir(&session.session_id, &work_dir.display().to_string());
+            let _ = db.update_repo_work_dir(&session.session_id, "transcript", &work_dir.display().to_string());
         }
 
         let mut base_attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
@@ -500,7 +505,7 @@ impl TranscriptWorker {
             let batch = agent.read_incremental(&path, current_watermark, &session.session_id)?;
 
             if batch.events.is_empty() {
-                db.update_watermark(&session.session_id, batch.new_watermark.as_ref())?;
+                db.update_watermark(&session.session_id, "transcript", batch.new_watermark.as_ref())?;
                 break;
             }
 
@@ -552,7 +557,7 @@ impl TranscriptWorker {
             }
 
             total_events += batch_count;
-            db.update_watermark(&session.session_id, batch.new_watermark.as_ref())?;
+            db.update_watermark(&session.session_id, "transcript", batch.new_watermark.as_ref())?;
             current_watermark = batch.new_watermark;
         }
 
@@ -563,7 +568,7 @@ impl TranscriptWorker {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| Utc.timestamp_opt(d.as_secs() as i64, 0).unwrap());
-            db.update_file_metadata(&session.session_id, file_size, modified)?;
+            db.update_file_metadata(&session.session_id, "transcript", file_size, modified)?;
         }
 
         tracing::debug!(
@@ -591,7 +596,7 @@ impl TranscriptWorker {
                     );
                     if let Err(e) = self
                         .transcripts_db
-                        .record_error(&task.session_id, &format!("max retries: {}", message))
+                        .record_error(&task.session_id, "transcript", &format!("max retries: {}", message))
                     {
                         tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
                     }
@@ -629,6 +634,7 @@ impl TranscriptWorker {
                 );
                 if let Err(e) = self.transcripts_db.record_error(
                     &task.session_id,
+                    "transcript",
                     &format!("parse line {}: {}", line, message),
                 ) {
                     tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
@@ -643,7 +649,7 @@ impl TranscriptWorker {
                 );
                 if let Err(e) = self
                     .transcripts_db
-                    .record_error(&task.session_id, &format!("fatal: {}", message))
+                    .record_error(&task.session_id, "transcript", &format!("fatal: {}", message))
                 {
                     tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
                 }
@@ -846,12 +852,12 @@ mod subagent_sweep_tests {
         let sub1_sid = generate_session_id("agent-sub1", "claude");
         let sub2_sid = generate_session_id("agent-sub2", "claude");
 
-        let rec1 = db.get_session(&sub1_sid).unwrap().unwrap();
+        let rec1 = db.get_session(&sub1_sid, "transcript").unwrap().unwrap();
         assert_eq!(rec1.external_session_id, "agent-sub1");
         assert_eq!(rec1.external_parent_session_id.as_deref(), Some("sess-abc"));
         assert_eq!(rec1.tool, "claude");
 
-        let rec2 = db.get_session(&sub2_sid).unwrap().unwrap();
+        let rec2 = db.get_session(&sub2_sid, "transcript").unwrap().unwrap();
         assert_eq!(rec2.external_session_id, "agent-sub2");
         assert_eq!(rec2.external_parent_session_id.as_deref(), Some("sess-abc"));
     }

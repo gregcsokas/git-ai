@@ -7657,7 +7657,7 @@ impl ActorDaemonCoordinator {
     ) -> Result<(), String> {
         // Check if session exists
         if db
-            .get_session(session_id)
+            .get_session(session_id, "transcript")
             .map_err(|e| e.to_string())?
             .is_some()
         {
@@ -7691,6 +7691,7 @@ impl ActorDaemonCoordinator {
 
         let record = crate::transcripts::db::SessionRecord {
             session_id: session_id.to_string(),
+            stream_type: "transcript".to_string(),
             tool: tool.to_string(),
             transcript_path: transcript_source.path.display().to_string(),
             transcript_format: format!("{:?}", transcript_source.format),

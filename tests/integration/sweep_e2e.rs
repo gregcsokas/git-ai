@@ -261,13 +261,14 @@ fn test_sweep_deduplication_via_session_id() {
     let session_id = "claude:conversation_abc";
 
     // First sweep - session doesn't exist
-    let session1 = db.get_session(session_id).unwrap();
+    let session1 = db.get_session(session_id, "transcript").unwrap();
     assert!(session1.is_none(), "Session should not exist initially");
 
     // Insert session (simulating SweepCoordinator.insert_new_session)
     let now = chrono::Utc::now().timestamp();
     let record = git_ai::transcripts::db::SessionRecord {
         session_id: session_id.to_string(),
+        stream_type: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: transcript_path.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),
@@ -286,7 +287,7 @@ fn test_sweep_deduplication_via_session_id() {
     db.insert_session(&record).unwrap();
 
     // Second sweep - session exists, should not be inserted again
-    let session2 = db.get_session(session_id).unwrap();
+    let session2 = db.get_session(session_id, "transcript").unwrap();
     assert!(session2.is_some(), "Session should exist after insert");
 
     // Attempting to insert again should fail (unique constraint)
@@ -310,6 +311,7 @@ fn test_behind_detection_on_file_growth() {
     let now = chrono::Utc::now().timestamp();
     let record = git_ai::transcripts::db::SessionRecord {
         session_id: "test_session".to_string(),
+        stream_type: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: transcript_path.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),
@@ -337,7 +339,7 @@ fn test_behind_detection_on_file_growth() {
     assert!(new_size > initial_size, "File size should have increased");
 
     // SweepCoordinator.is_session_behind would detect this
-    let existing = db.get_session("test_session").unwrap().unwrap();
+    let existing = db.get_session("test_session", "transcript").unwrap().unwrap();
     assert_ne!(
         new_size, existing.last_known_size,
         "File size changed, session is behind"
@@ -389,6 +391,7 @@ fn test_watermark_persistence_after_processing() {
     let now = chrono::Utc::now().timestamp();
     let record = git_ai::transcripts::db::SessionRecord {
         session_id: "test_session".to_string(),
+        stream_type: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: transcript_path.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),
@@ -419,11 +422,11 @@ fn test_watermark_persistence_after_processing() {
     assert_eq!(batch.events.len(), 2);
 
     // Update watermark in DB (simulating TranscriptWorker.process_session_blocking)
-    db.update_watermark("test_session", batch.new_watermark.as_ref())
+    db.update_watermark("test_session", "transcript", batch.new_watermark.as_ref())
         .unwrap();
 
     // Verify watermark persisted
-    let updated = db.get_session("test_session").unwrap().unwrap();
+    let updated = db.get_session("test_session", "transcript").unwrap().unwrap();
     let watermark_value: u64 = updated.watermark_value.parse().unwrap();
     assert!(watermark_value > 0, "Watermark should have advanced");
 

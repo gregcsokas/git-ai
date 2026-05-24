@@ -49,7 +49,7 @@ impl SweepCoordinator {
 
             for session in discovered {
                 // Check against transcripts-db
-                match self.transcripts_db.get_session(&session.session_id)? {
+                match self.transcripts_db.get_session(&session.session_id, "transcript")? {
                     None => {
                         // New session - insert and queue for processing
                         self.insert_new_session(&session)?;
@@ -105,6 +105,7 @@ impl SweepCoordinator {
 
         let record = SessionRecord {
             session_id: session.session_id.clone(),
+            stream_type: "transcript".to_string(),
             tool: session.tool.clone(),
             transcript_path: session.transcript_path.display().to_string(),
             transcript_format: session.transcript_format.to_string(),
