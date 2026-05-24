@@ -199,27 +199,17 @@ pub fn post_commit_with_final_state(
 
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
+    // Runs a single diff subprocess and derives the cost estimate from the same hunks,
+    // avoiding a redundant subprocess call.
     let mut stats: Option<crate::authorship::stats::CommitStats> = None;
     let is_merge_commit = repo
         .find_commit(commit_sha.clone())
         .map(|commit| commit.parent_count().unwrap_or(0) > 1)
         .unwrap_or(false);
     let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
-    let skip_reason = if is_merge_commit {
+    let skip_reason: Option<StatsSkipReason> = if is_merge_commit {
         Some(StatsSkipReason::MergeCommit)
     } else {
-        estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
-            .ok()
-            .and_then(|estimate| {
-                if should_skip_expensive_post_commit_stats(&estimate) {
-                    Some(StatsSkipReason::Expensive(estimate))
-                } else {
-                    None
-                }
-            })
-    };
-
-    if skip_reason.is_none() {
         let diff_base = if parent_sha == "initial" {
             "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         } else {
@@ -229,53 +219,50 @@ pub fn post_commit_with_final_state(
         let diff_hunks =
             crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
 
-        let computed = stats_for_commit_stats_from_hunks(
-            repo,
-            &commit_sha,
-            &ignore_patterns,
-            &diff_hunks,
-            Some(&authorship_log),
-        )?;
+        let estimate = estimate_stats_cost_from_hunks(&diff_hunks, &ignore_patterns);
+        if should_skip_expensive_post_commit_stats(&estimate) {
+            tracing::debug!(
+                "Skipping expensive post-commit stats for {} (files_with_additions={}, added_lines={}, deleted_lines={}, hunks={})",
+                commit_sha,
+                estimate.files_with_additions,
+                estimate.added_lines,
+                estimate.deleted_lines,
+                estimate.hunk_ranges
+            );
+            Some(StatsSkipReason::Expensive(estimate))
+        } else {
+            let computed = stats_for_commit_stats_from_hunks(
+                repo,
+                &commit_sha,
+                &ignore_patterns,
+                &diff_hunks,
+                Some(&authorship_log),
+            )?;
 
-        let hunks_json = crate::commands::diff::build_diff_artifacts_from_hunks(
-            repo,
-            diff_hunks,
-            &commit_sha,
-            Some(&authorship_log),
-        )
-        .ok()
-        .and_then(|artifacts| serde_json::to_string(&artifacts.json_hunks).ok());
+            let hunks_json = crate::commands::diff::build_diff_artifacts_from_hunks(
+                repo,
+                diff_hunks,
+                &commit_sha,
+                Some(&authorship_log),
+            )
+            .ok()
+            .and_then(|artifacts| serde_json::to_string(&artifacts.json_hunks).ok());
 
-        // Record metrics only when we have full stats.
-        record_commit_metrics(
-            repo,
-            &commit_sha,
-            &parent_sha,
-            &human_author,
-            &authorship_note_str,
-            &computed,
-            &parent_working_log,
-            hunks_json.as_deref(),
-        );
-        stats = Some(computed);
-    } else {
-        match skip_reason.as_ref() {
-            Some(StatsSkipReason::MergeCommit) => {
-                tracing::debug!("Skipping post-commit stats for merge commit {}", commit_sha);
-            }
-            Some(StatsSkipReason::Expensive(estimate)) => {
-                tracing::debug!(
-                    "Skipping expensive post-commit stats for {} (files_with_additions={}, added_lines={}, deleted_lines={}, hunks={})",
-                    commit_sha,
-                    estimate.files_with_additions,
-                    estimate.added_lines,
-                    estimate.deleted_lines,
-                    estimate.hunk_ranges
-                );
-            }
-            None => {}
+            // Record metrics only when we have full stats.
+            record_commit_metrics(
+                repo,
+                &commit_sha,
+                &parent_sha,
+                &human_author,
+                &authorship_note_str,
+                &computed,
+                &parent_working_log,
+                hunks_json.as_deref(),
+            );
+            stats = Some(computed);
+            None
         }
-    }
+    };
 
     // Write INITIAL file for uncommitted AI attributions (if any)
     if !initial_attributions.files.is_empty() {
@@ -408,6 +395,37 @@ fn estimate_stats_cost(
         hunk_ranges,
         deleted_lines: total_deleted_lines,
     })
+}
+
+fn estimate_stats_cost_from_hunks(
+    hunks: &[crate::commands::diff::DiffHunk],
+    ignore_patterns: &[String],
+) -> StatsCostEstimate {
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
+
+    let mut files_with_additions = std::collections::HashSet::new();
+    let mut added_lines = 0usize;
+    let mut hunk_ranges = 0usize;
+    let mut deleted_lines = 0usize;
+
+    for hunk in hunks {
+        if should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher) {
+            continue;
+        }
+        deleted_lines += hunk.old_count as usize;
+        if hunk.new_count > 0 {
+            files_with_additions.insert(&hunk.file_path);
+            added_lines += hunk.new_count as usize;
+            hunk_ranges += 1;
+        }
+    }
+
+    StatsCostEstimate {
+        files_with_additions: files_with_additions.len(),
+        added_lines,
+        hunk_ranges,
+        deleted_lines,
+    }
 }
 
 #[doc(hidden)]

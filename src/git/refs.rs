@@ -195,6 +195,23 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         return Ok(());
     }
 
+    // Try native gix note writing first (no subprocess)
+    if repo.gix.notes_add_batch(entries).is_ok() {
+        let deduped: Vec<(String, String)> = {
+            let mut seen = HashSet::new();
+            let mut result = Vec::new();
+            for (sha, content) in entries.iter().rev() {
+                if seen.insert(sha.as_str()) {
+                    result.push((sha.clone(), content.clone()));
+                }
+            }
+            result.reverse();
+            result
+        };
+        crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped);
+        return Ok(());
+    }
+
     let existing_notes_tip = match repo.gix.try_rev_parse("refs/notes/ai") {
         Some(oid) => Some(oid),
         None => {

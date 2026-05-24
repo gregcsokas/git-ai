@@ -919,4 +919,218 @@ impl GixBackend {
     ) -> Option<Vec<String>> {
         self.diff_commits_changed_files(from_commit, to_commit).ok()
     }
+
+    /// Write note blobs and create a notes commit under refs/notes/ai.
+    /// This replaces the `git fast-import` subprocess with native object writes.
+    ///
+    /// Each entry is (commit_sha, note_content). The notes tree uses fanout
+    /// format: `xx/yyyyyyyy...` where xx is the first 2 hex chars.
+    pub fn notes_add_batch(&self, entries: &[(String, String)]) -> Result<(), GitAiError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let repo = self.get_repo()?;
+
+        // Deduplicate: last entry for each commit wins
+        let mut deduped: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (commit_sha, note_content) in entries.iter().rev() {
+            if seen.insert(commit_sha.as_str()) {
+                deduped.push((commit_sha.clone(), note_content.clone()));
+            }
+        }
+        deduped.reverse();
+
+        // Write note blobs
+        let mut blob_ids: Vec<(String, ObjectId)> = Vec::with_capacity(deduped.len());
+        for (commit_sha, note_content) in &deduped {
+            let blob_id = repo
+                .write_blob(note_content.as_bytes())
+                .map_err(|e| GitAiError::GixError(format!("write note blob: {}", e)))?;
+            blob_ids.push((commit_sha.clone(), blob_id.detach()));
+        }
+
+        // Get the existing notes tree (if any)
+        let existing_tip: Option<ObjectId> = repo
+            .try_find_reference("refs/notes/ai")
+            .ok()
+            .flatten()
+            .and_then(|r| r.into_fully_peeled_id().ok())
+            .map(|id| id.detach());
+
+        // Read existing tree entries
+        let mut tree_entries: std::collections::BTreeMap<String, (u32, ObjectId)> =
+            std::collections::BTreeMap::new();
+
+        if let Some(tip_id) = existing_tip
+            && let Ok(commit_obj) = repo.find_object(tip_id)
+            && let Ok(commit) = commit_obj.try_into_commit()
+            && let Ok(tree_id) = commit.tree_id()
+            && let Ok(tree_obj) = repo.find_object(tree_id)
+            && let Ok(tree) = tree_obj.try_into_tree()
+        {
+            self.collect_tree_entries(&repo, &tree, "", &mut tree_entries);
+        }
+
+        // Add/update entries for the new notes (using fanout paths)
+        for (commit_sha, blob_id) in &blob_ids {
+            let fanout_path = if commit_sha.len() > 2 {
+                format!("{}/{}", &commit_sha[..2], &commit_sha[2..])
+            } else {
+                commit_sha.clone()
+            };
+            // Remove flat path if it exists
+            tree_entries.remove(commit_sha);
+            // Insert fanout path
+            tree_entries.insert(fanout_path, (0o100644, *blob_id));
+        }
+
+        // Build the new tree hierarchy
+        let new_tree_id = self.build_notes_tree(&repo, &tree_entries)?;
+
+        // Create the notes commit
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| GitAiError::GixError(format!("system clock: {}", e)))?;
+        let time_str = format!("{} +0000", now.as_secs());
+        let signature = gix::actor::SignatureRef {
+            name: b"git-ai".as_slice().into(),
+            email: b"git-ai@local".as_slice().into(),
+            time: &time_str,
+        };
+
+        let parents: Vec<ObjectId> = existing_tip.into_iter().collect();
+        repo.commit_as(
+            signature,
+            signature,
+            "refs/notes/ai",
+            "",
+            new_tree_id,
+            parents,
+        )
+        .map_err(|e| GitAiError::GixError(format!("create notes commit: {}", e)))?;
+
+        Ok(())
+    }
+
+    fn collect_tree_entries(
+        &self,
+        repo: &gix::Repository,
+        tree: &gix::Tree<'_>,
+        prefix: &str,
+        entries: &mut std::collections::BTreeMap<String, (u32, ObjectId)>,
+    ) {
+        use gix::objs::TreeRefIter;
+        let data = tree.data.clone();
+        let iter = TreeRefIter::from_bytes(&data);
+        for entry in iter {
+            let Ok(entry) = entry else { continue };
+            let name = entry.filename.to_string();
+            let full_path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", prefix, name)
+            };
+            if entry.mode.is_tree() {
+                if let Ok(subtree_obj) = repo.find_object(entry.oid.to_owned())
+                    && let Ok(subtree) = subtree_obj.try_into_tree()
+                {
+                    self.collect_tree_entries(repo, &subtree, &full_path, entries);
+                }
+            } else {
+                let mode_str = entry.mode.kind().as_octal_str().to_string();
+                let mode: u32 = u32::from_str_radix(&mode_str, 8).unwrap_or(0o100644);
+                entries.insert(full_path, (mode, entry.oid.to_owned()));
+            }
+        }
+    }
+
+    fn build_notes_tree(
+        &self,
+        repo: &gix::Repository,
+        entries: &std::collections::BTreeMap<String, (u32, ObjectId)>,
+    ) -> Result<ObjectId, GitAiError> {
+        use gix::prelude::Write;
+        // Group entries by top-level directory
+        let mut top_level: std::collections::BTreeMap<String, Vec<(String, u32, ObjectId)>> =
+            std::collections::BTreeMap::new();
+        let mut root_entries: Vec<(String, u32, ObjectId)> = Vec::new();
+
+        for (path, (mode, oid)) in entries {
+            if let Some(slash_pos) = path.find('/') {
+                let dir = &path[..slash_pos];
+                let rest = &path[slash_pos + 1..];
+                top_level
+                    .entry(dir.to_string())
+                    .or_default()
+                    .push((rest.to_string(), *mode, *oid));
+            } else {
+                root_entries.push((path.clone(), *mode, *oid));
+            }
+        }
+
+        // Write subtrees for each directory
+        let mut tree_data: Vec<u8> = Vec::new();
+
+        // Entries must be sorted by name for git tree format.
+        // Directories come mixed with files in git's byte-sorted order.
+        let mut all_entries: Vec<(String, u32, ObjectId)> = Vec::new();
+
+        for (dir_name, dir_entries) in &top_level {
+            let subtree_id = self.build_flat_tree(repo, dir_entries)?;
+            all_entries.push((dir_name.clone(), 0o040000, subtree_id));
+        }
+        all_entries.extend(root_entries);
+
+        // Sort by name (git tree format requirement)
+        // Git sorts tree entries treating directories as if they have a trailing '/'
+        all_entries.sort_by(|a, b| {
+            let a_name = if a.1 == 0o040000 {
+                format!("{}/", a.0)
+            } else {
+                a.0.clone()
+            };
+            let b_name = if b.1 == 0o040000 {
+                format!("{}/", b.0)
+            } else {
+                b.0.clone()
+            };
+            a_name.cmp(&b_name)
+        });
+
+        // Serialize tree object
+        for (name, mode, oid) in &all_entries {
+            tree_data.extend_from_slice(format!("{:o} {}\0", mode, name).as_bytes());
+            tree_data.extend_from_slice(oid.as_bytes());
+        }
+
+        let oid = repo
+            .objects
+            .write_buf(gix::object::Kind::Tree, &tree_data)
+            .map_err(|e| GitAiError::GixError(format!("write tree: {}", e)))?;
+        Ok(oid)
+    }
+
+    fn build_flat_tree(
+        &self,
+        repo: &gix::Repository,
+        entries: &[(String, u32, ObjectId)],
+    ) -> Result<ObjectId, GitAiError> {
+        use gix::prelude::Write;
+        let mut sorted_entries = entries.to_vec();
+        sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut tree_data: Vec<u8> = Vec::new();
+        for (name, mode, oid) in &sorted_entries {
+            tree_data.extend_from_slice(format!("{:o} {}\0", mode, name).as_bytes());
+            tree_data.extend_from_slice(oid.as_bytes());
+        }
+
+        let oid = repo
+            .objects
+            .write_buf(gix::object::Kind::Tree, &tree_data)
+            .map_err(|e| GitAiError::GixError(format!("write subtree: {}", e)))?;
+        Ok(oid)
+    }
 }
