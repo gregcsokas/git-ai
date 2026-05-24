@@ -4,6 +4,7 @@ mod codex;
 mod continue_cli;
 mod copilot;
 mod copilot_cli;
+pub mod copilot_otel;
 mod cursor;
 mod droid;
 mod gemini;
