@@ -43,7 +43,7 @@ jobs:
           if [ "${{ github.event_name }}" = "merge_group" ]; then
             echo 'matrix={"include":[{"os":"ubuntu-latest","test_mode":"daemon","test_threads":4,"daemon_pool":4},{"os":"ubuntu-latest","test_mode":"wrapper-daemon","test_threads":4,"daemon_pool":4},{"os":"macos-latest","test_mode":"daemon","test_threads":2,"daemon_pool":2},{"os":"macos-latest","test_mode":"wrapper-daemon","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
           else
-            echo 'matrix={"include":[{"os":"ubuntu-latest","test_mode":"daemon","test_threads":4,"daemon_pool":4},{"os":"ubuntu-latest","test_mode":"wrapper-daemon","test_threads":4,"daemon_pool":4},{"os":"windows-latest","test_mode":"daemon","test_threads":4,"daemon_pool":4},{"os":"windows-latest","test_mode":"wrapper-daemon","test_threads":4,"daemon_pool":4},{"os":"macos-latest","test_mode":"daemon","test_threads":2,"daemon_pool":2},{"os":"macos-latest","test_mode":"wrapper-daemon","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"os":"ubuntu-latest","test_mode":"daemon","test_threads":4,"daemon_pool":4},{"os":"ubuntu-latest","test_mode":"wrapper-daemon","test_threads":4,"daemon_pool":4},{"os":"windows-latest","test_mode":"daemon","test_threads":16,"daemon_pool":16},{"os":"windows-latest","test_mode":"wrapper-daemon","test_threads":16,"daemon_pool":16},{"os":"macos-latest","test_mode":"daemon","test_threads":2,"daemon_pool":2},{"os":"macos-latest","test_mode":"wrapper-daemon","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
           fi
 
   test:
@@ -72,7 +72,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ${{ runner.os != 'Windows' && 'target' || '' }}
+            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
@@ -88,6 +88,10 @@ jobs:
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get install -y mold
+
+      - name: Disable Windows Defender real-time monitoring
+        if: runner.os == 'Windows'
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
 
       - name: Run tests (Unix)
         if: runner.os != 'Windows'
@@ -128,7 +132,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ${{ runner.os != 'Windows' && 'target' || '' }}
+            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
