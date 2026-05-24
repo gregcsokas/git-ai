@@ -151,6 +151,149 @@ pub fn is_in_background_agent() -> bool {
     )
 }
 
+/// Returns true if the current process is running with elevated privileges
+/// (root on Unix, Administrator on Windows).
+#[cfg(unix)]
+pub fn is_running_as_superuser() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(windows)]
+pub fn is_running_as_superuser() -> bool {
+    use std::mem;
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn OpenProcessToken(
+            process_handle: isize,
+            desired_access: u32,
+            token_handle: *mut isize,
+        ) -> i32;
+        fn GetTokenInformation(
+            token_handle: isize,
+            token_information_class: u32,
+            token_information: *mut u8,
+            token_information_length: u32,
+            return_length: *mut u32,
+        ) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+
+    const TOKEN_QUERY: u32 = 0x0008;
+    const TOKEN_ELEVATION_CLASS: u32 = 20; // TokenElevation
+
+    #[repr(C)]
+    struct TokenElevation {
+        token_is_elevated: u32,
+    }
+
+    unsafe {
+        let mut token: isize = 0;
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+
+        let mut elevation: TokenElevation = mem::zeroed();
+        let mut size: u32 = 0;
+        let result = GetTokenInformation(
+            token,
+            TOKEN_ELEVATION_CLASS,
+            &mut elevation as *mut _ as *mut u8,
+            mem::size_of::<TokenElevation>() as u32,
+            &mut size,
+        );
+        CloseHandle(token);
+
+        result != 0 && elevation.token_is_elevated != 0
+    }
+}
+
+/// Returns true if the environment indicates a CI system or automated agent
+/// sandbox where running as superuser is expected and acceptable.
+pub fn is_superuser_expected_environment() -> bool {
+    if std::env::var_os("CI").is_some() {
+        return true;
+    }
+    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        return true;
+    }
+    if std::env::var_os("GITLAB_CI").is_some() {
+        return true;
+    }
+    if std::env::var_os("JENKINS_URL").is_some() {
+        return true;
+    }
+    if std::env::var_os("BUILDKITE").is_some() {
+        return true;
+    }
+    if std::env::var_os("CIRCLECI").is_some() {
+        return true;
+    }
+    if std::env::var_os("CODEBUILD_BUILD_ID").is_some() {
+        return true;
+    }
+    if std::env::var_os("AGENT_OS").is_some() {
+        return true;
+    }
+    if std::env::var_os("KUBERNETES_SERVICE_HOST").is_some() {
+        return true;
+    }
+    false
+}
+
+/// Returns true if the user has explicitly opted in to running as superuser.
+pub fn superuser_is_allowed() -> bool {
+    std::env::var("GIT_AI_ALLOW_SUPERUSER")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+pub enum SuperuserCheckResult {
+    Allowed,
+    AllowedWithWarning,
+    Blocked,
+}
+
+/// Checks whether the current process should be blocked from running due to
+/// elevated privileges. Returns `Allowed` if not superuser or in CI/agent
+/// environments. Returns `AllowedWithWarning` if user explicitly opted in.
+/// Returns `Blocked` otherwise.
+pub fn check_superuser_guard() -> SuperuserCheckResult {
+    if !is_running_as_superuser() {
+        return SuperuserCheckResult::Allowed;
+    }
+    if is_superuser_expected_environment() {
+        return SuperuserCheckResult::Allowed;
+    }
+    if superuser_is_allowed() {
+        return SuperuserCheckResult::AllowedWithWarning;
+    }
+    SuperuserCheckResult::Blocked
+}
+
+pub fn print_superuser_error_and_exit() -> ! {
+    eprintln!(
+        "error: git-ai should not be run with elevated privileges (root/Administrator).\n\
+         \n\
+         Running as superuser creates files owned by root that become inaccessible\n\
+         to your normal user account, causing persistent daemon lock failures.\n\
+         \n\
+         To fix this:\n\
+         1. Stop any running git-ai processes\n\
+         2. Remove ~/.git-ai and reinstall as your normal user\n\
+         \n\
+         To override this check (not recommended):\n\
+         \x20 export GIT_AI_ALLOW_SUPERUSER=1\n\
+         \n\
+         This check is automatically skipped in CI environments."
+    );
+    std::process::exit(1);
+}
+
 /// A cross-platform exclusive file lock.
 ///
 /// Holds an exclusive advisory lock (Unix) or exclusive-access file handle (Windows)
@@ -1058,5 +1201,46 @@ mod tests {
     #[test]
     fn test_create_breakaway_from_job_constant() {
         assert_eq!(CREATE_BREAKAWAY_FROM_JOB, 0x01000000);
+    }
+
+    // =========================================================================
+    // Superuser Guard Tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_superuser_expected_environment_ci() {
+        let had_ci = std::env::var_os("CI");
+        unsafe { std::env::set_var("CI", "true") };
+        assert!(is_superuser_expected_environment());
+        match had_ci {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+    }
+
+    #[test]
+    fn test_superuser_is_allowed_env_var() {
+        let had_var = std::env::var_os("GIT_AI_ALLOW_SUPERUSER");
+        unsafe { std::env::set_var("GIT_AI_ALLOW_SUPERUSER", "1") };
+        assert!(superuser_is_allowed());
+        unsafe { std::env::set_var("GIT_AI_ALLOW_SUPERUSER", "true") };
+        assert!(superuser_is_allowed());
+        unsafe { std::env::set_var("GIT_AI_ALLOW_SUPERUSER", "TRUE") };
+        assert!(superuser_is_allowed());
+        unsafe { std::env::set_var("GIT_AI_ALLOW_SUPERUSER", "0") };
+        assert!(!superuser_is_allowed());
+        unsafe { std::env::remove_var("GIT_AI_ALLOW_SUPERUSER") };
+        assert!(!superuser_is_allowed());
+        match had_var {
+            Some(v) => unsafe { std::env::set_var("GIT_AI_ALLOW_SUPERUSER", v) },
+            None => unsafe { std::env::remove_var("GIT_AI_ALLOW_SUPERUSER") },
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_running_as_superuser_reports_correctly() {
+        let euid = unsafe { libc::geteuid() };
+        assert_eq!(is_running_as_superuser(), euid == 0);
     }
 }
