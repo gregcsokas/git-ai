@@ -163,7 +163,7 @@ pub fn is_running_as_superuser() -> bool {
     use std::mem;
 
     #[link(name = "advapi32")]
-    extern "system" {
+    unsafe extern "system" {
         fn OpenProcessToken(
             process_handle: isize,
             desired_access: u32,
@@ -179,7 +179,7 @@ pub fn is_running_as_superuser() -> bool {
     }
 
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetCurrentProcess() -> isize;
         fn CloseHandle(handle: isize) -> i32;
     }
