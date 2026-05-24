@@ -160,17 +160,20 @@ pub fn is_running_as_superuser() -> bool {
 
 #[cfg(windows)]
 pub fn is_running_as_superuser() -> bool {
+    use std::ffi::c_void;
     use std::mem;
+
+    type Handle = *mut c_void;
 
     #[link(name = "advapi32")]
     unsafe extern "system" {
         fn OpenProcessToken(
-            process_handle: isize,
+            process_handle: Handle,
             desired_access: u32,
-            token_handle: *mut isize,
+            token_handle: *mut Handle,
         ) -> i32;
         fn GetTokenInformation(
-            token_handle: isize,
+            token_handle: Handle,
             token_information_class: u32,
             token_information: *mut u8,
             token_information_length: u32,
@@ -180,8 +183,8 @@ pub fn is_running_as_superuser() -> bool {
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn GetCurrentProcess() -> isize;
-        fn CloseHandle(handle: isize) -> i32;
+        fn GetCurrentProcess() -> Handle;
+        fn CloseHandle(handle: Handle) -> i32;
     }
 
     const TOKEN_QUERY: u32 = 0x0008;
@@ -193,7 +196,7 @@ pub fn is_running_as_superuser() -> bool {
     }
 
     unsafe {
-        let mut token: isize = 0;
+        let mut token: Handle = std::ptr::null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
             return false;
         }
