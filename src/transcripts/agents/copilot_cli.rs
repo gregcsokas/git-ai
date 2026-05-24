@@ -152,6 +152,10 @@ impl Agent for CopilotCliAgent {
         }
         None
     }
+
+    fn default_transcript_format(&self) -> TranscriptFormat {
+        TranscriptFormat::CopilotEventStreamJsonl
+    }
 }
 
 #[cfg(test)]

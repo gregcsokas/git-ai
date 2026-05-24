@@ -331,6 +331,10 @@ impl Agent for CodexAgent {
         }
         None
     }
+
+    fn default_transcript_format(&self) -> TranscriptFormat {
+        TranscriptFormat::CodexJsonl
+    }
 }
 
 #[cfg(test)]

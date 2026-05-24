@@ -178,6 +178,10 @@ impl Agent for ContinueAgent {
     ) -> u32 {
         crate::transcripts::agent::file_time_fallback(file_meta, is_first_event)
     }
+
+    fn default_transcript_format(&self) -> TranscriptFormat {
+        TranscriptFormat::ContinueJson
+    }
 }
 
 #[cfg(test)]

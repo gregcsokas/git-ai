@@ -1,7 +1,7 @@
 //! OpenCode agent implementation (SQLite-only).
 
 use crate::transcripts::agent::Agent;
-use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
+use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{TimestampWatermark, WatermarkStrategy};
 use chrono::DateTime;
@@ -327,6 +327,10 @@ impl Agent for OpenCodeAgent {
         crate::daemon::transcript_worker::extract_event_timestamp(event).unwrap_or_else(|| {
             crate::transcripts::agent::file_time_fallback(file_meta, is_first_event)
         })
+    }
+
+    fn default_transcript_format(&self) -> TranscriptFormat {
+        TranscriptFormat::OpenCodeSqlite
     }
 }
 

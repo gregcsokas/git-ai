@@ -303,6 +303,10 @@ impl Agent for ClaudeAgent {
         }
         None
     }
+
+    fn default_transcript_format(&self) -> TranscriptFormat {
+        TranscriptFormat::ClaudeJsonl
+    }
 }
 
 #[cfg(test)]

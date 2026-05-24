@@ -1,9 +1,37 @@
 // src/transcripts/agent.rs
 
-use super::sweep::{DiscoveredSession, SweepStrategy};
+use super::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use super::types::{TranscriptBatch, TranscriptError};
 use super::watermark::WatermarkStrategy;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub enum PathResolverKind {
+    /// Same path as the session's transcript_path
+    Identity,
+    /// Same directory, different filename
+    Sibling { filename: &'static str },
+    /// Custom resolution function
+    Custom(Box<dyn Fn(&Path) -> Option<PathBuf> + Send + Sync>),
+}
+
+pub struct StreamDescriptor {
+    pub stream_type: &'static str,
+    pub format: TranscriptFormat,
+    pub watermark_type: super::watermark::WatermarkType,
+    pub path_resolver: PathResolverKind,
+}
+
+impl StreamDescriptor {
+    pub fn resolve_path(&self, transcript_path: &Path) -> Option<PathBuf> {
+        match &self.path_resolver {
+            PathResolverKind::Identity => Some(transcript_path.to_path_buf()),
+            PathResolverKind::Sibling { filename } => {
+                transcript_path.parent().map(|p| p.join(filename))
+            }
+            PathResolverKind::Custom(f) => f(transcript_path),
+        }
+    }
+}
 
 /// Unified trait for transcript agents.
 ///
@@ -70,6 +98,20 @@ pub trait Agent: Send + Sync {
     fn infer_cwd(&self, _transcript_path: &Path) -> Option<std::path::PathBuf> {
         None
     }
+
+    /// Returns the stream descriptors for this agent.
+    /// Default: single "transcript" stream using the agent's default format.
+    fn streams(&self) -> Vec<StreamDescriptor> {
+        vec![StreamDescriptor {
+            stream_type: "transcript",
+            format: self.default_transcript_format(),
+            watermark_type: self.default_transcript_format().watermark_type(),
+            path_resolver: PathResolverKind::Identity,
+        }]
+    }
+
+    /// Returns the default transcript format for this agent.
+    fn default_transcript_format(&self) -> TranscriptFormat;
 }
 
 /// Fallback timestamp from file metadata when an event lacks a per-event timestamp.

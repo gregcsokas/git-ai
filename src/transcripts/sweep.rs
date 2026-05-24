@@ -84,6 +84,7 @@ pub enum TranscriptFormat {
     AmpThreadJson,
     OpenCodeSqlite,
     PiJsonl,
+    OtelSqliteTraces,
 }
 
 impl std::fmt::Display for TranscriptFormat {
@@ -101,6 +102,7 @@ impl std::fmt::Display for TranscriptFormat {
             Self::AmpThreadJson => write!(f, "AmpThreadJson"),
             Self::OpenCodeSqlite => write!(f, "OpenCodeSqlite"),
             Self::PiJsonl => write!(f, "PiJsonl"),
+            Self::OtelSqliteTraces => write!(f, "OtelSqliteTraces"),
         }
     }
 }
@@ -121,6 +123,7 @@ impl TranscriptFormat {
                 WatermarkType::RecordIndex
             }
             Self::OpenCodeSqlite => WatermarkType::Timestamp,
+            Self::OtelSqliteTraces => WatermarkType::Timestamp,
         }
     }
 }

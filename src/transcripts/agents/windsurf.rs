@@ -1,7 +1,7 @@
 //! Windsurf agent implementation with sweep discovery.
 
 use crate::transcripts::agent::Agent;
-use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
+use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy};
 use std::fs::File;
@@ -148,6 +148,10 @@ impl Agent for WindsurfAgent {
         is_first_event: bool,
     ) -> u32 {
         crate::transcripts::agent::file_time_fallback(file_meta, is_first_event)
+    }
+
+    fn default_transcript_format(&self) -> TranscriptFormat {
+        TranscriptFormat::WindsurfJsonl
     }
 }
 
