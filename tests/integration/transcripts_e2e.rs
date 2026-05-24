@@ -39,6 +39,7 @@ fn test_session_database_basic() {
     let now = chrono::Utc::now().timestamp();
     let session = SessionRecord {
         session_id: "s_test_123".to_string(),
+        stream_type: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: "/path/to/transcript.jsonl".to_string(),
         transcript_format: "claude-jsonl".to_string(),
@@ -59,7 +60,7 @@ fn test_session_database_basic() {
     db.insert_session(&session).unwrap();
 
     // Read
-    let retrieved = db.get_session("s_test_123").unwrap();
+    let retrieved = db.get_session("s_test_123", "transcript").unwrap();
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.session_id, "s_test_123");
@@ -68,8 +69,8 @@ fn test_session_database_basic() {
 
     // Update watermark
     let new_watermark = ByteOffsetWatermark::new(100);
-    db.update_watermark("s_test_123", &new_watermark).unwrap();
-    let retrieved_updated = db.get_session("s_test_123").unwrap().unwrap();
+    db.update_watermark("s_test_123", "transcript", &new_watermark).unwrap();
+    let retrieved_updated = db.get_session("s_test_123", "transcript").unwrap().unwrap();
     assert_eq!(retrieved_updated.watermark_value, "100");
 
     // List all sessions
@@ -144,6 +145,7 @@ fn test_multiple_sessions_isolation() {
     for i in 0..5 {
         let session = SessionRecord {
             session_id: format!("s_session_{}", i),
+            stream_type: "transcript".to_string(),
             tool: "claude".to_string(),
             transcript_path: format!("/path/to/transcript_{}.jsonl", i),
             transcript_format: "claude-jsonl".to_string(),
@@ -169,7 +171,7 @@ fn test_multiple_sessions_isolation() {
     // Verify each session has correct data
     for i in 0..5 {
         let session = db
-            .get_session(&format!("s_session_{}", i))
+            .get_session(&format!("s_session_{}", i), "transcript")
             .unwrap()
             .unwrap();
         assert_eq!(session.watermark_value, (i * 10).to_string());
@@ -189,6 +191,7 @@ fn test_database_persistence() {
         let db = TranscriptsDatabase::open(&db_path).unwrap();
         let session = SessionRecord {
             session_id: "s_persist".to_string(),
+            stream_type: "transcript".to_string(),
             tool: "claude".to_string(),
             transcript_path: "/path/to/transcript.jsonl".to_string(),
             transcript_format: "claude-jsonl".to_string(),
@@ -210,7 +213,7 @@ fn test_database_persistence() {
     // Reopen database
     {
         let db = TranscriptsDatabase::open(&db_path).unwrap();
-        let retrieved = db.get_session("s_persist").unwrap().unwrap();
+        let retrieved = db.get_session("s_persist", "transcript").unwrap().unwrap();
         assert_eq!(retrieved.session_id, "s_persist");
         assert_eq!(retrieved.watermark_value, "42");
         assert_eq!(retrieved.processing_errors, 0);
@@ -226,6 +229,7 @@ fn test_error_tracking() {
     let now = chrono::Utc::now().timestamp();
     let session = SessionRecord {
         session_id: "s_errors".to_string(),
+        stream_type: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: "/path/to/transcript.jsonl".to_string(),
         transcript_format: "claude-jsonl".to_string(),
@@ -245,14 +249,14 @@ fn test_error_tracking() {
     db.insert_session(&session).unwrap();
 
     // Simulate errors
-    db.record_error("s_errors", "First error").unwrap();
-    let retrieved = db.get_session("s_errors").unwrap().unwrap();
+    db.record_error("s_errors", "transcript", "First error").unwrap();
+    let retrieved = db.get_session("s_errors", "transcript").unwrap().unwrap();
     assert_eq!(retrieved.processing_errors, 1);
     assert_eq!(retrieved.last_error, Some("First error".to_string()));
 
     // More errors
-    db.record_error("s_errors", "Second error").unwrap();
-    let retrieved2 = db.get_session("s_errors").unwrap().unwrap();
+    db.record_error("s_errors", "transcript", "Second error").unwrap();
+    let retrieved2 = db.get_session("s_errors", "transcript").unwrap().unwrap();
     assert_eq!(retrieved2.processing_errors, 2);
     assert_eq!(retrieved2.last_error, Some("Second error".to_string()));
 }
@@ -268,6 +272,7 @@ fn test_full_pipeline_claude_session_ids_flow_through() {
 
     let session = SessionRecord {
         session_id: "sess-parent-abc".to_string(),
+        stream_type: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: fixture.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),
@@ -285,7 +290,7 @@ fn test_full_pipeline_claude_session_ids_flow_through() {
     };
     db.insert_session(&session).unwrap();
 
-    let retrieved = db.get_session("sess-parent-abc").unwrap().unwrap();
+    let retrieved = db.get_session("sess-parent-abc", "transcript").unwrap().unwrap();
     assert_eq!(retrieved.external_session_id, "sess-parent-abc".to_string());
     assert_eq!(retrieved.external_parent_session_id, None);
 
@@ -357,6 +362,7 @@ fn test_full_pipeline_opencode_session_ids_flow_through() {
 
     let session = SessionRecord {
         session_id: "test-session-123".to_string(),
+        stream_type: "transcript".to_string(),
         tool: "opencode".to_string(),
         transcript_path: fixture.display().to_string(),
         transcript_format: "OpenCodeSqlite".to_string(),
@@ -439,6 +445,7 @@ fn test_subagent_session_record_has_parent_link() {
     let now = chrono::Utc::now().timestamp();
     let session = SessionRecord {
         session_id: "agent-a1b2c3d4e5f6".to_string(),
+        stream_type: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: subagent_path.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),
@@ -456,7 +463,7 @@ fn test_subagent_session_record_has_parent_link() {
     };
     db.insert_session(&session).unwrap();
 
-    let retrieved = db.get_session("agent-a1b2c3d4e5f6").unwrap().unwrap();
+    let retrieved = db.get_session("agent-a1b2c3d4e5f6", "transcript").unwrap().unwrap();
     assert_eq!(
         retrieved.external_session_id,
         "agent-a1b2c3d4e5f6".to_string()
