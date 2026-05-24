@@ -49,7 +49,10 @@ impl SweepCoordinator {
 
             for session in discovered {
                 // Check against transcripts-db
-                match self.transcripts_db.get_session(&session.session_id, "transcript")? {
+                match self
+                    .transcripts_db
+                    .get_session(&session.session_id, "transcript")?
+                {
                     None => {
                         // New session - insert and queue for processing
                         self.insert_new_session(&session)?;

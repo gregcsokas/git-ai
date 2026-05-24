@@ -448,7 +448,11 @@ impl TranscriptsDatabase {
     }
 
     /// Delete a session and its associated data.
-    pub fn delete_session(&self, session_id: &str, stream_type: &str) -> Result<(), TranscriptError> {
+    pub fn delete_session(
+        &self,
+        session_id: &str,
+        stream_type: &str,
+    ) -> Result<(), TranscriptError> {
         let conn = self
             .conn
             .lock()
@@ -601,7 +605,8 @@ mod tests {
         use super::super::watermark::ByteOffsetWatermark;
         let new_watermark = ByteOffsetWatermark::new(1234);
 
-        db.update_watermark("session-1", "transcript", &new_watermark).unwrap();
+        db.update_watermark("session-1", "transcript", &new_watermark)
+            .unwrap();
 
         let retrieved = db.get_session("session-1", "transcript").unwrap().unwrap();
         assert_eq!(retrieved.watermark_value, "1234");
@@ -677,7 +682,10 @@ mod tests {
 
         db.insert_session(&session).unwrap();
 
-        let retrieved = db.get_session("session-null", "transcript").unwrap().unwrap();
+        let retrieved = db
+            .get_session("session-null", "transcript")
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.external_session_id, "session-null");
         assert_eq!(retrieved.last_modified, None);
         assert_eq!(retrieved.last_error, None);
@@ -803,14 +811,16 @@ mod tests {
         db.insert_session(&session).unwrap();
 
         // Record an error
-        db.record_error("session-1", "transcript", "Test error message").unwrap();
+        db.record_error("session-1", "transcript", "Test error message")
+            .unwrap();
 
         let retrieved = db.get_session("session-1", "transcript").unwrap().unwrap();
         assert_eq!(retrieved.processing_errors, 1);
         assert_eq!(retrieved.last_error, Some("Test error message".to_string()));
 
         // Record another error
-        db.record_error("session-1", "transcript", "Another error").unwrap();
+        db.record_error("session-1", "transcript", "Another error")
+            .unwrap();
 
         let retrieved = db.get_session("session-1", "transcript").unwrap().unwrap();
         assert_eq!(retrieved.processing_errors, 2);

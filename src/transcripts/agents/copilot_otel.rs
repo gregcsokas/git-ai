@@ -221,11 +221,10 @@ fn read_events_for_spans(
         })?;
 
     for row in rows {
-        let (span_id, name, timestamp_ms, attributes_json) = row.map_err(|e| {
-            TranscriptError::Fatal {
+        let (span_id, name, timestamp_ms, attributes_json) =
+            row.map_err(|e| TranscriptError::Fatal {
                 message: format!("Failed to read event row: {}", e),
-            }
-        })?;
+            })?;
         let attrs: serde_json::Value = attributes_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(serde_json::Value::Null);
@@ -390,13 +389,7 @@ mod tests {
         let (_dir, db_path) = create_test_otel_db();
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         for i in 1..=5 {
-            insert_span(
-                &conn,
-                &format!("span{}", i),
-                i * 1000,
-                i * 100,
-                i * 50,
-            );
+            insert_span(&conn, &format!("span{}", i), i * 1000, i * 100, i * 50);
         }
         drop(conn);
 
@@ -411,13 +404,7 @@ mod tests {
         let (_dir, db_path) = create_test_otel_db();
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         for i in 1..=5 {
-            insert_span(
-                &conn,
-                &format!("span{}", i),
-                i * 1000,
-                i * 100,
-                i * 50,
-            );
+            insert_span(&conn, &format!("span{}", i), i * 1000, i * 100, i * 50);
         }
         drop(conn);
 
@@ -436,10 +423,7 @@ mod tests {
             watermark = batch.new_watermark;
         }
 
-        assert_eq!(
-            all_ids,
-            vec!["span1", "span2", "span3", "span4", "span5"]
-        );
+        assert_eq!(all_ids, vec!["span1", "span2", "span3", "span4", "span5"]);
     }
 
     #[test]

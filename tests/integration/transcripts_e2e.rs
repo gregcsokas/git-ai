@@ -69,7 +69,8 @@ fn test_session_database_basic() {
 
     // Update watermark
     let new_watermark = ByteOffsetWatermark::new(100);
-    db.update_watermark("s_test_123", "transcript", &new_watermark).unwrap();
+    db.update_watermark("s_test_123", "transcript", &new_watermark)
+        .unwrap();
     let retrieved_updated = db.get_session("s_test_123", "transcript").unwrap().unwrap();
     assert_eq!(retrieved_updated.watermark_value, "100");
 
@@ -249,13 +250,15 @@ fn test_error_tracking() {
     db.insert_session(&session).unwrap();
 
     // Simulate errors
-    db.record_error("s_errors", "transcript", "First error").unwrap();
+    db.record_error("s_errors", "transcript", "First error")
+        .unwrap();
     let retrieved = db.get_session("s_errors", "transcript").unwrap().unwrap();
     assert_eq!(retrieved.processing_errors, 1);
     assert_eq!(retrieved.last_error, Some("First error".to_string()));
 
     // More errors
-    db.record_error("s_errors", "transcript", "Second error").unwrap();
+    db.record_error("s_errors", "transcript", "Second error")
+        .unwrap();
     let retrieved2 = db.get_session("s_errors", "transcript").unwrap().unwrap();
     assert_eq!(retrieved2.processing_errors, 2);
     assert_eq!(retrieved2.last_error, Some("Second error".to_string()));
@@ -290,7 +293,10 @@ fn test_full_pipeline_claude_session_ids_flow_through() {
     };
     db.insert_session(&session).unwrap();
 
-    let retrieved = db.get_session("sess-parent-abc", "transcript").unwrap().unwrap();
+    let retrieved = db
+        .get_session("sess-parent-abc", "transcript")
+        .unwrap()
+        .unwrap();
     assert_eq!(retrieved.external_session_id, "sess-parent-abc".to_string());
     assert_eq!(retrieved.external_parent_session_id, None);
 
@@ -463,7 +469,10 @@ fn test_subagent_session_record_has_parent_link() {
     };
     db.insert_session(&session).unwrap();
 
-    let retrieved = db.get_session("agent-a1b2c3d4e5f6", "transcript").unwrap().unwrap();
+    let retrieved = db
+        .get_session("agent-a1b2c3d4e5f6", "transcript")
+        .unwrap()
+        .unwrap();
     assert_eq!(
         retrieved.external_session_id,
         "agent-a1b2c3d4e5f6".to_string()
@@ -604,7 +613,11 @@ fn test_copilot_otel_stream_watermark_resumes_correctly() {
         .read_incremental(&fixture, watermark1, "test-session")
         .unwrap();
     let count1 = batch1.events.len();
-    assert!(count1 >= 20, "expected bulk of spans in first read, got {}", count1);
+    assert!(
+        count1 >= 20,
+        "expected bulk of spans in first read, got {}",
+        count1
+    );
 
     // Watermark should have advanced from epoch
     let wm1_str = batch1.new_watermark.serialize();

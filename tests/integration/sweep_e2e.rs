@@ -339,7 +339,10 @@ fn test_behind_detection_on_file_growth() {
     assert!(new_size > initial_size, "File size should have increased");
 
     // SweepCoordinator.is_session_behind would detect this
-    let existing = db.get_session("test_session", "transcript").unwrap().unwrap();
+    let existing = db
+        .get_session("test_session", "transcript")
+        .unwrap()
+        .unwrap();
     assert_ne!(
         new_size, existing.last_known_size,
         "File size changed, session is behind"
@@ -426,7 +429,10 @@ fn test_watermark_persistence_after_processing() {
         .unwrap();
 
     // Verify watermark persisted
-    let updated = db.get_session("test_session", "transcript").unwrap().unwrap();
+    let updated = db
+        .get_session("test_session", "transcript")
+        .unwrap()
+        .unwrap();
     let watermark_value: u64 = updated.watermark_value.parse().unwrap();
     assert!(watermark_value > 0, "Watermark should have advanced");
 

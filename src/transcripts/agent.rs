@@ -5,13 +5,16 @@ use super::types::{TranscriptBatch, TranscriptError};
 use super::watermark::WatermarkStrategy;
 use std::path::{Path, PathBuf};
 
+/// Type alias for the custom path resolver function used in `PathResolverKind::Custom`.
+pub type PathResolverFn = Box<dyn Fn(&Path) -> Option<PathBuf> + Send + Sync>;
+
 pub enum PathResolverKind {
     /// Same path as the session's transcript_path
     Identity,
     /// Same directory, different filename
     Sibling { filename: &'static str },
     /// Custom resolution function
-    Custom(Box<dyn Fn(&Path) -> Option<PathBuf> + Send + Sync>),
+    Custom(PathResolverFn),
 }
 
 pub struct StreamDescriptor {

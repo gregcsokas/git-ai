@@ -320,10 +320,10 @@ impl Agent for CopilotAgent {
         is_first_event: bool,
     ) -> u32 {
         // OTEL events have their own timestamp extraction
-        if event.get("span").is_some() {
-            if let Some(ts) = super::copilot_otel::extract_otel_event_timestamp(event) {
-                return ts;
-            }
+        if event.get("span").is_some()
+            && let Some(ts) = super::copilot_otel::extract_otel_event_timestamp(event)
+        {
+            return ts;
         }
         crate::daemon::transcript_worker::extract_event_timestamp(event).unwrap_or_else(|| {
             crate::transcripts::agent::file_time_fallback(file_meta, is_first_event)
