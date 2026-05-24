@@ -471,7 +471,7 @@ impl GixBackend {
                 };
                 if entry.mode.is_tree() {
                     stack.push((full_path, entry.oid.into()));
-                } else if entry.mode.is_blob() || entry.mode.is_executable() {
+                } else if entry.mode.is_blob() || entry.mode.is_executable() || entry.mode.is_link() {
                     paths.push(full_path);
                 }
             }
@@ -569,7 +569,9 @@ impl GixBackend {
     }
 
     /// Walk commits from `tip` back to (but not including) `base`.
-    /// Returns commits in newest-first order (like `git rev-list base..tip`).
+    /// Returns commits in newest-first order (like `git rev-list --ancestry-path base..tip`).
+    /// Only handles linear histories — returns Err for merge commits so the caller
+    /// can fall back to the git CLI which handles ancestry-path filtering correctly.
     pub fn rev_list(&self, tip: &str, base: &str) -> Result<Vec<String>, GitAiError> {
         let repo = self.get_repo()?;
         let bstr_tip: &BStr = tip.into();
@@ -590,6 +592,11 @@ impl GixBackend {
         let mut commits = Vec::new();
         for info in walk {
             let info = info.map_err(|e| GitAiError::GixError(format!("rev_walk iter: {}", e)))?;
+            if info.parent_ids.len() > 1 {
+                return Err(GitAiError::GixError(
+                    "rev_list: merge commit detected, falling back to CLI".to_string(),
+                ));
+            }
             commits.push(info.id.to_string());
         }
         Ok(commits)
@@ -747,7 +754,11 @@ impl GixBackend {
                         entry_mode.kind().as_octal_str().to_string(),
                         oid.to_string(),
                     ),
-                    DiffFile::new(None, "000000".to_string(), null_oid.to_string()),
+                    DiffFile::new(
+                        Some(PathBuf::from(path.to_string())),
+                        "000000".to_string(),
+                        null_oid.to_string(),
+                    ),
                     0,
                 ),
                 gix::diff::tree::recorder::Change::Modification {

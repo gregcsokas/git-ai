@@ -637,13 +637,6 @@ impl<'a> Commit<'a> {
     /// # Returns
     /// The first parent commit that is reachable from the specified refname
     pub fn parent_on_refname(&self, refname: &str) -> Result<Commit<'a>, GitAiError> {
-        // Normalize the refname to fully qualified form
-        let fq_refname = if refname.starts_with("refs/") {
-            refname.to_string()
-        } else {
-            format!("refs/heads/{}", refname)
-        };
-
         // Iterate through parents and find the first one that's on the refname
         for parent in self.parents() {
             let parent_sha = parent.id();
@@ -651,13 +644,13 @@ impl<'a> Commit<'a> {
             let is_anc = self
                 .repo
                 .gix
-                .try_is_ancestor(&parent_sha, &fq_refname)
+                .try_is_ancestor(&parent_sha, refname)
                 .unwrap_or_else(|| {
                     let mut args = self.repo.global_args_for_exec();
                     args.push("merge-base".to_string());
                     args.push("--is-ancestor".to_string());
                     args.push(parent_sha.clone());
-                    args.push(fq_refname.clone());
+                    args.push(refname.to_string());
                     exec_git(&args).is_ok()
                 });
 
@@ -1691,26 +1684,29 @@ impl Repository {
     ) -> Result<HashSet<String>, GitAiError> {
         const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-        // Try gix tree-diff first (no subprocess)
+        // Try gix tree-diff first (no subprocess) — only for non-merge commits.
+        // Merge commits need combined diff semantics which gix doesn't provide.
         let parent_ids = self.gix.commit_parent_ids(commit_sha).unwrap_or_default();
-        let from_commit = if parent_ids.is_empty() {
-            EMPTY_TREE.to_string()
-        } else {
-            parent_ids[0].clone()
-        };
+        if parent_ids.len() <= 1 {
+            let from_commit = if parent_ids.is_empty() {
+                EMPTY_TREE.to_string()
+            } else {
+                parent_ids[0].clone()
+            };
 
-        if let Some(changed) = self
-            .gix
-            .try_diff_commits_changed_files(&from_commit, commit_sha)
-        {
-            let mut files: HashSet<String> = changed.into_iter().collect();
-            if let Some(paths) = pathspecs {
-                if paths.is_empty() {
-                    return Ok(HashSet::new());
+            if let Some(changed) = self
+                .gix
+                .try_diff_commits_changed_files(&from_commit, commit_sha)
+            {
+                let mut files: HashSet<String> = changed.into_iter().collect();
+                if let Some(paths) = pathspecs {
+                    if paths.is_empty() {
+                        return Ok(HashSet::new());
+                    }
+                    files.retain(|path| paths.contains(path));
                 }
-                files.retain(|path| paths.contains(path));
+                return Ok(files);
             }
-            return Ok(files);
         }
 
         // Fallback to git diff-tree subprocess
@@ -1851,7 +1847,9 @@ impl Repository {
         from_ref: &str,
         to_ref: &str,
     ) -> Result<Vec<String>, GitAiError> {
-        // Try gix tree-diff first (no subprocess, no rename tracking needed for name-only)
+        // Try gix tree-diff first (no subprocess). Note: gix path does not perform rename
+        // detection, so renames appear as separate add+delete entries rather than a single
+        // renamed entry. This is acceptable for the callers which handle extra paths gracefully.
         if let Some(files) = self.gix.try_diff_commits_changed_files(from_ref, to_ref) {
             return Ok(files);
         }
