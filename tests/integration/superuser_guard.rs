@@ -42,20 +42,10 @@ fn superuser_guard_blocks_when_running_as_root_without_opt_in() {
     }
 
     let binary_path = get_binary_path();
-    let output = Command::new(binary_path)
-        .args(["status"])
-        .env_remove("CI")
-        .env_remove("GITHUB_ACTIONS")
-        .env_remove("GITLAB_CI")
-        .env_remove("JENKINS_URL")
-        .env_remove("BUILDKITE")
-        .env_remove("CIRCLECI")
-        .env_remove("CODEBUILD_BUILD_ID")
-        .env_remove("AGENT_OS")
-        .env_remove("KUBERNETES_SERVICE_HOST")
-        .env_remove("GIT_AI_ALLOW_SUPERUSER")
-        .output()
-        .expect("failed to execute binary");
+    let mut cmd = Command::new(binary_path);
+    cmd.args(["status"]).env_remove("GIT_AI_ALLOW_SUPERUSER");
+    remove_all_ci_env_vars(&mut cmd);
+    let output = cmd.output().expect("failed to execute binary");
 
     assert!(
         !output.status.success(),
@@ -68,6 +58,19 @@ fn superuser_guard_blocks_when_running_as_root_without_opt_in() {
     );
 }
 
+#[cfg(unix)]
+fn remove_all_ci_env_vars(cmd: &mut Command) -> &mut Command {
+    cmd.env_remove("CI")
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITLAB_CI")
+        .env_remove("JENKINS_URL")
+        .env_remove("BUILDKITE")
+        .env_remove("CIRCLECI")
+        .env_remove("CODEBUILD_BUILD_ID")
+        .env_remove("AGENT_OS")
+        .env_remove("KUBERNETES_SERVICE_HOST")
+}
+
 #[test]
 #[cfg(unix)]
 fn superuser_guard_allows_root_with_env_var_opt_in() {
@@ -76,16 +79,19 @@ fn superuser_guard_allows_root_with_env_var_opt_in() {
     }
 
     let binary_path = get_binary_path();
-    let output = Command::new(binary_path)
-        .args(["version"])
-        .env_remove("CI")
-        .env("GIT_AI_ALLOW_SUPERUSER", "1")
-        .output()
-        .expect("failed to execute binary");
+    let mut cmd = Command::new(binary_path);
+    cmd.args(["status"]).env("GIT_AI_ALLOW_SUPERUSER", "1");
+    remove_all_ci_env_vars(&mut cmd);
+    let output = cmd.output().expect("failed to execute binary");
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "should succeed with GIT_AI_ALLOW_SUPERUSER=1 as root"
+        !stderr.contains("should not be run with elevated privileges"),
+        "should NOT block when GIT_AI_ALLOW_SUPERUSER=1 is set, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("warning: running as superuser"),
+        "should show warning when running as root with opt-in, got: {stderr}"
     );
 }
 
@@ -97,15 +103,22 @@ fn superuser_guard_allows_root_in_ci_environment() {
     }
 
     let binary_path = get_binary_path();
-    let output = Command::new(binary_path)
-        .args(["version"])
+    let mut cmd = Command::new(binary_path);
+    cmd.args(["status"])
         .env("CI", "true")
-        .env_remove("GIT_AI_ALLOW_SUPERUSER")
-        .output()
-        .expect("failed to execute binary");
+        .env_remove("GIT_AI_ALLOW_SUPERUSER");
+    remove_all_ci_env_vars(&mut cmd);
+    // Re-add just CI=true (remove_all_ci_env_vars removes it)
+    cmd.env("CI", "true");
+    let output = cmd.output().expect("failed to execute binary");
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "should succeed in CI environment even as root"
+        !stderr.contains("should not be run with elevated privileges"),
+        "should NOT block in CI environment, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("warning: running as superuser"),
+        "should NOT warn in CI environment (silent pass), got: {stderr}"
     );
 }
