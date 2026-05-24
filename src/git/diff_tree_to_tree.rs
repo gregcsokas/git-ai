@@ -41,6 +41,10 @@ pub struct DiffFile {
 }
 
 impl DiffFile {
+    pub fn new(path: Option<PathBuf>, mode: String, oid: String) -> Self {
+        Self { path, mode, oid }
+    }
+
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
@@ -67,6 +71,20 @@ pub struct DiffDelta {
 }
 
 impl DiffDelta {
+    pub fn new(
+        status: DiffStatus,
+        old_file: DiffFile,
+        new_file: DiffFile,
+        similarity: u32,
+    ) -> Self {
+        Self {
+            status,
+            old_file,
+            new_file,
+            similarity,
+        }
+    }
+
     pub fn old_file(&self) -> &DiffFile {
         &self.old_file
     }
@@ -123,30 +141,28 @@ impl Repository {
         pathspecs: Option<&HashSet<String>>,
     ) -> Result<Diff, GitAiError> {
         const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-        let empty_tree_oid = if old_tree.is_none() || new_tree.is_none() {
-            Some(EMPTY_TREE_HASH.to_string())
-        } else {
-            None
-        };
 
-        // Determine the old and new tree OIDs
-        let old_oid = if let Some(tree) = old_tree {
-            tree.id()
-        } else {
-            empty_tree_oid.as_ref().unwrap().clone()
-        };
+        let old_oid = old_tree
+            .map(|t| t.id())
+            .unwrap_or_else(|| EMPTY_TREE_HASH.to_string());
+        let new_oid = new_tree
+            .map(|t| t.id())
+            .unwrap_or_else(|| EMPTY_TREE_HASH.to_string());
 
-        let new_oid = if let Some(tree) = new_tree {
-            tree.id()
-        } else {
-            empty_tree_oid.as_ref().unwrap().clone()
-        };
+        // Try gix native tree diff first (no subprocess)
+        if let Ok(mut deltas) = self.gix.diff_tree_deltas(&old_oid, &new_oid) {
+            if let Some(paths) = pathspecs {
+                deltas.retain(|delta| {
+                    delta
+                        .new_file
+                        .path()
+                        .and_then(|p| p.to_str())
+                        .is_some_and(|p| paths.contains(p))
+                });
+            }
+            return Ok(Diff { deltas });
+        }
 
-        // Use git diff to get the differences between trees
-        // We use `git diff` instead of `git diff-tree` because it handles tree OIDs better
-        // --raw: generate diff in raw format
-        // -z: NUL-separated output
-        // --no-abbrev: show full object names
         let mut args = self.global_args_for_exec();
         args.push("diff".to_string());
         args.push("--raw".to_string());
@@ -155,7 +171,6 @@ impl Repository {
         args.push(old_oid);
         args.push(new_oid);
 
-        // Add pathspecs if provided (only as CLI args when under threshold)
         let needs_post_filter = if let Some(paths) = pathspecs {
             if paths.len() > MAX_PATHSPEC_ARGS {
                 true

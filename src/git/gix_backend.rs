@@ -684,6 +684,99 @@ impl GixBackend {
         Ok(files)
     }
 
+    /// Get full diff deltas between two trees (equivalent to `git diff --raw -z`).
+    /// Returns DiffDelta structs with file metadata (path, mode, oid, status).
+    pub fn diff_tree_deltas(
+        &self,
+        from_tree_oid: &str,
+        to_tree_oid: &str,
+    ) -> Result<Vec<crate::git::diff_tree_to_tree::DiffDelta>, GitAiError> {
+        use crate::git::diff_tree_to_tree::{DiffDelta, DiffFile, DiffStatus};
+        use gix::objs::TreeRefIter;
+
+        let repo = self.get_repo()?;
+        let from_oid = Self::parse_oid(from_tree_oid)?;
+        let to_oid = Self::parse_oid(to_tree_oid)?;
+
+        let from_obj = repo
+            .find_object(from_oid)
+            .map_err(|e| GitAiError::GixError(format!("find tree '{}': {}", from_tree_oid, e)))?;
+        let to_obj = repo
+            .find_object(to_oid)
+            .map_err(|e| GitAiError::GixError(format!("find tree '{}': {}", to_tree_oid, e)))?;
+
+        let from_data = from_obj.detach();
+        let to_data = to_obj.detach();
+        let from_iter = TreeRefIter::from_bytes(&from_data.data);
+        let to_iter = TreeRefIter::from_bytes(&to_data.data);
+
+        let mut recorder = gix::diff::tree::Recorder::default();
+        let mut state = gix::diff::tree::State::default();
+        (gix::diff::tree)(from_iter, to_iter, &mut state, &repo.objects, &mut recorder)
+            .map_err(|e| GitAiError::GixError(format!("diff-tree: {}", e)))?;
+
+        let null_oid = "0000000000000000000000000000000000000000";
+        let deltas: Vec<DiffDelta> = recorder
+            .records
+            .into_iter()
+            .map(|change| match change {
+                gix::diff::tree::recorder::Change::Addition {
+                    path,
+                    entry_mode,
+                    oid,
+                    ..
+                } => DiffDelta::new(
+                    DiffStatus::Added,
+                    DiffFile::new(None, "000000".to_string(), null_oid.to_string()),
+                    DiffFile::new(
+                        Some(PathBuf::from(path.to_string())),
+                        entry_mode.kind().as_octal_str().to_string(),
+                        oid.to_string(),
+                    ),
+                    0,
+                ),
+                gix::diff::tree::recorder::Change::Deletion {
+                    path,
+                    entry_mode,
+                    oid,
+                    ..
+                } => DiffDelta::new(
+                    DiffStatus::Deleted,
+                    DiffFile::new(
+                        Some(PathBuf::from(path.to_string())),
+                        entry_mode.kind().as_octal_str().to_string(),
+                        oid.to_string(),
+                    ),
+                    DiffFile::new(None, "000000".to_string(), null_oid.to_string()),
+                    0,
+                ),
+                gix::diff::tree::recorder::Change::Modification {
+                    path,
+                    previous_entry_mode,
+                    previous_oid,
+                    entry_mode,
+                    oid,
+                    ..
+                } => DiffDelta::new(
+                    DiffStatus::Modified,
+                    DiffFile::new(
+                        Some(PathBuf::from(path.to_string())),
+                        previous_entry_mode.kind().as_octal_str().to_string(),
+                        previous_oid.to_string(),
+                    ),
+                    DiffFile::new(
+                        Some(PathBuf::from(path.to_string())),
+                        entry_mode.kind().as_octal_str().to_string(),
+                        oid.to_string(),
+                    ),
+                    0,
+                ),
+            })
+            .collect();
+
+        Ok(deltas)
+    }
+
     /// Get changed files between two commits by comparing their trees.
     pub fn diff_commits_changed_files(
         &self,

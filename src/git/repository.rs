@@ -1779,14 +1779,6 @@ impl Repository {
             return Ok(HashMap::new());
         }
 
-        // Try gix native diff (no subprocess), then post-filter by pathspecs
-        if let Some((mut result, _deleted)) = self.gix.try_diff_added_lines(from_ref, to_ref) {
-            if let Some(paths) = pathspecs {
-                result.retain(|path, _| paths.contains(path));
-            }
-            return Ok(result);
-        }
-
         let mut args = self.global_args_for_exec();
         args.push("diff".to_string());
         args.push("-U0".to_string()); // Zero context lines
@@ -1838,11 +1830,6 @@ impl Repository {
         from_ref: &str,
         to_ref: &str,
     ) -> Result<(HashMap<String, Vec<u32>>, usize), GitAiError> {
-        // Try gix native diff first (no subprocess)
-        if let Some(result) = self.gix.try_diff_added_lines(from_ref, to_ref) {
-            return Ok(result);
-        }
-
         let mut args = self.global_args_for_exec();
         args.push("diff".to_string());
         args.push("-U0".to_string());
