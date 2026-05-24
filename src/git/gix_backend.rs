@@ -569,6 +569,65 @@ impl GixBackend {
         self.peel_to_commit(oid_hex).ok()
     }
 
+    /// Returns Ok(Some(data)) if the note exists, Ok(None) if the notes ref or
+    /// note entry doesn't exist, Err only if gix cannot open the repo at all.
+    pub fn try_read_note_authoritative(
+        &self,
+        notes_ref: &str,
+        object_sha: &str,
+    ) -> Result<Option<Vec<u8>>, GitAiError> {
+        let repo = self.get_repo()?;
+
+        let reference = match repo.find_reference(notes_ref) {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+        let commit_id = match reference.into_fully_peeled_id() {
+            Ok(id) => id,
+            Err(_) => return Ok(None),
+        };
+        let commit_obj = match repo.find_object(commit_id) {
+            Ok(obj) => obj,
+            Err(_) => return Ok(None),
+        };
+        let commit = match commit_obj.try_into_commit() {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+        let tree_id = match commit.tree_id() {
+            Ok(id) => id,
+            Err(_) => return Ok(None),
+        };
+        let tree = match repo.find_object(tree_id) {
+            Ok(obj) => match obj.try_into_tree() {
+                Ok(t) => t,
+                Err(_) => return Ok(None),
+            },
+            Err(_) => return Ok(None),
+        };
+
+        let fanout_path = if object_sha.len() > 2 {
+            format!("{}/{}", &object_sha[..2], &object_sha[2..])
+        } else {
+            object_sha.to_string()
+        };
+
+        let entry = tree
+            .lookup_entry_by_path(&fanout_path)
+            .ok()
+            .flatten()
+            .or_else(|| tree.lookup_entry_by_path(object_sha).ok().flatten());
+
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+
+        match repo.find_object(entry.object_id()) {
+            Ok(blob) => Ok(Some(blob.detach().data)),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Walk commits from `tip` back to (but not including) `base`.
     /// Returns commits in newest-first order (like `git rev-list --ancestry-path base..tip`).
     /// Only handles linear histories — returns Err for merge commits so the caller

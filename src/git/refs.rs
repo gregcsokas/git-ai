@@ -490,12 +490,21 @@ pub fn get_commits_with_notes_from_list(
 
 // Show an authorship note and return its JSON content if found, or None if it doesn't exist.
 pub fn show_authorship_note(repo: &Repository, commit_sha: &str) -> Option<String> {
-    // Try gix first (no subprocess)
-    if let Ok(data) = repo.gix.read_note("refs/notes/ai", commit_sha) {
-        return String::from_utf8(data)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+    // Try gix first (no subprocess). The authoritative variant returns
+    // Ok(None) when the note definitively doesn't exist, Err only if gix
+    // can't open the repo — so we only fall back to subprocess on Err.
+    match repo
+        .gix
+        .try_read_note_authoritative("refs/notes/ai", commit_sha)
+    {
+        Ok(Some(data)) => {
+            return String::from_utf8(data)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+        Ok(None) => return None,
+        Err(_) => {}
     }
 
     let mut args = repo.global_args_for_exec();
