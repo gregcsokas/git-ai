@@ -10,6 +10,7 @@ fn test_priority_queue_ordering_immediate_first() {
     // Insert tasks in reverse priority order
     heap.push(ProcessingTask {
         session_id: "low".to_string(),
+        stream_type: "transcript".to_string(),
         priority: Priority::Low,
         tool: "test".to_string(),
         trace_id: None,
@@ -21,6 +22,7 @@ fn test_priority_queue_ordering_immediate_first() {
     });
     heap.push(ProcessingTask {
         session_id: "immediate".to_string(),
+        stream_type: "transcript".to_string(),
         priority: Priority::Immediate,
         tool: "test".to_string(),
         trace_id: None,
@@ -55,6 +57,7 @@ fn test_priority_queue_ordering_multiple_same_priority() {
 
     heap.push(ProcessingTask {
         session_id: "immediate-2".to_string(),
+        stream_type: "transcript".to_string(),
         priority: Priority::Immediate,
         tool: "test".to_string(),
         trace_id: None,
@@ -66,6 +69,7 @@ fn test_priority_queue_ordering_multiple_same_priority() {
     });
     heap.push(ProcessingTask {
         session_id: "low-1".to_string(),
+        stream_type: "transcript".to_string(),
         priority: Priority::Low,
         tool: "test".to_string(),
         trace_id: None,
@@ -77,6 +81,7 @@ fn test_priority_queue_ordering_multiple_same_priority() {
     });
     heap.push(ProcessingTask {
         session_id: "immediate-1".to_string(),
+        stream_type: "transcript".to_string(),
         priority: Priority::Immediate,
         tool: "test".to_string(),
         trace_id: None,
@@ -108,6 +113,7 @@ fn test_retry_delay_prevents_immediate_reprocessing() {
 
     let task = ProcessingTask {
         session_id: "retry-test".to_string(),
+        stream_type: "transcript".to_string(),
         priority: Priority::Immediate,
         tool: "test".to_string(),
         trace_id: None,
@@ -152,6 +158,7 @@ fn test_retry_delay_allows_processing_after_delay() {
 
     let task = ProcessingTask {
         session_id: "retry-past".to_string(),
+        stream_type: "transcript".to_string(),
         priority: Priority::Immediate,
         tool: "test".to_string(),
         trace_id: None,
