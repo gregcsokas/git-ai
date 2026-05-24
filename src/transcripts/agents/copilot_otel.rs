@@ -98,7 +98,8 @@ fn read_spans_after(
 ) -> Result<Vec<SpanRow>, TranscriptError> {
     let mut stmt = conn
         .prepare(
-            "SELECT span_id, trace_id, parent_span_id, name, start_time_ms, end_time_ms, \
+            "SELECT span_id, trace_id, parent_span_id, name, \
+             CAST(start_time_ms AS INTEGER), CAST(end_time_ms AS INTEGER), \
              status_code, status_message, operation_name, provider_name, agent_name, \
              conversation_id, request_model, response_model, input_tokens, output_tokens, \
              cached_tokens, reasoning_tokens, tool_name, tool_call_id, tool_type, \
@@ -197,7 +198,7 @@ fn read_events_for_spans(
     }
     let placeholders: String = span_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "SELECT span_id, name, timestamp_ms, attributes FROM span_events \
+        "SELECT span_id, name, CAST(timestamp_ms AS INTEGER), attributes FROM span_events \
          WHERE span_id IN ({}) ORDER BY timestamp_ms ASC",
         placeholders
     );
@@ -303,4 +304,252 @@ pub fn extract_otel_event_timestamp(event: &serde_json::Value) -> Option<u32> {
         .and_then(|s| s.get("start_time_ms"))
         .and_then(|v| v.as_i64())
         .map(|ms| (ms / 1000) as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcripts::watermark::TimestampWatermark;
+    use chrono::{DateTime, Utc};
+
+    fn create_test_otel_db() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("traces.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE spans (
+                span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT,
+                name TEXT NOT NULL, start_time_ms INTEGER NOT NULL, end_time_ms INTEGER NOT NULL,
+                status_code INTEGER NOT NULL DEFAULT 0, status_message TEXT,
+                operation_name TEXT, provider_name TEXT, agent_name TEXT, conversation_id TEXT,
+                request_model TEXT, response_model TEXT,
+                input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, reasoning_tokens INTEGER,
+                tool_name TEXT, tool_call_id TEXT, tool_type TEXT,
+                chat_session_id TEXT, turn_index INTEGER, ttft_ms REAL
+            );
+            CREATE TABLE span_attributes (
+                span_id TEXT NOT NULL REFERENCES spans(span_id) ON DELETE CASCADE,
+                key TEXT NOT NULL, value TEXT,
+                PRIMARY KEY (span_id, key)
+            );
+            CREATE TABLE span_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                span_id TEXT NOT NULL REFERENCES spans(span_id) ON DELETE CASCADE,
+                name TEXT NOT NULL, timestamp_ms INTEGER NOT NULL, attributes TEXT
+            );",
+        )
+        .unwrap();
+        (dir, db_path)
+    }
+
+    fn insert_span(
+        conn: &rusqlite::Connection,
+        span_id: &str,
+        end_time_ms: i64,
+        input_tokens: i64,
+        output_tokens: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO spans (span_id, trace_id, name, start_time_ms, end_time_ms, status_code, \
+             operation_name, provider_name, request_model, response_model, input_tokens, output_tokens, chat_session_id) \
+             VALUES (?1, 'trace1', 'chat gpt-4.1', ?2, ?3, 0, 'chat', 'github', 'gpt-4.1', 'gpt-4.1-2025-04-14', ?4, ?5, 'session1')",
+            rusqlite::params![span_id, end_time_ms - 1000, end_time_ms, input_tokens, output_tokens],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_empty_db_returns_empty_batch() {
+        let (_dir, db_path) = create_test_otel_db();
+        let watermark: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+        let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
+        assert!(batch.events.is_empty());
+    }
+
+    #[test]
+    fn test_reads_spans_after_watermark() {
+        let (_dir, db_path) = create_test_otel_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        insert_span(&conn, "span1", 1000, 100, 50);
+        insert_span(&conn, "span2", 2000, 200, 100);
+        insert_span(&conn, "span3", 3000, 300, 150);
+        drop(conn);
+
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampWatermark(
+            chrono::TimeZone::timestamp_millis_opt(&Utc, 1000).unwrap(),
+        ));
+        let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
+        assert_eq!(batch.events.len(), 2);
+        assert_eq!(batch.events[0]["span"]["span_id"], "span2");
+        assert_eq!(batch.events[1]["span"]["span_id"], "span3");
+    }
+
+    #[test]
+    fn test_batch_size_limits_results() {
+        let (_dir, db_path) = create_test_otel_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for i in 1..=5 {
+            insert_span(
+                &conn,
+                &format!("span{}", i),
+                i * 1000,
+                i * 100,
+                i * 50,
+            );
+        }
+        drop(conn);
+
+        let watermark: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+        let batch = read_otel_spans_incremental(&db_path, watermark, 3).unwrap();
+        assert_eq!(batch.events.len(), 3);
+    }
+
+    #[test]
+    fn test_batch_resume_no_loss_no_repeats() {
+        let (_dir, db_path) = create_test_otel_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for i in 1..=5 {
+            insert_span(
+                &conn,
+                &format!("span{}", i),
+                i * 1000,
+                i * 100,
+                i * 50,
+            );
+        }
+        drop(conn);
+
+        let mut watermark: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+        let mut all_ids = Vec::new();
+
+        loop {
+            let batch = read_otel_spans_incremental(&db_path, watermark, 2).unwrap();
+            if batch.events.is_empty() {
+                break;
+            }
+            for ev in &batch.events {
+                all_ids.push(ev["span"]["span_id"].as_str().unwrap().to_string());
+            }
+            watermark = batch.new_watermark;
+        }
+
+        assert_eq!(
+            all_ids,
+            vec!["span1", "span2", "span3", "span4", "span5"]
+        );
+    }
+
+    #[test]
+    fn test_attributes_denormalized() {
+        let (_dir, db_path) = create_test_otel_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        insert_span(&conn, "span1", 1000, 100, 50);
+        conn.execute(
+            "INSERT INTO span_attributes (span_id, key, value) VALUES ('span1', 'gen_ai.request.model', 'gpt-4.1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO span_attributes (span_id, key, value) VALUES ('span1', 'gen_ai.agent.name', 'copilot')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let watermark: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+        let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
+        assert_eq!(
+            batch.events[0]["attributes"]["gen_ai.request.model"],
+            "gpt-4.1"
+        );
+        assert_eq!(
+            batch.events[0]["attributes"]["gen_ai.agent.name"],
+            "copilot"
+        );
+    }
+
+    #[test]
+    fn test_span_events_denormalized() {
+        let (_dir, db_path) = create_test_otel_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        insert_span(&conn, "span1", 1000, 100, 50);
+        conn.execute(
+            "INSERT INTO span_events (span_id, name, timestamp_ms, attributes) VALUES ('span1', 'tool_call', 500, '{\"tool\":\"read_file\"}')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let watermark: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+        let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
+        let events = batch.events[0]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["name"], "tool_call");
+        assert_eq!(events[0]["timestamp_ms"], 500);
+        assert_eq!(events[0]["attributes"]["tool"], "read_file");
+    }
+
+    #[test]
+    fn test_extract_event_ids() {
+        let event = serde_json::json!({
+            "span": {
+                "span_id": "abc123",
+                "parent_span_id": "parent456",
+                "tool_call_id": "call789",
+            },
+            "attributes": {},
+            "events": [],
+        });
+        let (event_id, parent_id, tool_use_id) = extract_otel_event_ids(&event);
+        assert_eq!(event_id, Some("abc123".to_string()));
+        assert_eq!(parent_id, Some("parent456".to_string()));
+        assert_eq!(tool_use_id, Some("call789".to_string()));
+    }
+
+    #[test]
+    fn test_extract_event_ids_empty_tool_call_id() {
+        let event = serde_json::json!({
+            "span": { "span_id": "abc", "parent_span_id": null, "tool_call_id": "" },
+            "attributes": {},
+            "events": [],
+        });
+        let (event_id, parent_id, tool_use_id) = extract_otel_event_ids(&event);
+        assert_eq!(event_id, Some("abc".to_string()));
+        assert_eq!(parent_id, None);
+        assert_eq!(tool_use_id, None);
+    }
+
+    #[test]
+    fn test_extract_event_timestamp() {
+        let event = serde_json::json!({
+            "span": { "start_time_ms": 1716556800000_i64 },
+        });
+        let ts = extract_otel_event_timestamp(&event);
+        assert_eq!(ts, Some(1716556800));
+    }
+
+    #[test]
+    fn test_reads_from_real_fixture() {
+        let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/copilot-otel/traces.db");
+        if !fixture_path.exists() {
+            return;
+        }
+        let watermark: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+        let batch = read_otel_spans_incremental(&fixture_path, watermark, 100).unwrap();
+        assert!(!batch.events.is_empty());
+        let first = &batch.events[0];
+        assert!(first.get("span").is_some());
+        assert!(first.get("attributes").is_some());
+        assert!(first.get("events").is_some());
+        // Verify token fields are present
+        assert!(first["span"].get("input_tokens").is_some());
+        assert!(first["span"].get("output_tokens").is_some());
+    }
 }
