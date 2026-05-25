@@ -1,7 +1,7 @@
 //! Amp agent implementation with sweep discovery.
 
 use crate::authorship::authorship_log_serialization::generate_session_id;
-use crate::transcripts::agent::Agent;
+use crate::transcripts::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{RecordIndexWatermark, WatermarkStrategy, WatermarkType};
@@ -221,8 +221,14 @@ impl Agent for AmpAgent {
         })
     }
 
-    fn default_transcript_format(&self) -> TranscriptFormat {
-        TranscriptFormat::AmpThreadJson
+    fn streams(&self) -> Vec<StreamDescriptor> {
+        let format = TranscriptFormat::AmpThreadJson;
+        vec![StreamDescriptor {
+            stream_kind: "transcript",
+            format,
+            watermark_type: format.watermark_type(),
+            path_resolver: PathResolverKind::Identity,
+        }]
     }
 }
 

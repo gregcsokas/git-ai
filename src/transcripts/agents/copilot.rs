@@ -362,10 +362,6 @@ impl Agent for CopilotAgent {
         }
         None
     }
-
-    fn default_transcript_format(&self) -> TranscriptFormat {
-        TranscriptFormat::CopilotEventStreamJsonl
-    }
 }
 
 /// Read Copilot session JSON incrementally.

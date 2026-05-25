@@ -1,6 +1,6 @@
 //! Windsurf agent implementation with sweep discovery.
 
-use crate::transcripts::agent::Agent;
+use crate::transcripts::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy};
@@ -150,8 +150,14 @@ impl Agent for WindsurfAgent {
         crate::transcripts::agent::file_time_fallback(file_meta, is_first_event)
     }
 
-    fn default_transcript_format(&self) -> TranscriptFormat {
-        TranscriptFormat::WindsurfJsonl
+    fn streams(&self) -> Vec<StreamDescriptor> {
+        let format = TranscriptFormat::WindsurfJsonl;
+        vec![StreamDescriptor {
+            stream_kind: "transcript",
+            format,
+            watermark_type: format.watermark_type(),
+            path_resolver: PathResolverKind::Identity,
+        }]
     }
 }
 

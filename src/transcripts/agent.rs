@@ -103,18 +103,7 @@ pub trait Agent: Send + Sync {
     }
 
     /// Returns the stream descriptors for this agent.
-    /// Default: single "transcript" stream using the agent's default format.
-    fn streams(&self) -> Vec<StreamDescriptor> {
-        vec![StreamDescriptor {
-            stream_kind: "transcript",
-            format: self.default_transcript_format(),
-            watermark_type: self.default_transcript_format().watermark_type(),
-            path_resolver: PathResolverKind::Identity,
-        }]
-    }
-
-    /// Returns the default transcript format for this agent.
-    fn default_transcript_format(&self) -> TranscriptFormat;
+    fn streams(&self) -> Vec<StreamDescriptor>;
 }
 
 /// Fallback timestamp from file metadata when an event lacks a per-event timestamp.

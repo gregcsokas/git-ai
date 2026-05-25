@@ -1,6 +1,6 @@
 //! OpenCode agent implementation (SQLite-only).
 
-use crate::transcripts::agent::Agent;
+use crate::transcripts::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{TimestampWatermark, WatermarkStrategy};
@@ -329,8 +329,14 @@ impl Agent for OpenCodeAgent {
         })
     }
 
-    fn default_transcript_format(&self) -> TranscriptFormat {
-        TranscriptFormat::OpenCodeSqlite
+    fn streams(&self) -> Vec<StreamDescriptor> {
+        let format = TranscriptFormat::OpenCodeSqlite;
+        vec![StreamDescriptor {
+            stream_kind: "transcript",
+            format,
+            watermark_type: format.watermark_type(),
+            path_resolver: PathResolverKind::Identity,
+        }]
     }
 }
 
