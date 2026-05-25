@@ -254,9 +254,7 @@ impl TranscriptWorker {
                 }
 
                 let dedup_key = (stream_path.clone(), stream.stream_type.to_string());
-                if self.in_flight.contains(&dedup_key)
-                    || enqueued_this_sweep.contains(&dedup_key)
-                {
+                if self.in_flight.contains(&dedup_key) || enqueued_this_sweep.contains(&dedup_key) {
                     continue;
                 }
 
