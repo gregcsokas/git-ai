@@ -9,7 +9,7 @@ use crate::config;
 use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
 use crate::daemon::transcript_redaction::redact_json_secrets;
 use crate::metrics::{
-    EventAttributes, MetricEvent, PosEncoded, SessionEventValues,
+    EventAttributes, MetricEvent, OtelTraceValues, PosEncoded, SessionEventValues,
 };
 use crate::transcripts::db::TranscriptsDatabase;
 use crate::transcripts::types::TranscriptError;
@@ -551,6 +551,7 @@ impl TranscriptWorker {
 
             let batch_count = batch.events.len();
 
+            let is_otel_stream = task.stream_type == "otel_traces";
             let metric_events: Vec<MetricEvent> = batch
                 .events
                 .into_iter()
@@ -572,11 +573,19 @@ impl TranscriptWorker {
                     let trace_id = generate_trace_id();
                     let attrs_sparse = base_attrs.clone().trace_id(trace_id).to_sparse();
                     let raw_event = redact_json_secrets(raw_event);
-                    MetricEvent::from_values_with_timestamp(
-                        SessionEventValues::with_ids(raw_event, eid, pid, tid),
-                        attrs_sparse,
-                        Some(event_ts),
-                    )
+                    if is_otel_stream {
+                        MetricEvent::from_values_with_timestamp(
+                            OtelTraceValues::with_ids(raw_event, eid, pid, tid),
+                            attrs_sparse,
+                            Some(event_ts),
+                        )
+                    } else {
+                        MetricEvent::from_values_with_timestamp(
+                            SessionEventValues::with_ids(raw_event, eid, pid, tid),
+                            attrs_sparse,
+                            Some(event_ts),
+                        )
+                    }
                 })
                 .collect();
 
