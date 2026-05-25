@@ -259,13 +259,13 @@ impl Agent for CopilotAgent {
     fn streams(&self) -> Vec<StreamDescriptor> {
         vec![
             StreamDescriptor {
-                stream_type: "transcript",
+                stream_kind: "transcript",
                 format: TranscriptFormat::CopilotEventStreamJsonl,
                 watermark_type: WatermarkType::ByteOffset,
                 path_resolver: PathResolverKind::Identity,
             },
             StreamDescriptor {
-                stream_type: "otel_traces",
+                stream_kind: "otel_traces",
                 format: TranscriptFormat::CopilotOtelSqlite,
                 watermark_type: WatermarkType::TimestampCursor,
                 path_resolver: PathResolverKind::Custom(Box::new(Self::resolve_otel_db_path)),

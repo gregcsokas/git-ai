@@ -18,7 +18,7 @@ pub enum PathResolverKind {
 }
 
 pub struct StreamDescriptor {
-    pub stream_type: &'static str,
+    pub stream_kind: &'static str,
     pub format: TranscriptFormat,
     pub watermark_type: super::watermark::WatermarkType,
     pub path_resolver: PathResolverKind,
@@ -106,7 +106,7 @@ pub trait Agent: Send + Sync {
     /// Default: single "transcript" stream using the agent's default format.
     fn streams(&self) -> Vec<StreamDescriptor> {
         vec![StreamDescriptor {
-            stream_type: "transcript",
+            stream_kind: "transcript",
             format: self.default_transcript_format(),
             watermark_type: self.default_transcript_format().watermark_type(),
             path_resolver: PathResolverKind::Identity,

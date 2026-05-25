@@ -84,11 +84,11 @@ const MIGRATIONS: &[&str] = &[
 
     INSERT INTO schema_version (version) VALUES (3);
     "#,
-    // Version 4: Add stream_type column with compound PK (session_id, stream_type).
+    // Version 4: Add stream_kind column with compound PK (session_id, stream_kind).
     r#"
     CREATE TABLE sessions_v4 (
         session_id TEXT NOT NULL,
-        stream_type TEXT NOT NULL DEFAULT 'transcript',
+        stream_kind TEXT NOT NULL DEFAULT 'transcript',
         tool TEXT NOT NULL,
         transcript_path TEXT NOT NULL,
         transcript_format TEXT NOT NULL,
@@ -103,7 +103,7 @@ const MIGRATIONS: &[&str] = &[
         processing_errors INTEGER DEFAULT 0,
         last_error TEXT,
         repo_work_dir TEXT,
-        PRIMARY KEY (session_id, stream_type)
+        PRIMARY KEY (session_id, stream_kind)
     );
     INSERT INTO sessions_v4 SELECT session_id, 'transcript', tool, transcript_path, transcript_format, watermark_type, watermark_value, external_session_id, external_parent_session_id, first_seen_at, last_processed_at, last_known_size, last_modified, processing_errors, last_error, repo_work_dir FROM sessions;
     DROP TABLE sessions;
@@ -120,7 +120,7 @@ const MIGRATIONS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub session_id: String,
-    pub stream_type: String,
+    pub stream_kind: String,
     pub tool: String,
     pub transcript_path: String,
     pub transcript_format: String,
@@ -243,7 +243,7 @@ impl TranscriptsDatabase {
         conn.execute(
             r#"
             INSERT INTO sessions (
-                session_id, stream_type, tool, transcript_path, transcript_format,
+                session_id, stream_kind, tool, transcript_path, transcript_format,
                 watermark_type, watermark_value, external_session_id,
                 external_parent_session_id,
                 first_seen_at, last_processed_at, last_known_size, last_modified,
@@ -252,7 +252,7 @@ impl TranscriptsDatabase {
             "#,
             params![
                 record.session_id,
-                record.stream_type,
+                record.stream_kind,
                 record.tool,
                 record.transcript_path,
                 record.transcript_format,
@@ -280,7 +280,7 @@ impl TranscriptsDatabase {
     fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<SessionRecord> {
         Ok(SessionRecord {
             session_id: row.get(0)?,
-            stream_type: row.get(1)?,
+            stream_kind: row.get(1)?,
             tool: row.get(2)?,
             transcript_path: row.get(3)?,
             transcript_format: row.get(4)?,
@@ -298,11 +298,11 @@ impl TranscriptsDatabase {
         })
     }
 
-    /// Get a session record by session_id and stream_type.
+    /// Get a session record by session_id and stream_kind.
     pub fn get_session(
         &self,
         session_id: &str,
-        stream_type: &str,
+        stream_kind: &str,
     ) -> Result<Option<SessionRecord>, TranscriptError> {
         let conn = self
             .conn
@@ -310,14 +310,14 @@ impl TranscriptsDatabase {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         conn.query_row(
             r#"
-            SELECT session_id, stream_type, tool, transcript_path, transcript_format,
+            SELECT session_id, stream_kind, tool, transcript_path, transcript_format,
                    watermark_type, watermark_value, external_session_id,
                    external_parent_session_id,
                    first_seen_at, last_processed_at, last_known_size, last_modified,
                    processing_errors, last_error, repo_work_dir
-            FROM sessions WHERE session_id = ?1 AND stream_type = ?2
+            FROM sessions WHERE session_id = ?1 AND stream_kind = ?2
             "#,
-            params![session_id, stream_type],
+            params![session_id, stream_kind],
             Self::row_to_session,
         )
         .optional()
@@ -330,7 +330,7 @@ impl TranscriptsDatabase {
     pub fn update_watermark(
         &self,
         session_id: &str,
-        stream_type: &str,
+        stream_kind: &str,
         watermark: &dyn WatermarkStrategy,
     ) -> Result<(), TranscriptError> {
         let conn = self
@@ -341,8 +341,8 @@ impl TranscriptsDatabase {
         let watermark_value = watermark.serialize();
 
         let rows_changed = conn.execute(
-            "UPDATE sessions SET watermark_value = ?1, last_processed_at = ?2 WHERE session_id = ?3 AND stream_type = ?4",
-            params![watermark_value, now, session_id, stream_type],
+            "UPDATE sessions SET watermark_value = ?1, last_processed_at = ?2 WHERE session_id = ?3 AND stream_kind = ?4",
+            params![watermark_value, now, session_id, stream_kind],
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to update watermark: {}", e),
@@ -361,7 +361,7 @@ impl TranscriptsDatabase {
     pub fn update_file_metadata(
         &self,
         session_id: &str,
-        stream_type: &str,
+        stream_kind: &str,
         file_size: u64,
         modified: Option<DateTime<Utc>>,
     ) -> Result<(), TranscriptError> {
@@ -372,8 +372,8 @@ impl TranscriptsDatabase {
         let modified_ts = modified.map(|dt| dt.timestamp());
 
         let rows_changed = conn.execute(
-            "UPDATE sessions SET last_known_size = ?1, last_modified = ?2 WHERE session_id = ?3 AND stream_type = ?4",
-            params![file_size as i64, modified_ts, session_id, stream_type],
+            "UPDATE sessions SET last_known_size = ?1, last_modified = ?2 WHERE session_id = ?3 AND stream_kind = ?4",
+            params![file_size as i64, modified_ts, session_id, stream_kind],
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to update file metadata: {}", e),
@@ -392,7 +392,7 @@ impl TranscriptsDatabase {
     pub fn update_repo_work_dir(
         &self,
         session_id: &str,
-        stream_type: &str,
+        stream_kind: &str,
         repo_work_dir: &str,
     ) -> Result<(), TranscriptError> {
         let conn = self
@@ -402,8 +402,8 @@ impl TranscriptsDatabase {
 
         let rows_changed = conn
             .execute(
-                "UPDATE sessions SET repo_work_dir = ?1 WHERE session_id = ?2 AND stream_type = ?3",
-                params![repo_work_dir, session_id, stream_type],
+                "UPDATE sessions SET repo_work_dir = ?1 WHERE session_id = ?2 AND stream_kind = ?3",
+                params![repo_work_dir, session_id, stream_kind],
             )
             .map_err(|e| TranscriptError::Fatal {
                 message: format!("Failed to update repo_work_dir: {}", e),
@@ -422,7 +422,7 @@ impl TranscriptsDatabase {
     pub fn record_error(
         &self,
         session_id: &str,
-        stream_type: &str,
+        stream_kind: &str,
         error_message: &str,
     ) -> Result<(), TranscriptError> {
         let conn = self
@@ -431,8 +431,8 @@ impl TranscriptsDatabase {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let rows_changed = conn.execute(
-            "UPDATE sessions SET processing_errors = processing_errors + 1, last_error = ?1 WHERE session_id = ?2 AND stream_type = ?3",
-            params![error_message, session_id, stream_type],
+            "UPDATE sessions SET processing_errors = processing_errors + 1, last_error = ?1 WHERE session_id = ?2 AND stream_kind = ?3",
+            params![error_message, session_id, stream_kind],
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to record error: {}", e),
@@ -451,7 +451,7 @@ impl TranscriptsDatabase {
     pub fn delete_session(
         &self,
         session_id: &str,
-        stream_type: &str,
+        stream_kind: &str,
     ) -> Result<(), TranscriptError> {
         let conn = self
             .conn
@@ -460,8 +460,8 @@ impl TranscriptsDatabase {
 
         let rows_changed = conn
             .execute(
-                "DELETE FROM sessions WHERE session_id = ?1 AND stream_type = ?2",
-                params![session_id, stream_type],
+                "DELETE FROM sessions WHERE session_id = ?1 AND stream_kind = ?2",
+                params![session_id, stream_kind],
             )
             .map_err(|e| TranscriptError::Fatal {
                 message: format!("Failed to delete session: {}", e),
@@ -485,7 +485,7 @@ impl TranscriptsDatabase {
         let mut stmt = conn
             .prepare(
                 r#"
-            SELECT session_id, stream_type, tool, transcript_path, transcript_format,
+            SELECT session_id, stream_kind, tool, transcript_path, transcript_format,
                    watermark_type, watermark_value, external_session_id,
                    external_parent_session_id,
                    first_seen_at, last_processed_at, last_known_size, last_modified,
@@ -529,7 +529,7 @@ mod tests {
     fn create_test_session(session_id: &str) -> SessionRecord {
         SessionRecord {
             session_id: session_id.to_string(),
-            stream_type: "transcript".to_string(),
+            stream_kind: "transcript".to_string(),
             tool: "claude".to_string(),
             transcript_path: "/path/to/transcript.jsonl".to_string(),
             transcript_format: "jsonl".to_string(),
@@ -663,7 +663,7 @@ mod tests {
 
         let session = SessionRecord {
             session_id: "session-null".to_string(),
-            stream_type: "transcript".to_string(),
+            stream_kind: "transcript".to_string(),
             tool: "claude".to_string(),
             transcript_path: "/path".to_string(),
             transcript_format: "jsonl".to_string(),

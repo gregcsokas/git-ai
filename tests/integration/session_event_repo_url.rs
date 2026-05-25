@@ -67,7 +67,7 @@ fn make_session_record(
 ) -> SessionRecord {
     SessionRecord {
         session_id: session_id.to_string(),
-        stream_type: "transcript".to_string(),
+        stream_kind: "transcript".to_string(),
         tool: tool.to_string(),
         transcript_path: transcript_path.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),

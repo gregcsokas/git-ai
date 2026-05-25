@@ -53,7 +53,7 @@ pub(super) enum Priority {
 pub(super) struct ProcessingTask {
     pub(super) priority: Priority,
     pub(super) session_id: String,
-    pub(super) stream_type: String,
+    pub(super) stream_kind: String,
     pub(super) tool: String,
     pub(super) trace_id: Option<String>,
     pub(super) tool_use_id: Option<String>,
@@ -226,7 +226,7 @@ impl TranscriptWorker {
                     _ => continue,
                 };
 
-                if stream.stream_type != "transcript"
+                if stream.stream_kind != "transcript"
                     && let Err(e) = self.ensure_stream_session(
                         &session.session_id,
                         &session.tool,
@@ -246,14 +246,14 @@ impl TranscriptWorker {
                 {
                     tracing::warn!(
                         session_id = %session.session_id,
-                        stream_type = %stream.stream_type,
+                        stream_kind = %stream.stream_kind,
                         error = %e,
                         "failed to ensure stream session exists"
                     );
                     continue;
                 }
 
-                let dedup_key = (stream_path.clone(), stream.stream_type.to_string());
+                let dedup_key = (stream_path.clone(), stream.stream_kind.to_string());
                 if self.in_flight.contains(&dedup_key) || enqueued_this_sweep.contains(&dedup_key) {
                     continue;
                 }
@@ -262,7 +262,7 @@ impl TranscriptWorker {
                 self.priority_queue.push(ProcessingTask {
                     priority: Priority::Low,
                     session_id: session.session_id.clone(),
-                    stream_type: stream.stream_type.to_string(),
+                    stream_kind: stream.stream_kind.to_string(),
                     tool: session.tool.clone(),
                     trace_id: None,
                     tool_use_id: None,
@@ -297,7 +297,7 @@ impl TranscriptWorker {
                 _ => continue,
             };
 
-            if stream.stream_type != "transcript"
+            if stream.stream_kind != "transcript"
                 && let Err(e) = self.ensure_stream_session(
                     &notification.session_id,
                     &notification.tool,
@@ -314,14 +314,14 @@ impl TranscriptWorker {
             {
                 tracing::warn!(
                     session_id = %notification.session_id,
-                    stream_type = %stream.stream_type,
+                    stream_kind = %stream.stream_kind,
                     error = %e,
                     "failed to ensure stream session exists"
                 );
                 continue;
             }
 
-            let dedup_key = (stream_path.clone(), stream.stream_type.to_string());
+            let dedup_key = (stream_path.clone(), stream.stream_kind.to_string());
             if self.in_flight.contains(&dedup_key) {
                 continue;
             }
@@ -329,7 +329,7 @@ impl TranscriptWorker {
             self.priority_queue.push(ProcessingTask {
                 priority: Priority::Immediate,
                 session_id: notification.session_id.clone(),
-                stream_type: stream.stream_type.to_string(),
+                stream_kind: stream.stream_kind.to_string(),
                 tool: notification.tool.clone(),
                 trace_id: Some(notification.trace_id.clone()),
                 tool_use_id: notification.tool_use_id.clone(),
@@ -412,7 +412,7 @@ impl TranscriptWorker {
             self.priority_queue.push(ProcessingTask {
                 priority: Priority::Low,
                 session_id,
-                stream_type: "transcript".to_string(),
+                stream_kind: "transcript".to_string(),
                 tool: "claude".to_string(),
                 trace_id: Some(notification.trace_id.clone()),
                 tool_use_id: None,
@@ -445,7 +445,7 @@ impl TranscriptWorker {
         let initial_watermark = ByteOffsetWatermark::new(0);
         let record = SessionRecord {
             session_id: session_id.to_string(),
-            stream_type: "transcript".to_string(),
+            stream_kind: "transcript".to_string(),
             tool: "claude".to_string(),
             transcript_path: path.display().to_string(),
             transcript_format: "ClaudeJsonl".to_string(),
@@ -478,7 +478,7 @@ impl TranscriptWorker {
     ) -> Result<(), TranscriptError> {
         if self
             .transcripts_db
-            .get_session(session_id, stream.stream_type)?
+            .get_session(session_id, stream.stream_kind)?
             .is_some()
         {
             return Ok(());
@@ -488,7 +488,7 @@ impl TranscriptWorker {
 
         let record = SessionRecord {
             session_id: session_id.to_string(),
-            stream_type: stream.stream_type.to_string(),
+            stream_kind: stream.stream_kind.to_string(),
             tool: tool.to_string(),
             transcript_path: stream_path.display().to_string(),
             transcript_format: format!("{:?}", stream.format),
@@ -536,7 +536,7 @@ impl TranscriptWorker {
 
         // Mark as in-flight
         self.in_flight
-            .insert((task.canonical_path.clone(), task.stream_type.clone()));
+            .insert((task.canonical_path.clone(), task.stream_kind.clone()));
 
         // Process the session (spawn blocking to avoid blocking the worker loop)
         let db = self.transcripts_db.clone();
@@ -550,7 +550,7 @@ impl TranscriptWorker {
 
         // Remove from in-flight
         self.in_flight
-            .remove(&(task.canonical_path.clone(), task.stream_type.clone()));
+            .remove(&(task.canonical_path.clone(), task.stream_kind.clone()));
 
         // Handle result
         match result {
@@ -587,7 +587,7 @@ impl TranscriptWorker {
         task: &ProcessingTask,
     ) -> Result<(), TranscriptError> {
         let session = db
-            .get_session(&task.session_id, &task.stream_type)?
+            .get_session(&task.session_id, &task.stream_kind)?
             .ok_or_else(|| TranscriptError::Fatal {
                 message: format!("session not found: {}", task.session_id),
             })?;
@@ -621,7 +621,7 @@ impl TranscriptWorker {
         {
             let _ = db.update_repo_work_dir(
                 &session.session_id,
-                &task.stream_type,
+                &task.stream_kind,
                 &work_dir.display().to_string(),
             );
         }
@@ -652,7 +652,7 @@ impl TranscriptWorker {
             if batch.events.is_empty() {
                 db.update_watermark(
                     &session.session_id,
-                    &task.stream_type,
+                    &task.stream_kind,
                     batch.new_watermark.as_ref(),
                 )?;
                 break;
@@ -660,7 +660,7 @@ impl TranscriptWorker {
 
             let batch_count = batch.events.len();
 
-            let is_otel_stream = task.stream_type == "otel_traces";
+            let is_otel_stream = task.stream_kind == "otel_traces";
             let metric_events: Vec<MetricEvent> = batch
                 .events
                 .into_iter()
@@ -717,7 +717,7 @@ impl TranscriptWorker {
             total_events += batch_count;
             db.update_watermark(
                 &session.session_id,
-                &task.stream_type,
+                &task.stream_kind,
                 batch.new_watermark.as_ref(),
             )?;
             current_watermark = batch.new_watermark;
@@ -730,7 +730,7 @@ impl TranscriptWorker {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| Utc.timestamp_opt(d.as_secs() as i64, 0).unwrap());
-            db.update_file_metadata(&session.session_id, &task.stream_type, file_size, modified)?;
+            db.update_file_metadata(&session.session_id, &task.stream_kind, file_size, modified)?;
         }
 
         tracing::debug!(
@@ -758,7 +758,7 @@ impl TranscriptWorker {
                     );
                     if let Err(e) = self.transcripts_db.record_error(
                         &task.session_id,
-                        &task.stream_type,
+                        &task.stream_kind,
                         &format!("max retries: {}", message),
                     ) {
                         tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
@@ -797,7 +797,7 @@ impl TranscriptWorker {
                 );
                 if let Err(e) = self.transcripts_db.record_error(
                     &task.session_id,
-                    &task.stream_type,
+                    &task.stream_kind,
                     &format!("parse line {}: {}", line, message),
                 ) {
                     tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
@@ -812,7 +812,7 @@ impl TranscriptWorker {
                 );
                 if let Err(e) = self.transcripts_db.record_error(
                     &task.session_id,
-                    &task.stream_type,
+                    &task.stream_kind,
                     &format!("fatal: {}", message),
                 ) {
                     tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
@@ -845,7 +845,7 @@ impl TranscriptWorker {
         // Process immediate tasks
         for task in immediate_tasks {
             self.in_flight
-                .insert((task.canonical_path.clone(), task.stream_type.clone()));
+                .insert((task.canonical_path.clone(), task.stream_kind.clone()));
             let db = self.transcripts_db.clone();
             let telemetry = self.telemetry_handle.clone();
             let task_clone = task.clone();
@@ -856,7 +856,7 @@ impl TranscriptWorker {
             .await;
 
             self.in_flight
-                .remove(&(task.canonical_path.clone(), task.stream_type.clone()));
+                .remove(&(task.canonical_path.clone(), task.stream_kind.clone()));
 
             match result {
                 Err(e) => {

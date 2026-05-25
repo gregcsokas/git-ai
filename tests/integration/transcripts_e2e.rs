@@ -41,7 +41,7 @@ fn test_session_database_basic() {
     let now = chrono::Utc::now().timestamp();
     let session = SessionRecord {
         session_id: "s_test_123".to_string(),
-        stream_type: "transcript".to_string(),
+        stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: "/path/to/transcript.jsonl".to_string(),
         transcript_format: "claude-jsonl".to_string(),
@@ -148,7 +148,7 @@ fn test_multiple_sessions_isolation() {
     for i in 0..5 {
         let session = SessionRecord {
             session_id: format!("s_session_{}", i),
-            stream_type: "transcript".to_string(),
+            stream_kind: "transcript".to_string(),
             tool: "claude".to_string(),
             transcript_path: format!("/path/to/transcript_{}.jsonl", i),
             transcript_format: "claude-jsonl".to_string(),
@@ -194,7 +194,7 @@ fn test_database_persistence() {
         let db = TranscriptsDatabase::open(&db_path).unwrap();
         let session = SessionRecord {
             session_id: "s_persist".to_string(),
-            stream_type: "transcript".to_string(),
+            stream_kind: "transcript".to_string(),
             tool: "claude".to_string(),
             transcript_path: "/path/to/transcript.jsonl".to_string(),
             transcript_format: "claude-jsonl".to_string(),
@@ -232,7 +232,7 @@ fn test_error_tracking() {
     let now = chrono::Utc::now().timestamp();
     let session = SessionRecord {
         session_id: "s_errors".to_string(),
-        stream_type: "transcript".to_string(),
+        stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: "/path/to/transcript.jsonl".to_string(),
         transcript_format: "claude-jsonl".to_string(),
@@ -277,7 +277,7 @@ fn test_full_pipeline_claude_session_ids_flow_through() {
 
     let session = SessionRecord {
         session_id: "sess-parent-abc".to_string(),
-        stream_type: "transcript".to_string(),
+        stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: fixture.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),
@@ -370,7 +370,7 @@ fn test_full_pipeline_opencode_session_ids_flow_through() {
 
     let session = SessionRecord {
         session_id: "test-session-123".to_string(),
-        stream_type: "transcript".to_string(),
+        stream_kind: "transcript".to_string(),
         tool: "opencode".to_string(),
         transcript_path: fixture.display().to_string(),
         transcript_format: "OpenCodeSqlite".to_string(),
@@ -453,7 +453,7 @@ fn test_subagent_session_record_has_parent_link() {
     let now = chrono::Utc::now().timestamp();
     let session = SessionRecord {
         session_id: "agent-a1b2c3d4e5f6".to_string(),
-        stream_type: "transcript".to_string(),
+        stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
         transcript_path: subagent_path.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),
@@ -513,7 +513,7 @@ fn test_copilot_otel_stream_reads_spans_with_event_ids() {
     // Create session record for the OTEL stream
     let session = SessionRecord {
         session_id: "copilot-otel-test-session".to_string(),
-        stream_type: "otel_traces".to_string(),
+        stream_kind: "otel_traces".to_string(),
         tool: "github-copilot".to_string(),
         transcript_path: fixture.display().to_string(),
         transcript_format: "CopilotOtelSqlite".to_string(),
@@ -644,6 +644,6 @@ fn test_copilot_agent_streams_declares_otel_stream() {
     let streams = agent.streams();
 
     assert_eq!(streams.len(), 2, "CopilotAgent should declare 2 streams");
-    assert_eq!(streams[0].stream_type, "transcript");
-    assert_eq!(streams[1].stream_type, "otel_traces");
+    assert_eq!(streams[0].stream_kind, "transcript");
+    assert_eq!(streams[1].stream_kind, "otel_traces");
 }
