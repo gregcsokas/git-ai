@@ -1628,4 +1628,3 @@ mod session_event_tests {
         );
     }
 }
-

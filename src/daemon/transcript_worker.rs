@@ -11,9 +11,10 @@ use crate::daemon::transcript_redaction::redact_json_secrets;
 use crate::metrics::{
     EventAttributes, MetricEvent, OtelTraceValues, PosEncoded, SessionEventValues,
 };
-use crate::transcripts::db::TranscriptsDatabase;
+use crate::transcripts::agent::StreamDescriptor;
+use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
 use crate::transcripts::types::TranscriptError;
-use crate::transcripts::watermark::WatermarkType;
+use crate::transcripts::watermark::{WatermarkStrategy, WatermarkType};
 use chrono::{TimeZone, Utc};
 use std::collections::{BinaryHeap, HashSet};
 use std::path::{Path, PathBuf};
@@ -211,11 +212,44 @@ impl TranscriptWorker {
             let agent = crate::transcripts::agent::get_agent(&session.tool);
             let streams = agent.as_ref().map(|a| a.streams()).unwrap_or_default();
 
+            let transcript_record = self
+                .transcripts_db
+                .get_session(&session.session_id, "transcript")
+                .ok()
+                .flatten();
+
             for stream in streams {
                 let stream_path = match stream.resolve_path(&session.canonical_path) {
                     Some(p) if p.exists() => p,
                     _ => continue,
                 };
+
+                if stream.stream_type != "transcript"
+                    && let Err(e) = self.ensure_stream_session(
+                        &session.session_id,
+                        &session.tool,
+                        &stream,
+                        &stream_path,
+                        transcript_record
+                            .as_ref()
+                            .map(|r| r.external_session_id.as_str()),
+                        transcript_record
+                            .as_ref()
+                            .and_then(|r| r.external_parent_session_id.as_deref()),
+                        transcript_record
+                            .as_ref()
+                            .and_then(|r| r.repo_work_dir.as_deref())
+                            .map(Path::new),
+                    )
+                {
+                    tracing::warn!(
+                        session_id = %session.session_id,
+                        stream_type = %stream.stream_type,
+                        error = %e,
+                        "failed to ensure stream session exists"
+                    );
+                    continue;
+                }
 
                 let dedup_key = (stream_path.clone(), stream.stream_type.to_string());
                 if self.in_flight.contains(&dedup_key) {
@@ -248,11 +282,41 @@ impl TranscriptWorker {
         let agent = crate::transcripts::agent::get_agent(&notification.tool);
         let streams = agent.as_ref().map(|a| a.streams()).unwrap_or_default();
 
+        let transcript_record = self
+            .transcripts_db
+            .get_session(&notification.session_id, "transcript")
+            .ok()
+            .flatten();
+
         for stream in streams {
             let stream_path = match stream.resolve_path(&canonical_path) {
                 Some(p) if p.exists() => p,
                 _ => continue,
             };
+
+            if stream.stream_type != "transcript"
+                && let Err(e) = self.ensure_stream_session(
+                    &notification.session_id,
+                    &notification.tool,
+                    &stream,
+                    &stream_path,
+                    transcript_record
+                        .as_ref()
+                        .map(|r| r.external_session_id.as_str()),
+                    transcript_record
+                        .as_ref()
+                        .and_then(|r| r.external_parent_session_id.as_deref()),
+                    notification.repo_work_dir.as_deref(),
+                )
+            {
+                tracing::warn!(
+                    session_id = %notification.session_id,
+                    stream_type = %stream.stream_type,
+                    error = %e,
+                    "failed to ensure stream session exists"
+                );
+                continue;
+            }
 
             let dedup_key = (stream_path.clone(), stream.stream_type.to_string());
             if self.in_flight.contains(&dedup_key) {
@@ -373,8 +437,7 @@ impl TranscriptWorker {
             return Ok(());
         }
 
-        use crate::transcripts::db::SessionRecord;
-        use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy};
+        use crate::transcripts::watermark::ByteOffsetWatermark;
 
         let initial_watermark = ByteOffsetWatermark::new(0);
         let record = SessionRecord {
@@ -386,6 +449,49 @@ impl TranscriptWorker {
             watermark_type: "ByteOffset".to_string(),
             watermark_value: initial_watermark.serialize(),
             external_session_id: external_session_id.to_string(),
+            external_parent_session_id: external_parent_session_id.map(|s| s.to_string()),
+            first_seen_at: chrono::Utc::now().timestamp(),
+            last_processed_at: 0,
+            last_known_size: 0,
+            last_modified: None,
+            processing_errors: 0,
+            last_error: None,
+            repo_work_dir: repo_work_dir.map(|p| p.display().to_string()),
+        };
+
+        self.transcripts_db.insert_session(&record)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_stream_session(
+        &self,
+        session_id: &str,
+        tool: &str,
+        stream: &StreamDescriptor,
+        stream_path: &Path,
+        external_session_id: Option<&str>,
+        external_parent_session_id: Option<&str>,
+        repo_work_dir: Option<&Path>,
+    ) -> Result<(), TranscriptError> {
+        if self
+            .transcripts_db
+            .get_session(session_id, stream.stream_type)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let initial_watermark = stream.watermark_type.create_initial_watermark();
+
+        let record = SessionRecord {
+            session_id: session_id.to_string(),
+            stream_type: stream.stream_type.to_string(),
+            tool: tool.to_string(),
+            transcript_path: stream_path.display().to_string(),
+            transcript_format: format!("{:?}", stream.format),
+            watermark_type: format!("{:?}", stream.watermark_type),
+            watermark_value: initial_watermark.serialize(),
+            external_session_id: external_session_id.unwrap_or("").to_string(),
             external_parent_session_id: external_parent_session_id.map(|s| s.to_string()),
             first_seen_at: chrono::Utc::now().timestamp(),
             last_processed_at: 0,

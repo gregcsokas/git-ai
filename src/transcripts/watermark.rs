@@ -65,9 +65,19 @@ impl WatermarkType {
             WatermarkType::RecordIndex => Ok(Box::new(RecordIndexWatermark::from_str(s)?)),
             WatermarkType::Timestamp => Ok(Box::new(TimestampWatermark::from_str(s)?)),
             WatermarkType::Hybrid => Ok(Box::new(HybridWatermark::from_str(s)?)),
-            WatermarkType::TimestampCursor => {
-                Ok(Box::new(TimestampCursorWatermark::from_str(s)?))
-            }
+            WatermarkType::TimestampCursor => Ok(Box::new(TimestampCursorWatermark::from_str(s)?)),
+        }
+    }
+
+    pub fn create_initial_watermark(&self) -> Box<dyn WatermarkStrategy> {
+        match self {
+            WatermarkType::ByteOffset => Box::new(ByteOffsetWatermark::new(0)),
+            WatermarkType::RecordIndex => Box::new(RecordIndexWatermark::new(0)),
+            WatermarkType::Timestamp => Box::new(TimestampWatermark::new(
+                chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            )),
+            WatermarkType::Hybrid => Box::new(HybridWatermark::new(0, 0, None)),
+            WatermarkType::TimestampCursor => Box::new(TimestampCursorWatermark::initial()),
         }
     }
 }
@@ -235,12 +245,10 @@ impl FromStr for TimestampCursorWatermark {
                 s
             ),
         })?;
-        let timestamp_millis = ts_str
-            .parse::<i64>()
-            .map_err(|e| TranscriptError::Parse {
-                line: 0,
-                message: format!("Invalid timestamp in TimestampCursor watermark: {}", e),
-            })?;
+        let timestamp_millis = ts_str.parse::<i64>().map_err(|e| TranscriptError::Parse {
+            line: 0,
+            message: format!("Invalid timestamp in TimestampCursor watermark: {}", e),
+        })?;
         Ok(Self {
             timestamp_millis,
             last_id: id.to_string(),

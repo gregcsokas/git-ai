@@ -380,8 +380,7 @@ mod tests {
     #[test]
     fn test_empty_db_returns_empty_batch() {
         let (_dir, db_path) = create_test_otel_db();
-        let watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampCursorWatermark::initial());
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
         let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
         assert!(batch.events.is_empty());
     }
@@ -412,8 +411,7 @@ mod tests {
         }
         drop(conn);
 
-        let watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampCursorWatermark::initial());
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
         let batch = read_otel_spans_incremental(&db_path, watermark, 3).unwrap();
         assert_eq!(batch.events.len(), 3);
     }
@@ -490,8 +488,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampCursorWatermark::initial());
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
         let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
         assert_eq!(
             batch.events[0]["attributes"]["gen_ai.request.model"],
@@ -515,8 +512,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampCursorWatermark::initial());
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
         let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
         let events = batch.events[0]["events"].as_array().unwrap();
         assert_eq!(events.len(), 1);
@@ -571,8 +567,7 @@ mod tests {
         if !fixture_path.exists() {
             return;
         }
-        let watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampCursorWatermark::initial());
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
         let batch = read_otel_spans_incremental(&fixture_path, watermark, 100).unwrap();
         assert!(!batch.events.is_empty());
         let first = &batch.events[0];

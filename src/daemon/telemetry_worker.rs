@@ -187,7 +187,6 @@ impl DaemonTelemetryWorkerHandle {
             buf.ingest_cas(records);
         }
     }
-
 }
 
 /// Global handle for the daemon's in-process telemetry worker.
