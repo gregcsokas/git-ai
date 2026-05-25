@@ -266,7 +266,7 @@ impl Agent for CopilotAgent {
             },
             StreamDescriptor {
                 stream_type: "otel_traces",
-                format: TranscriptFormat::OtelSqliteTraces,
+                format: TranscriptFormat::CopilotOtelSqlite,
                 watermark_type: WatermarkType::TimestampCursor,
                 path_resolver: PathResolverKind::Custom(Box::new(Self::resolve_otel_db_path)),
             },

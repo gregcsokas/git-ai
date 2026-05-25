@@ -516,7 +516,7 @@ fn test_copilot_otel_stream_reads_spans_with_event_ids() {
         stream_type: "otel_traces".to_string(),
         tool: "github-copilot".to_string(),
         transcript_path: fixture.display().to_string(),
-        transcript_format: "OtelSqliteTraces".to_string(),
+        transcript_format: "CopilotOtelSqlite".to_string(),
         watermark_type: "TimestampCursor".to_string(),
         watermark_value: TimestampCursorWatermark::initial().serialize(),
         external_session_id: "copilot-ext-session-1".to_string(),
