@@ -51,6 +51,6 @@ pub mod watermark;
 pub use db::{SessionRecord, TranscriptsDatabase};
 pub use types::{TranscriptBatch, TranscriptError};
 pub use watermark::{
-    ByteOffsetWatermark, HybridWatermark, RecordIndexWatermark, TimestampWatermark,
-    WatermarkStrategy, WatermarkType,
+    ByteOffsetWatermark, HybridWatermark, RecordIndexWatermark, TimestampCursorWatermark,
+    TimestampWatermark, WatermarkStrategy, WatermarkType,
 };

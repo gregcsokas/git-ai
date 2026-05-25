@@ -24,6 +24,7 @@ pub enum WatermarkType {
     RecordIndex,
     Timestamp,
     Hybrid,
+    TimestampCursor,
 }
 
 impl fmt::Display for WatermarkType {
@@ -33,6 +34,7 @@ impl fmt::Display for WatermarkType {
             WatermarkType::RecordIndex => write!(f, "RecordIndex"),
             WatermarkType::Timestamp => write!(f, "Timestamp"),
             WatermarkType::Hybrid => write!(f, "Hybrid"),
+            WatermarkType::TimestampCursor => write!(f, "TimestampCursor"),
         }
     }
 }
@@ -46,6 +48,7 @@ impl FromStr for WatermarkType {
             "RecordIndex" => Ok(WatermarkType::RecordIndex),
             "Timestamp" => Ok(WatermarkType::Timestamp),
             "Hybrid" => Ok(WatermarkType::Hybrid),
+            "TimestampCursor" => Ok(WatermarkType::TimestampCursor),
             _ => Err(TranscriptError::Parse {
                 line: 0,
                 message: format!("Invalid watermark type: {}", s),
@@ -62,6 +65,9 @@ impl WatermarkType {
             WatermarkType::RecordIndex => Ok(Box::new(RecordIndexWatermark::from_str(s)?)),
             WatermarkType::Timestamp => Ok(Box::new(TimestampWatermark::from_str(s)?)),
             WatermarkType::Hybrid => Ok(Box::new(HybridWatermark::from_str(s)?)),
+            WatermarkType::TimestampCursor => {
+                Ok(Box::new(TimestampCursorWatermark::from_str(s)?))
+            }
         }
     }
 }
@@ -175,6 +181,70 @@ impl FromStr for TimestampWatermark {
                 line: 0,
                 message: format!("Invalid timestamp watermark: {}", e),
             })
+    }
+}
+
+/// Timestamp + cursor watermark for keyset pagination over time-ordered data.
+/// Stores (timestamp_millis, last_cursor_id) to handle ties at batch boundaries.
+/// The cursor is the last-seen ID at the watermark timestamp, enabling
+/// `WHERE (ts > ?1 OR (ts = ?1 AND id > ?2))` style queries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimestampCursorWatermark {
+    pub timestamp_millis: i64,
+    pub last_id: String,
+}
+
+impl TimestampCursorWatermark {
+    pub fn new(timestamp_millis: i64, last_id: String) -> Self {
+        Self {
+            timestamp_millis,
+            last_id,
+        }
+    }
+
+    pub fn initial() -> Self {
+        Self {
+            timestamp_millis: 0,
+            last_id: String::new(),
+        }
+    }
+}
+
+impl WatermarkStrategy for TimestampCursorWatermark {
+    fn serialize(&self) -> String {
+        format!("{}|{}", self.timestamp_millis, self.last_id)
+    }
+
+    fn advance(&mut self, _bytes_read: usize, _records_read: usize) {
+        // Must be explicitly updated with new timestamp + cursor
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl FromStr for TimestampCursorWatermark {
+    type Err = TranscriptError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (ts_str, id) = s.split_once('|').ok_or_else(|| TranscriptError::Parse {
+            line: 0,
+            message: format!(
+                "Invalid TimestampCursor watermark format: expected 'millis|id', got '{}'",
+                s
+            ),
+        })?;
+        let timestamp_millis = ts_str
+            .parse::<i64>()
+            .map_err(|e| TranscriptError::Parse {
+                line: 0,
+                message: format!("Invalid timestamp in TimestampCursor watermark: {}", e),
+            })?;
+        Ok(Self {
+            timestamp_millis,
+            last_id: id.to_string(),
+        })
     }
 }
 
@@ -483,6 +553,10 @@ mod tests {
         assert_eq!(WatermarkType::RecordIndex.to_string(), "RecordIndex");
         assert_eq!(WatermarkType::Timestamp.to_string(), "Timestamp");
         assert_eq!(WatermarkType::Hybrid.to_string(), "Hybrid");
+        assert_eq!(
+            WatermarkType::TimestampCursor.to_string(),
+            "TimestampCursor"
+        );
     }
 
     #[test]
@@ -502,6 +576,10 @@ mod tests {
         assert_eq!(
             WatermarkType::from_str("Hybrid").unwrap(),
             WatermarkType::Hybrid
+        );
+        assert_eq!(
+            WatermarkType::from_str("TimestampCursor").unwrap(),
+            WatermarkType::TimestampCursor
         );
     }
 
@@ -524,6 +602,7 @@ mod tests {
             WatermarkType::RecordIndex,
             WatermarkType::Timestamp,
             WatermarkType::Hybrid,
+            WatermarkType::TimestampCursor,
         ];
 
         for wm_type in &types {
@@ -531,5 +610,54 @@ mod tests {
             let deserialized = WatermarkType::from_str(&serialized).unwrap();
             assert_eq!(*wm_type, deserialized);
         }
+    }
+
+    #[test]
+    fn test_timestamp_cursor_watermark_serialize() {
+        let wm = TimestampCursorWatermark::new(12345, "span_abc".to_string());
+        assert_eq!(wm.serialize(), "12345|span_abc");
+    }
+
+    #[test]
+    fn test_timestamp_cursor_watermark_deserialize() {
+        let wm = TimestampCursorWatermark::from_str("67890|span_xyz").unwrap();
+        assert_eq!(wm.timestamp_millis, 67890);
+        assert_eq!(wm.last_id, "span_xyz");
+    }
+
+    #[test]
+    fn test_timestamp_cursor_watermark_initial() {
+        let wm = TimestampCursorWatermark::initial();
+        assert_eq!(wm.timestamp_millis, 0);
+        assert_eq!(wm.last_id, "");
+        assert_eq!(wm.serialize(), "0|");
+    }
+
+    #[test]
+    fn test_timestamp_cursor_watermark_roundtrip() {
+        let original = TimestampCursorWatermark::new(999999, "my-span-id".to_string());
+        let serialized = original.serialize();
+        let deserialized = TimestampCursorWatermark::from_str(&serialized).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_timestamp_cursor_watermark_invalid_format() {
+        let result = TimestampCursorWatermark::from_str("no_pipe_separator");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_timestamp_cursor_watermark_invalid_millis() {
+        let result = TimestampCursorWatermark::from_str("not_a_number|span1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_watermark_type_deserialize_timestamp_cursor() {
+        let wm = WatermarkType::TimestampCursor
+            .deserialize("5000|span_42")
+            .unwrap();
+        assert_eq!(wm.serialize(), "5000|span_42");
     }
 }

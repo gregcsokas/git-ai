@@ -123,7 +123,7 @@ impl TranscriptFormat {
                 WatermarkType::RecordIndex
             }
             Self::OpenCodeSqlite => WatermarkType::Timestamp,
-            Self::OtelSqliteTraces => WatermarkType::Timestamp,
+            Self::OtelSqliteTraces => WatermarkType::TimestampCursor,
         }
     }
 }

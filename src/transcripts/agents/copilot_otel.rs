@@ -1,7 +1,6 @@
 use crate::transcripts::agents::opencode::open_sqlite_readonly;
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
-use crate::transcripts::watermark::{TimestampWatermark, WatermarkStrategy};
-use chrono::{TimeZone, Utc};
+use crate::transcripts::watermark::{TimestampCursorWatermark, WatermarkStrategy};
 use rusqlite::Connection;
 use serde_json::json;
 use std::collections::HashMap;
@@ -9,28 +8,27 @@ use std::path::Path;
 
 /// Read OTEL spans incrementally from a Copilot traces SQLite DB.
 ///
-/// Uses `end_time_ms` as the watermark column. Returns spans ordered by
-/// `(end_time_ms ASC, span_id ASC)` to ensure deterministic pagination.
+/// Uses keyset pagination on `(end_time_ms, span_id)` to prevent data loss
+/// when multiple spans share the same `end_time_ms` at a batch boundary.
 pub fn read_otel_spans_incremental(
     path: &Path,
     watermark: Box<dyn WatermarkStrategy>,
     batch_size: usize,
 ) -> Result<TranscriptBatch, TranscriptError> {
-    let ts_watermark = watermark
+    let cursor = watermark
         .as_any()
-        .downcast_ref::<TimestampWatermark>()
+        .downcast_ref::<TimestampCursorWatermark>()
         .ok_or_else(|| TranscriptError::Fatal {
-            message: "OTEL stream requires TimestampWatermark".to_string(),
+            message: "OTEL stream requires TimestampCursorWatermark".to_string(),
         })?;
 
-    let watermark_millis = ts_watermark.0.timestamp_millis();
     let conn = open_sqlite_readonly(path)?;
 
-    let spans = read_spans_after(&conn, watermark_millis, batch_size)?;
+    let spans = read_spans_after(&conn, cursor.timestamp_millis, &cursor.last_id, batch_size)?;
     if spans.is_empty() {
         return Ok(TranscriptBatch {
             events: vec![],
-            new_watermark: Box::new(ts_watermark.clone()),
+            new_watermark: Box::new(cursor.clone()),
         });
     }
 
@@ -38,16 +36,9 @@ pub fn read_otel_spans_incremental(
     let attributes = read_attributes_for_spans(&conn, &span_ids)?;
     let events = read_events_for_spans(&conn, &span_ids)?;
 
-    let max_end_time_ms = spans
-        .iter()
-        .map(|s| s.end_time_ms)
-        .max()
-        .unwrap_or(watermark_millis);
-    let new_watermark = TimestampWatermark(
-        Utc.timestamp_millis_opt(max_end_time_ms)
-            .single()
-            .unwrap_or(ts_watermark.0),
-    );
+    let last_span = spans.last().unwrap();
+    let new_watermark =
+        TimestampCursorWatermark::new(last_span.end_time_ms, last_span.span_id.clone());
 
     let json_events: Vec<serde_json::Value> = spans
         .into_iter()
@@ -94,24 +85,54 @@ struct SpanRow {
 fn read_spans_after(
     conn: &Connection,
     after_ms: i64,
+    after_id: &str,
     limit: usize,
 ) -> Result<Vec<SpanRow>, TranscriptError> {
-    let mut stmt = conn
-        .prepare(
+    // Keyset pagination: skip spans at or before the cursor.
+    // If after_id is empty (initial state), use simple `>` on timestamp.
+    // Otherwise use compound `(ts > ?) OR (ts = ? AND id > ?)` to handle ties.
+    let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if after_id.is_empty() {
+        (
             "SELECT span_id, trace_id, parent_span_id, name, \
              CAST(start_time_ms AS INTEGER), CAST(end_time_ms AS INTEGER), \
              status_code, status_message, operation_name, provider_name, agent_name, \
              conversation_id, request_model, response_model, input_tokens, output_tokens, \
              cached_tokens, reasoning_tokens, tool_name, tool_call_id, tool_type, \
              chat_session_id, turn_index, ttft_ms \
-             FROM spans WHERE end_time_ms > ?1 ORDER BY end_time_ms ASC, span_id ASC LIMIT ?2",
+             FROM spans WHERE end_time_ms > ?1 \
+             ORDER BY end_time_ms ASC, span_id ASC LIMIT ?2"
+                .to_string(),
+            vec![
+                Box::new(after_ms) as Box<dyn rusqlite::types::ToSql>,
+                Box::new(limit as i64),
+            ],
         )
-        .map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to prepare spans query: {}", e),
-        })?;
+    } else {
+        (
+            "SELECT span_id, trace_id, parent_span_id, name, \
+             CAST(start_time_ms AS INTEGER), CAST(end_time_ms AS INTEGER), \
+             status_code, status_message, operation_name, provider_name, agent_name, \
+             conversation_id, request_model, response_model, input_tokens, output_tokens, \
+             cached_tokens, reasoning_tokens, tool_name, tool_call_id, tool_type, \
+             chat_session_id, turn_index, ttft_ms \
+             FROM spans WHERE (end_time_ms > ?1) OR (end_time_ms = ?2 AND span_id > ?3) \
+             ORDER BY end_time_ms ASC, span_id ASC LIMIT ?4"
+                .to_string(),
+            vec![
+                Box::new(after_ms) as Box<dyn rusqlite::types::ToSql>,
+                Box::new(after_ms),
+                Box::new(after_id.to_string()),
+                Box::new(limit as i64),
+            ],
+        )
+    };
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| TranscriptError::Fatal {
+        message: format!("Failed to prepare spans query: {}", e),
+    })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![after_ms, limit as i64], |row| {
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
             Ok(SpanRow {
                 span_id: row.get(0)?,
                 trace_id: row.get(1)?,
@@ -308,8 +329,7 @@ pub fn extract_otel_event_timestamp(event: &serde_json::Value) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcripts::watermark::TimestampWatermark;
-    use chrono::{DateTime, Utc};
+    use crate::transcripts::watermark::TimestampCursorWatermark;
 
     fn create_test_otel_db() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -361,7 +381,7 @@ mod tests {
     fn test_empty_db_returns_empty_batch() {
         let (_dir, db_path) = create_test_otel_db();
         let watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+            Box::new(TimestampCursorWatermark::initial());
         let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
         assert!(batch.events.is_empty());
     }
@@ -375,9 +395,8 @@ mod tests {
         insert_span(&conn, "span3", 3000, 300, 150);
         drop(conn);
 
-        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampWatermark(
-            chrono::TimeZone::timestamp_millis_opt(&Utc, 1000).unwrap(),
-        ));
+        let watermark: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampCursorWatermark::new(1000, "span1".to_string()));
         let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
         assert_eq!(batch.events.len(), 2);
         assert_eq!(batch.events[0]["span"]["span_id"], "span2");
@@ -394,7 +413,7 @@ mod tests {
         drop(conn);
 
         let watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+            Box::new(TimestampCursorWatermark::initial());
         let batch = read_otel_spans_incremental(&db_path, watermark, 3).unwrap();
         assert_eq!(batch.events.len(), 3);
     }
@@ -409,7 +428,35 @@ mod tests {
         drop(conn);
 
         let mut watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+            Box::new(TimestampCursorWatermark::initial());
+        let mut all_ids = Vec::new();
+
+        loop {
+            let batch = read_otel_spans_incremental(&db_path, watermark, 2).unwrap();
+            if batch.events.is_empty() {
+                break;
+            }
+            for ev in &batch.events {
+                all_ids.push(ev["span"]["span_id"].as_str().unwrap().to_string());
+            }
+            watermark = batch.new_watermark;
+        }
+
+        assert_eq!(all_ids, vec!["span1", "span2", "span3", "span4", "span5"]);
+    }
+
+    #[test]
+    fn test_no_data_loss_with_duplicate_end_time_ms() {
+        let (_dir, db_path) = create_test_otel_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        // 5 spans all sharing the same end_time_ms
+        for i in 1..=5 {
+            insert_span(&conn, &format!("span{}", i), 3000, i * 100, i * 50);
+        }
+        drop(conn);
+
+        let mut watermark: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampCursorWatermark::initial());
         let mut all_ids = Vec::new();
 
         loop {
@@ -444,7 +491,7 @@ mod tests {
         drop(conn);
 
         let watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+            Box::new(TimestampCursorWatermark::initial());
         let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
         assert_eq!(
             batch.events[0]["attributes"]["gen_ai.request.model"],
@@ -469,7 +516,7 @@ mod tests {
         drop(conn);
 
         let watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+            Box::new(TimestampCursorWatermark::initial());
         let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
         let events = batch.events[0]["events"].as_array().unwrap();
         assert_eq!(events.len(), 1);
@@ -525,7 +572,7 @@ mod tests {
             return;
         }
         let watermark: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampWatermark(DateTime::<Utc>::MIN_UTC));
+            Box::new(TimestampCursorWatermark::initial());
         let batch = read_otel_spans_incremental(&fixture_path, watermark, 100).unwrap();
         assert!(!batch.events.is_empty());
         let first = &batch.events[0];

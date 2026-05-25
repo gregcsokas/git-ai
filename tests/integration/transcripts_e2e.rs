@@ -6,7 +6,9 @@
 
 use git_ai::transcripts::agent::Agent;
 use git_ai::transcripts::agents::{ClaudeAgent, CopilotAgent, OpenCodeAgent};
-use git_ai::transcripts::watermark::{ByteOffsetWatermark, TimestampWatermark};
+use git_ai::transcripts::watermark::{
+    ByteOffsetWatermark, TimestampCursorWatermark, TimestampWatermark, WatermarkStrategy,
+};
 use git_ai::transcripts::{SessionRecord, TranscriptsDatabase};
 use std::fs::{self, File};
 use std::io::Write;
@@ -501,8 +503,6 @@ fn test_subagent_session_record_has_parent_link() {
 
 #[test]
 fn test_copilot_otel_stream_reads_spans_with_event_ids() {
-    use chrono::{DateTime, Utc};
-
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts.db");
     let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
@@ -517,8 +517,8 @@ fn test_copilot_otel_stream_reads_spans_with_event_ids() {
         tool: "github-copilot".to_string(),
         transcript_path: fixture.display().to_string(),
         transcript_format: "OtelSqliteTraces".to_string(),
-        watermark_type: "Timestamp".to_string(),
-        watermark_value: DateTime::<Utc>::UNIX_EPOCH.to_rfc3339(),
+        watermark_type: "TimestampCursor".to_string(),
+        watermark_value: TimestampCursorWatermark::initial().serialize(),
         external_session_id: "copilot-ext-session-1".to_string(),
         external_parent_session_id: None,
         first_seen_at: now,
@@ -533,7 +533,7 @@ fn test_copilot_otel_stream_reads_spans_with_event_ids() {
 
     // Read spans using CopilotAgent (dispatches to copilot_otel reader for .db files)
     let agent = CopilotAgent::new();
-    let watermark = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
+    let watermark = Box::new(TimestampCursorWatermark::initial());
     let batch = agent
         .read_incremental(
             &PathBuf::from(&session.transcript_path),
@@ -594,21 +594,18 @@ fn test_copilot_otel_stream_reads_spans_with_event_ids() {
     // Verify watermark advanced
     let new_wm_serialized = batch.new_watermark.serialize();
     assert_ne!(
-        new_wm_serialized,
-        DateTime::<Utc>::UNIX_EPOCH.to_rfc3339(),
-        "watermark should have advanced from epoch"
+        new_wm_serialized, "0|",
+        "watermark should have advanced from initial"
     );
 }
 
 #[test]
 fn test_copilot_otel_stream_watermark_resumes_correctly() {
-    use chrono::{DateTime, Utc};
-
     let fixture = test_fixture_path("copilot-otel/traces.db");
     let agent = CopilotAgent::new();
 
-    // First read: get all spans from epoch
-    let watermark1 = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
+    // First read: get all spans from initial cursor
+    let watermark1 = Box::new(TimestampCursorWatermark::initial());
     let batch1 = agent
         .read_incremental(&fixture, watermark1, "test-session")
         .unwrap();
@@ -619,23 +616,20 @@ fn test_copilot_otel_stream_watermark_resumes_correctly() {
         count1
     );
 
-    // Watermark should have advanced from epoch
+    // Watermark should have advanced from initial
     let wm1_str = batch1.new_watermark.serialize();
     assert_ne!(
-        wm1_str,
-        DateTime::<Utc>::UNIX_EPOCH.to_rfc3339(),
-        "watermark should advance from epoch after first read"
+        wm1_str, "0|",
+        "watermark should advance from initial after first read"
     );
 
-    // Second read from new watermark: the fixture has fractional-millisecond end_time_ms
-    // values. Since the watermark is stored as integer millis, spans whose fractional
-    // part rounds down will appear again. This is expected behavior with real OTEL data
-    // that uses sub-millisecond precision.
+    // Second read: keyset pagination guarantees no duplicates
     let batch2 = agent
         .read_incremental(&fixture, batch1.new_watermark, "test-session")
         .unwrap();
 
-    // Verify the second batch is much smaller than the first (most spans consumed)
+    // With keyset pagination, second read should return remaining spans (if any)
+    // or be empty if all spans were consumed in the first batch
     assert!(
         batch2.events.len() < count1,
         "second read ({}) should be smaller than first ({})",

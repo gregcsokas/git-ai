@@ -7687,6 +7687,10 @@ impl ActorDaemonCoordinator {
                 crate::transcripts::watermark::HybridWatermark::new(0, 0, None),
             )
                 as Box<dyn crate::transcripts::watermark::WatermarkStrategy>,
+            crate::transcripts::watermark::WatermarkType::TimestampCursor => Box::new(
+                crate::transcripts::watermark::TimestampCursorWatermark::initial(),
+            )
+                as Box<dyn crate::transcripts::watermark::WatermarkStrategy>,
         };
 
         let record = crate::transcripts::db::SessionRecord {
