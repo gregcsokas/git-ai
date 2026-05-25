@@ -6,7 +6,6 @@
 use crate::api::{ApiClient, ApiContext, CasObject, CasUploadRequest};
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
-use crate::metrics::OtelTracePayload;
 use crate::metrics::db::MetricsDatabase;
 use crate::metrics::{MetricEvent, MetricsBatch};
 use crate::observability::MAX_METRICS_PER_ENVELOPE;
@@ -24,7 +23,6 @@ struct TelemetryBuffer {
     performances: Vec<PerformanceEvent>,
     messages: Vec<MessageEvent>,
     metrics: Vec<MetricEvent>,
-    otel_traces: Vec<OtelTracePayload>,
     cas_records: Vec<CasSyncPayload>,
 }
 
@@ -56,7 +54,6 @@ impl TelemetryBuffer {
             performances: Vec::new(),
             messages: Vec::new(),
             metrics: Vec::new(),
-            otel_traces: Vec::new(),
             cas_records: Vec::new(),
         }
     }
@@ -66,7 +63,6 @@ impl TelemetryBuffer {
             && self.performances.is_empty()
             && self.messages.is_empty()
             && self.metrics.is_empty()
-            && self.otel_traces.is_empty()
             && self.cas_records.is_empty()
     }
 
@@ -115,9 +111,6 @@ impl TelemetryBuffer {
                 TelemetryEnvelope::Metrics { events } => {
                     self.metrics.extend(events);
                 }
-                TelemetryEnvelope::OtelTraces { traces } => {
-                    self.otel_traces.extend(traces);
-                }
             }
         }
     }
@@ -132,7 +125,6 @@ impl TelemetryBuffer {
             performances: std::mem::take(&mut self.performances),
             messages: std::mem::take(&mut self.messages),
             metrics: std::mem::take(&mut self.metrics),
-            otel_traces: std::mem::take(&mut self.otel_traces),
             cas_records: std::mem::take(&mut self.cas_records),
         }
     }
@@ -196,25 +188,6 @@ impl DaemonTelemetryWorkerHandle {
         }
     }
 
-    /// Submit OTEL trace payloads synchronously (best-effort, non-blocking).
-    ///
-    /// Used by the transcript worker to route OTEL stream events directly
-    /// into the telemetry buffer for upload as a separate `otel_traces` array.
-    pub fn submit_otel_traces_sync(&self, traces: Vec<OtelTracePayload>) {
-        if let Ok(mut buf) = self.buffer.try_lock() {
-            buf.otel_traces.extend(traces);
-        }
-    }
-
-    /// Returns the current number of buffered OTEL trace payloads.
-    ///
-    /// Used for backpressure alongside `metrics_buffer_len()`.
-    pub fn otel_traces_buffer_len(&self) -> usize {
-        self.buffer
-            .try_lock()
-            .map(|buf| buf.otel_traces.len())
-            .unwrap_or(usize::MAX)
-    }
 }
 
 /// Global handle for the daemon's in-process telemetry worker.
@@ -315,9 +288,9 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
     let config = Config::get();
     let distinct_id = get_or_create_distinct_id();
 
-    // Flush metrics and OTEL traces (always processed — uploaded or stored in SQLite)
-    if !batch.metrics.is_empty() || !batch.otel_traces.is_empty() {
-        flush_metrics(&batch.metrics, &batch.otel_traces);
+    // Flush metrics (always processed — uploaded or stored in SQLite)
+    if !batch.metrics.is_empty() {
+        flush_metrics(&batch.metrics);
     }
 
     // Flush Sentry events (errors, performance, messages)
@@ -343,7 +316,7 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
     flush_notes();
 }
 
-fn flush_metrics(events: &[MetricEvent], otel_traces: &[OtelTracePayload]) {
+fn flush_metrics(events: &[MetricEvent]) {
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
@@ -354,24 +327,9 @@ fn flush_metrics(events: &[MetricEvent], otel_traces: &[OtelTracePayload]) {
     let mut upload_failed = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
-    if events.is_empty() && !otel_traces.is_empty() {
-        // OTEL-only batch (no metric events to send)
-        if should_upload && std::time::Instant::now() < deadline {
-            let mut batch = MetricsBatch::new(vec![]);
-            batch.otel_traces = otel_traces.to_vec();
-            let _ = client.upload_metrics(&batch);
-        }
-        return;
-    }
-
-    let mut otel_sent = false;
     for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
         if should_upload && !upload_failed && std::time::Instant::now() < deadline {
-            let mut batch = MetricsBatch::new(chunk.to_vec());
-            if !otel_sent {
-                batch.otel_traces = otel_traces.to_vec();
-                otel_sent = true;
-            }
+            let batch = MetricsBatch::new(chunk.to_vec());
             if client.upload_metrics(&batch).is_ok() {
                 continue;
             }

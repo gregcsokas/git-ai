@@ -21,6 +21,7 @@ pub enum MetricEventId {
     InstallHooks = 3,
     Checkpoint = 4,
     SessionEvent = 5,
+    OtelTrace = 6,
 }
 
 /// Trait for event-specific values.
@@ -114,8 +115,6 @@ pub struct MetricsBatch {
     #[serde(rename = "v")]
     pub version: u8,
     pub events: Vec<MetricEvent>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub otel_traces: Vec<super::events::OtelTracePayload>,
 }
 
 impl MetricsBatch {
@@ -123,7 +122,6 @@ impl MetricsBatch {
         Self {
             version: METRICS_API_VERSION,
             events,
-            otel_traces: Vec::new(),
         }
     }
 }

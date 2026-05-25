@@ -142,9 +142,6 @@ pub enum TelemetryEnvelope {
     Metrics {
         events: Vec<MetricEvent>,
     },
-    OtelTraces {
-        traces: Vec<crate::metrics::OtelTracePayload>,
-    },
 }
 
 /// A CAS object payload sent from client to daemon for background upload.

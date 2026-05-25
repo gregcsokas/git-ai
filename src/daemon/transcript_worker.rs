@@ -9,13 +9,13 @@ use crate::config;
 use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
 use crate::daemon::transcript_redaction::redact_json_secrets;
 use crate::metrics::{
-    EventAttributes, MetricEvent, OtelSpanEvent, OtelTracePayload, PosEncoded, SessionEventValues,
+    EventAttributes, MetricEvent, PosEncoded, SessionEventValues,
 };
 use crate::transcripts::db::TranscriptsDatabase;
 use crate::transcripts::types::TranscriptError;
 use crate::transcripts::watermark::WatermarkType;
 use chrono::{TimeZone, Utc};
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -550,55 +550,36 @@ impl TranscriptWorker {
 
             let batch_count = batch.events.len();
 
-            if task.stream_type == "otel_traces" {
-                // Route OTEL events to the dedicated otel_traces upload path
-                let otel_payloads: Vec<OtelTracePayload> = batch
-                    .events
-                    .into_iter()
-                    .filter_map(|raw_event| {
-                        Self::raw_event_to_otel_payload(
-                            &raw_event,
-                            &session,
-                            resolved_work_dir.as_deref(),
-                        )
-                    })
-                    .collect();
-                if !otel_payloads.is_empty() {
-                    telemetry.submit_otel_traces_sync(otel_payloads);
-                }
-            } else {
-                // Standard MetricEvent path for transcript streams
-                let metric_events: Vec<MetricEvent> = batch
-                    .events
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, raw_event)| {
-                        let (eid, pid, tid) = agent.extract_event_ids(&raw_event);
-                        let is_first_event = is_initial_watermark && total_events == 0 && idx == 0;
-                        let event_ts = match &file_meta {
-                            Some(meta) => {
-                                agent.extract_event_timestamp(&raw_event, meta, is_first_event)
-                            }
-                            None => extract_event_timestamp(&raw_event).unwrap_or_else(|| {
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as u32
-                            }),
-                        };
-                        let trace_id = generate_trace_id();
-                        let attrs_sparse = base_attrs.clone().trace_id(trace_id).to_sparse();
-                        let raw_event = redact_json_secrets(raw_event);
-                        MetricEvent::from_values_with_timestamp(
-                            SessionEventValues::with_ids(raw_event, eid, pid, tid),
-                            attrs_sparse,
-                            Some(event_ts),
-                        )
-                    })
-                    .collect();
+            let metric_events: Vec<MetricEvent> = batch
+                .events
+                .into_iter()
+                .enumerate()
+                .map(|(idx, raw_event)| {
+                    let (eid, pid, tid) = agent.extract_event_ids(&raw_event);
+                    let is_first_event = is_initial_watermark && total_events == 0 && idx == 0;
+                    let event_ts = match &file_meta {
+                        Some(meta) => {
+                            agent.extract_event_timestamp(&raw_event, meta, is_first_event)
+                        }
+                        None => extract_event_timestamp(&raw_event).unwrap_or_else(|| {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as u32
+                        }),
+                    };
+                    let trace_id = generate_trace_id();
+                    let attrs_sparse = base_attrs.clone().trace_id(trace_id).to_sparse();
+                    let raw_event = redact_json_secrets(raw_event);
+                    MetricEvent::from_values_with_timestamp(
+                        SessionEventValues::with_ids(raw_event, eid, pid, tid),
+                        attrs_sparse,
+                        Some(event_ts),
+                    )
+                })
+                .collect();
 
-                crate::observability::log_metrics(metric_events);
-            }
+            crate::observability::log_metrics(metric_events);
 
             // Backpressure: if the telemetry buffer has accumulated too many
             // events, poll briefly to let the 3-second flush cycle drain it.
@@ -608,10 +589,7 @@ impl TranscriptWorker {
             const BACKPRESSURE_THRESHOLD: usize = 5_000;
             const BACKPRESSURE_MAX_WAITS: usize = 40;
             for _ in 0..BACKPRESSURE_MAX_WAITS {
-                let buffer_len = telemetry
-                    .metrics_buffer_len()
-                    .min(telemetry.otel_traces_buffer_len());
-                if buffer_len < BACKPRESSURE_THRESHOLD {
+                if telemetry.metrics_buffer_len() < BACKPRESSURE_THRESHOLD {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -643,117 +621,6 @@ impl TranscriptWorker {
         );
 
         Ok(())
-    }
-
-    /// Convert a raw JSON event from the OTEL stream reader into an `OtelTracePayload`.
-    ///
-    /// The raw event structure is produced by `copilot_otel.rs` and has:
-    /// - `span`: object with trace_id, span_id, name, start_time_ms, end_time_ms, etc.
-    /// - `attributes`: optional map of span attributes
-    /// - `events`: optional array of span events
-    fn raw_event_to_otel_payload(
-        raw_event: &serde_json::Value,
-        session: &crate::transcripts::db::SessionRecord,
-        resolved_work_dir: Option<&Path>,
-    ) -> Option<OtelTracePayload> {
-        let span = raw_event.get("span")?;
-        let attrs = raw_event.get("attributes");
-        let events_arr = raw_event.get("events");
-
-        let repo_url = resolved_work_dir.and_then(crate::repo_url::resolve_repo_url_from_path);
-
-        Some(OtelTracePayload {
-            trace_id: span.get("trace_id")?.as_str()?.to_string(),
-            session_id: session.session_id.clone(),
-            external_session_id: session.external_session_id.clone(),
-            tool: session.tool.clone(),
-            repo_url,
-            timestamp_ms: span
-                .get("end_time_ms")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            span_id: span.get("span_id")?.as_str()?.to_string(),
-            parent_span_id: span
-                .get("parent_span_id")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            span_name: span
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            service_name: span
-                .get("provider_name")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            resource_attributes: None,
-            span_attributes: attrs.and_then(|a| {
-                let obj = a.as_object()?;
-                let map: HashMap<String, String> = obj
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                    .collect();
-                if map.is_empty() { None } else { Some(map) }
-            }),
-            duration_ms: span
-                .get("start_time_ms")
-                .and_then(|s| s.as_u64())
-                .and_then(|start| {
-                    span.get("end_time_ms")
-                        .and_then(|e| e.as_u64())
-                        .map(|end| end.saturating_sub(start))
-                }),
-            status_code: span
-                .get("status_code")
-                .and_then(|v| v.as_u64())
-                .map(|c| match c {
-                    0 => "UNSET".to_string(),
-                    1 => "OK".to_string(),
-                    2 => "ERROR".to_string(),
-                    _ => c.to_string(),
-                }),
-            status_message: span
-                .get("status_message")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            events: events_arr.and_then(|arr| {
-                let vec: Vec<OtelSpanEvent> = arr
-                    .as_array()?
-                    .iter()
-                    .filter_map(|e| {
-                        Some(OtelSpanEvent {
-                            name: e.get("name")?.as_str()?.to_string(),
-                            timestamp_ms: e
-                                .get("timestamp_ms")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            attributes: e.get("attributes").and_then(|a| {
-                                let obj = a.as_object()?;
-                                let map: HashMap<String, String> = obj
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                                    .collect();
-                                if map.is_empty() { None } else { Some(map) }
-                            }),
-                        })
-                    })
-                    .collect();
-                if vec.is_empty() { None } else { Some(vec) }
-            }),
-            input_tokens: span.get("input_tokens").and_then(|v| v.as_u64()),
-            output_tokens: span.get("output_tokens").and_then(|v| v.as_u64()),
-            cached_tokens: span.get("cached_tokens").and_then(|v| v.as_u64()),
-            reasoning_tokens: span.get("reasoning_tokens").and_then(|v| v.as_u64()),
-            request_model: span
-                .get("request_model")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            response_model: span
-                .get("response_model")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            ttft_ms: span.get("ttft_ms").and_then(|v| v.as_f64()),
-        })
     }
 
     /// Handle a processing error with exponential backoff.

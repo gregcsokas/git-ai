@@ -6,8 +6,6 @@ use super::pos_encoded::{
     vec_u32_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Value positions for "committed" event.
 pub mod committed_pos {
@@ -1498,54 +1496,3 @@ mod session_event_tests {
     }
 }
 
-/// Payload for a single OTEL trace span, sent as part of `otel_traces` in the upload body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OtelTracePayload {
-    pub trace_id: String,
-    pub session_id: String,
-    pub external_session_id: String,
-    pub tool: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo_url: Option<String>,
-    pub timestamp_ms: u64,
-    pub span_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_span_id: Option<String>,
-    pub span_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resource_attributes: Option<HashMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub span_attributes: Option<HashMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub events: Option<Vec<OtelSpanEvent>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cached_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttft_ms: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OtelSpanEvent {
-    pub name: String,
-    pub timestamp_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attributes: Option<HashMap<String, String>>,
-}
