@@ -91,17 +91,24 @@ fn read_spans_after(
     // Keyset pagination: skip spans at or before the cursor.
     // If after_id is empty (initial state), use simple `>` on timestamp.
     // Otherwise use compound `(ts > ?) OR (ts = ? AND id > ?)` to handle ties.
+    // Only read spans that have at least one session identifier (chat_session_id
+    // or conversation_id). Spans without either cannot be linked to a session.
+    let session_filter = "(chat_session_id IS NOT NULL AND chat_session_id != '') \
+                          OR (conversation_id IS NOT NULL AND conversation_id != '')";
+
     let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if after_id.is_empty() {
         (
-            "SELECT span_id, trace_id, parent_span_id, name, \
-             CAST(start_time_ms AS INTEGER), CAST(end_time_ms AS INTEGER), \
-             status_code, status_message, operation_name, provider_name, agent_name, \
-             conversation_id, request_model, response_model, input_tokens, output_tokens, \
-             cached_tokens, reasoning_tokens, tool_name, tool_call_id, tool_type, \
-             chat_session_id, turn_index, ttft_ms \
-             FROM spans WHERE end_time_ms > ?1 \
-             ORDER BY end_time_ms ASC, span_id ASC LIMIT ?2"
-                .to_string(),
+            format!(
+                "SELECT span_id, trace_id, parent_span_id, name, \
+                 CAST(start_time_ms AS INTEGER), CAST(end_time_ms AS INTEGER), \
+                 status_code, status_message, operation_name, provider_name, agent_name, \
+                 conversation_id, request_model, response_model, input_tokens, output_tokens, \
+                 cached_tokens, reasoning_tokens, tool_name, tool_call_id, tool_type, \
+                 chat_session_id, turn_index, ttft_ms \
+                 FROM spans WHERE end_time_ms > ?1 AND ({}) \
+                 ORDER BY end_time_ms ASC, span_id ASC LIMIT ?2",
+                session_filter
+            ),
             vec![
                 Box::new(after_ms) as Box<dyn rusqlite::types::ToSql>,
                 Box::new(limit as i64),
@@ -109,15 +116,18 @@ fn read_spans_after(
         )
     } else {
         (
-            "SELECT span_id, trace_id, parent_span_id, name, \
-             CAST(start_time_ms AS INTEGER), CAST(end_time_ms AS INTEGER), \
-             status_code, status_message, operation_name, provider_name, agent_name, \
-             conversation_id, request_model, response_model, input_tokens, output_tokens, \
-             cached_tokens, reasoning_tokens, tool_name, tool_call_id, tool_type, \
-             chat_session_id, turn_index, ttft_ms \
-             FROM spans WHERE (end_time_ms > ?1) OR (end_time_ms = ?2 AND span_id > ?3) \
-             ORDER BY end_time_ms ASC, span_id ASC LIMIT ?4"
-                .to_string(),
+            format!(
+                "SELECT span_id, trace_id, parent_span_id, name, \
+                 CAST(start_time_ms AS INTEGER), CAST(end_time_ms AS INTEGER), \
+                 status_code, status_message, operation_name, provider_name, agent_name, \
+                 conversation_id, request_model, response_model, input_tokens, output_tokens, \
+                 cached_tokens, reasoning_tokens, tool_name, tool_call_id, tool_type, \
+                 chat_session_id, turn_index, ttft_ms \
+                 FROM spans WHERE ((end_time_ms > ?1) OR (end_time_ms = ?2 AND span_id > ?3)) \
+                 AND ({}) \
+                 ORDER BY end_time_ms ASC, span_id ASC LIMIT ?4",
+                session_filter
+            ),
             vec![
                 Box::new(after_ms) as Box<dyn rusqlite::types::ToSql>,
                 Box::new(after_ms),

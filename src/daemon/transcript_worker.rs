@@ -679,25 +679,17 @@ impl TranscriptWorker {
                     let trace_id = generate_trace_id();
                     let mut event_attrs = base_attrs.clone().trace_id(trace_id);
 
-                    // For shared OTEL streams, derive per-event session_id from the
-                    // span's chat_session_id (or conversation_id as fallback).
-                    // Drop spans that have neither.
-                    if is_otel_stream {
-                        let span = raw_event.get("span");
-                        let effective_sid = span
-                            .and_then(|s| s.get("chat_session_id"))
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .or_else(|| {
-                                span.and_then(|s| s.get("conversation_id"))
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                            });
-                        let sid = effective_sid?;
-                        let derived_session_id = generate_session_id(sid, &session.tool);
+                    // If the agent provides a per-event session ID (e.g., shared OTEL
+                    // streams covering multiple sessions), override the envelope attrs.
+                    // Events without a resolvable session ID are dropped.
+                    if let Some(event_sid) = agent.extract_event_session_id(&raw_event) {
+                        let derived_session_id =
+                            generate_session_id(&event_sid, &session.tool);
                         event_attrs = event_attrs
                             .session_id(derived_session_id)
-                            .external_session_id(sid.to_string());
+                            .external_session_id(event_sid);
+                    } else if is_otel_stream {
+                        return None;
                     }
 
                     let attrs_sparse = event_attrs.to_sparse();

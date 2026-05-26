@@ -118,6 +118,17 @@ pub trait Agent: Send + Sync {
         is_first_event: bool,
     ) -> u32;
 
+    /// Extract the per-event session identifier from a raw event.
+    ///
+    /// For shared data sources (e.g., a global OTEL DB covering multiple sessions),
+    /// returns the session identifier embedded in the event itself. The worker uses
+    /// this to derive the correct session_id per emitted MetricEvent.
+    ///
+    /// Returns None to use the session record's session_id as-is.
+    fn extract_event_session_id(&self, _event: &serde_json::Value) -> Option<String> {
+        None
+    }
+
     /// Infer the working directory from the transcript file content.
     ///
     /// Reads the first few lines of the transcript looking for a `cwd` field.

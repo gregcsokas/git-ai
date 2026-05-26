@@ -323,6 +323,19 @@ impl Agent for CopilotAgent {
         (id, parent_id, None)
     }
 
+    fn extract_event_session_id(&self, event: &serde_json::Value) -> Option<String> {
+        let span = event.get("span")?;
+        span.get("chat_session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                span.get("conversation_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            })
+            .map(String::from)
+    }
+
     fn extract_event_timestamp(
         &self,
         event: &serde_json::Value,
