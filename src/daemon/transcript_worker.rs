@@ -680,8 +680,7 @@ impl TranscriptWorker {
                     let mut event_attrs = base_attrs.clone().trace_id(trace_id);
 
                     if let Some(event_sid) = agent.extract_event_session_id(&raw_event) {
-                        let derived_session_id =
-                            generate_session_id(&event_sid, &session.tool);
+                        let derived_session_id = generate_session_id(&event_sid, &session.tool);
                         event_attrs = event_attrs
                             .session_id(derived_session_id)
                             .external_session_id(event_sid);
