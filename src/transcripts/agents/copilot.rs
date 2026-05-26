@@ -264,6 +264,13 @@ impl Agent for CopilotAgent {
                 watermark_type: WatermarkType::ByteOffset,
                 path_resolver: PathResolverKind::Identity,
                 shared: false,
+                watermark_type_resolver: Some(Box::new(|path| {
+                    if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                        WatermarkType::RecordIndex
+                    } else {
+                        WatermarkType::ByteOffset
+                    }
+                })),
             },
             StreamDescriptor {
                 stream_kind: "otel_traces",
@@ -271,6 +278,7 @@ impl Agent for CopilotAgent {
                 watermark_type: WatermarkType::TimestampCursor,
                 path_resolver: PathResolverKind::Custom(Box::new(Self::resolve_otel_db_path)),
                 shared: true,
+                watermark_type_resolver: None,
             },
         ]
     }

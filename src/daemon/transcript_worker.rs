@@ -480,7 +480,8 @@ impl TranscriptWorker {
             return Ok(());
         }
 
-        let initial_watermark = stream.watermark_type.create_initial_watermark();
+        let effective_wm_type = stream.effective_watermark_type(stream_path);
+        let initial_watermark = effective_wm_type.create_initial_watermark();
 
         let record = SessionRecord {
             session_id: session_id.to_string(),
@@ -488,7 +489,7 @@ impl TranscriptWorker {
             tool: tool.to_string(),
             transcript_path: stream_path.display().to_string(),
             transcript_format: format!("{:?}", stream.format),
-            watermark_type: format!("{:?}", stream.watermark_type),
+            watermark_type: format!("{:?}", effective_wm_type),
             watermark_value: initial_watermark.serialize(),
             external_session_id: external_session_id.unwrap_or("").to_string(),
             external_parent_session_id: external_parent_session_id.map(|s| s.to_string()),
