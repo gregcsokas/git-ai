@@ -680,18 +680,25 @@ impl TranscriptWorker {
                     let mut event_attrs = base_attrs.clone().trace_id(trace_id);
 
                     // For shared OTEL streams, derive per-event session_id from the
-                    // span's chat_session_id so events link to the correct session.
-                    if is_otel_stream
-                        && let Some(chat_sid) = raw_event
-                            .get("span")
+                    // span's chat_session_id (or conversation_id as fallback).
+                    if is_otel_stream {
+                        let span = raw_event.get("span");
+                        let effective_sid = span
                             .and_then(|s| s.get("chat_session_id"))
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
-                    {
-                        let derived_session_id = generate_session_id(chat_sid, &session.tool);
-                        event_attrs = event_attrs
-                            .session_id(derived_session_id)
-                            .external_session_id(chat_sid.to_string());
+                            .or_else(|| {
+                                span.and_then(|s| s.get("conversation_id"))
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                            });
+                        if let Some(sid) = effective_sid {
+                            let derived_session_id =
+                                generate_session_id(sid, &session.tool);
+                            event_attrs = event_attrs
+                                .session_id(derived_session_id)
+                                .external_session_id(sid.to_string());
+                        }
                     }
 
                     let attrs_sparse = event_attrs.to_sparse();
