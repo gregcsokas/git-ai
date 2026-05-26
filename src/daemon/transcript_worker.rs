@@ -679,9 +679,6 @@ impl TranscriptWorker {
                     let trace_id = generate_trace_id();
                     let mut event_attrs = base_attrs.clone().trace_id(trace_id);
 
-                    // If the agent provides a per-event session ID (e.g., shared OTEL
-                    // streams covering multiple sessions), override the envelope attrs.
-                    // Events without a resolvable session ID are dropped.
                     if let Some(event_sid) = agent.extract_event_session_id(&raw_event) {
                         let derived_session_id =
                             generate_session_id(&event_sid, &session.tool);
