@@ -677,7 +677,24 @@ impl TranscriptWorker {
                         }),
                     };
                     let trace_id = generate_trace_id();
-                    let attrs_sparse = base_attrs.clone().trace_id(trace_id).to_sparse();
+                    let mut event_attrs = base_attrs.clone().trace_id(trace_id);
+
+                    // For shared OTEL streams, derive per-event session_id from the
+                    // span's chat_session_id so events link to the correct session.
+                    if is_otel_stream
+                        && let Some(chat_sid) = raw_event
+                            .get("span")
+                            .and_then(|s| s.get("chat_session_id"))
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                    {
+                        let derived_session_id = generate_session_id(chat_sid, &session.tool);
+                        event_attrs = event_attrs
+                            .session_id(derived_session_id)
+                            .external_session_id(chat_sid.to_string());
+                    }
+
+                    let attrs_sparse = event_attrs.to_sparse();
                     let raw_event = redact_json_secrets(raw_event);
                     if is_otel_stream {
                         MetricEvent::from_values_with_timestamp(
