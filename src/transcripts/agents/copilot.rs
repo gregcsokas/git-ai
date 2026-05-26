@@ -263,12 +263,14 @@ impl Agent for CopilotAgent {
                 format: TranscriptFormat::CopilotEventStreamJsonl,
                 watermark_type: WatermarkType::ByteOffset,
                 path_resolver: PathResolverKind::Identity,
+                shared: false,
             },
             StreamDescriptor {
                 stream_kind: "otel_traces",
                 format: TranscriptFormat::CopilotOtelSqlite,
                 watermark_type: WatermarkType::TimestampCursor,
                 path_resolver: PathResolverKind::Custom(Box::new(Self::resolve_otel_db_path)),
+                shared: true,
             },
         ]
     }

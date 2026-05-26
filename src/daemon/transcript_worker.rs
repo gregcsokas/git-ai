@@ -231,8 +231,14 @@ impl TranscriptWorker {
                     _ => continue,
                 };
 
+                let effective_session_id = if stream.shared {
+                    generate_session_id(&stream_path.display().to_string(), &session.tool)
+                } else {
+                    session.session_id.clone()
+                };
+
                 if let Err(e) = self.ensure_stream_session(
-                    &session.session_id,
+                    &effective_session_id,
                     &session.tool,
                     &stream,
                     &stream_path,
@@ -241,7 +247,7 @@ impl TranscriptWorker {
                     inferred_cwd.as_deref(),
                 ) {
                     tracing::warn!(
-                        session_id = %session.session_id,
+                        session_id = %effective_session_id,
                         stream_kind = %stream.stream_kind,
                         error = %e,
                         "failed to ensure stream session exists"
@@ -257,7 +263,7 @@ impl TranscriptWorker {
                 enqueued_this_sweep.insert(dedup_key);
                 self.priority_queue.push(ProcessingTask {
                     priority: Priority::Low,
-                    session_id: session.session_id.clone(),
+                    session_id: effective_session_id,
                     stream_kind: stream.stream_kind.to_string(),
                     tool: session.tool.clone(),
                     trace_id: None,
@@ -287,8 +293,14 @@ impl TranscriptWorker {
                 _ => continue,
             };
 
+            let effective_session_id = if stream.shared {
+                generate_session_id(&stream_path.display().to_string(), &notification.tool)
+            } else {
+                notification.session_id.clone()
+            };
+
             if let Err(e) = self.ensure_stream_session(
-                &notification.session_id,
+                &effective_session_id,
                 &notification.tool,
                 &stream,
                 &stream_path,
@@ -297,7 +309,7 @@ impl TranscriptWorker {
                 notification.repo_work_dir.as_deref(),
             ) {
                 tracing::warn!(
-                    session_id = %notification.session_id,
+                    session_id = %effective_session_id,
                     stream_kind = %stream.stream_kind,
                     error = %e,
                     "failed to ensure stream session exists"
@@ -312,7 +324,7 @@ impl TranscriptWorker {
 
             self.priority_queue.push(ProcessingTask {
                 priority: Priority::Immediate,
-                session_id: notification.session_id.clone(),
+                session_id: effective_session_id,
                 stream_kind: stream.stream_kind.to_string(),
                 tool: notification.tool.clone(),
                 trace_id: Some(notification.trace_id.clone()),

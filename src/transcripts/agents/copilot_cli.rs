@@ -160,6 +160,7 @@ impl Agent for CopilotCliAgent {
             format,
             watermark_type: format.watermark_type(),
             path_resolver: PathResolverKind::Identity,
+            shared: false,
         }]
     }
 }

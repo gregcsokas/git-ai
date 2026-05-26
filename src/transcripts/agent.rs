@@ -22,6 +22,11 @@ pub struct StreamDescriptor {
     pub format: TranscriptFormat,
     pub watermark_type: super::watermark::WatermarkType,
     pub path_resolver: PathResolverKind,
+    /// When true, this stream's data source is shared across multiple sessions
+    /// (e.g., a global OTEL SQLite DB). The session_id for the DB record is derived
+    /// from the canonical path rather than the triggering session, so all sessions
+    /// share a single watermark.
+    pub shared: bool,
 }
 
 impl StreamDescriptor {

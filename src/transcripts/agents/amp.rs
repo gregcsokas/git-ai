@@ -228,6 +228,7 @@ impl Agent for AmpAgent {
             format,
             watermark_type: format.watermark_type(),
             path_resolver: PathResolverKind::Identity,
+            shared: false,
         }]
     }
 }

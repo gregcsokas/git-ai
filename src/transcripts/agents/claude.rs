@@ -311,6 +311,7 @@ impl Agent for ClaudeAgent {
             format,
             watermark_type: format.watermark_type(),
             path_resolver: PathResolverKind::Identity,
+            shared: false,
         }]
     }
 }
