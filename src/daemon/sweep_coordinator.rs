@@ -4,7 +4,6 @@ use crate::transcripts::agent::{Agent, get_all_agents};
 use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::TranscriptError;
-use chrono::Utc;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -54,12 +53,13 @@ impl SweepCoordinator {
                     .get_session(&session.session_id, "transcript")?
                 {
                     None => {
-                        // New session - insert and queue for processing
-                        self.insert_new_session(&session)?;
+                        // New session - queue for processing (worker creates DB record)
                         sessions_to_process.push(SessionToProcess {
                             session_id: session.session_id.clone(),
                             tool: session.tool.clone(),
                             canonical_path: Self::canonicalize_path(&session.transcript_path),
+                            external_session_id: session.external_session_id.clone(),
+                            external_parent_session_id: session.external_parent_session_id.clone(),
                         });
                     }
                     Some(existing) => {
@@ -69,6 +69,10 @@ impl SweepCoordinator {
                                 session_id: session.session_id.clone(),
                                 tool: session.tool.clone(),
                                 canonical_path: Self::canonicalize_path(&session.transcript_path),
+                                external_session_id: session.external_session_id.clone(),
+                                external_parent_session_id: session
+                                    .external_parent_session_id
+                                    .clone(),
                             });
                         }
                     }
@@ -98,37 +102,6 @@ impl SweepCoordinator {
             || (modified.is_some() && modified != existing.last_modified))
     }
 
-    fn insert_new_session(&self, session: &DiscoveredSession) -> Result<(), TranscriptError> {
-        let now = Utc::now().timestamp();
-
-        let agent = crate::transcripts::agent::get_agent(&session.tool);
-        let inferred_cwd = agent
-            .as_ref()
-            .and_then(|a| a.infer_cwd(&session.transcript_path));
-
-        let record = SessionRecord {
-            session_id: session.session_id.clone(),
-            stream_kind: "transcript".to_string(),
-            tool: session.tool.clone(),
-            transcript_path: session.transcript_path.display().to_string(),
-            transcript_format: session.transcript_format.to_string(),
-            watermark_type: session.watermark_type.to_string(),
-            watermark_value: session.initial_watermark.serialize(),
-            external_session_id: session.external_session_id.clone(),
-            external_parent_session_id: session.external_parent_session_id.clone(),
-            first_seen_at: now,
-            last_processed_at: 0,
-            last_known_size: 0,
-            last_modified: None,
-            processing_errors: 0,
-            last_error: None,
-            repo_work_dir: inferred_cwd.map(|p| p.display().to_string()),
-        };
-
-        self.transcripts_db.insert_session(&record)?;
-        Ok(())
-    }
-
     fn canonicalize_path(path: &PathBuf) -> PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())
     }
@@ -148,4 +121,6 @@ pub struct SessionToProcess {
     pub session_id: String,
     pub tool: String,
     pub canonical_path: PathBuf,
+    pub external_session_id: String,
+    pub external_parent_session_id: Option<String>,
 }

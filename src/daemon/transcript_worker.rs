@@ -89,6 +89,7 @@ pub struct TranscriptWorkerHandle {
 
 impl TranscriptWorkerHandle {
     /// Notify the worker that a checkpoint was recorded.
+    #[allow(clippy::too_many_arguments)]
     pub fn notify_checkpoint(
         &self,
         session_id: String,
@@ -97,6 +98,8 @@ impl TranscriptWorkerHandle {
         tool_use_id: Option<String>,
         transcript_path: PathBuf,
         repo_work_dir: Option<PathBuf>,
+        external_session_id: String,
+        external_parent_session_id: Option<String>,
     ) {
         let notification = CheckpointNotification {
             session_id,
@@ -105,6 +108,8 @@ impl TranscriptWorkerHandle {
             tool_use_id,
             transcript_path,
             repo_work_dir,
+            external_session_id,
+            external_parent_session_id,
         };
         let _ = self.checkpoint_tx.send(notification);
     }
@@ -118,6 +123,8 @@ struct CheckpointNotification {
     tool_use_id: Option<String>,
     transcript_path: PathBuf,
     repo_work_dir: Option<PathBuf>,
+    external_session_id: String,
+    external_parent_session_id: Option<String>,
 }
 
 /// Worker that processes transcript changes.
@@ -214,11 +221,9 @@ impl TranscriptWorker {
             let agent = crate::transcripts::agent::get_agent(&session.tool);
             let streams = agent.as_ref().map(|a| a.streams()).unwrap_or_default();
 
-            let transcript_record = self
-                .transcripts_db
-                .get_session(&session.session_id, "transcript")
-                .ok()
-                .flatten();
+            let inferred_cwd = agent
+                .as_ref()
+                .and_then(|a| a.infer_cwd(&session.canonical_path));
 
             for stream in streams {
                 let stream_path = match stream.resolve_path(&session.canonical_path) {
@@ -226,24 +231,15 @@ impl TranscriptWorker {
                     _ => continue,
                 };
 
-                if stream.stream_kind != "transcript"
-                    && let Err(e) = self.ensure_stream_session(
-                        &session.session_id,
-                        &session.tool,
-                        &stream,
-                        &stream_path,
-                        transcript_record
-                            .as_ref()
-                            .map(|r| r.external_session_id.as_str()),
-                        transcript_record
-                            .as_ref()
-                            .and_then(|r| r.external_parent_session_id.as_deref()),
-                        transcript_record
-                            .as_ref()
-                            .and_then(|r| r.repo_work_dir.as_deref())
-                            .map(Path::new),
-                    )
-                {
+                if let Err(e) = self.ensure_stream_session(
+                    &session.session_id,
+                    &session.tool,
+                    &stream,
+                    &stream_path,
+                    Some(session.external_session_id.as_str()),
+                    session.external_parent_session_id.as_deref(),
+                    inferred_cwd.as_deref(),
+                ) {
                     tracing::warn!(
                         session_id = %session.session_id,
                         stream_kind = %stream.stream_kind,
@@ -267,7 +263,7 @@ impl TranscriptWorker {
                     trace_id: None,
                     tool_use_id: None,
                     canonical_path: stream_path,
-                    repo_work_dir: None,
+                    repo_work_dir: inferred_cwd.clone(),
                     retry_count: 0,
                     next_retry_at: None,
                 });
@@ -285,33 +281,21 @@ impl TranscriptWorker {
         let agent = crate::transcripts::agent::get_agent(&notification.tool);
         let streams = agent.as_ref().map(|a| a.streams()).unwrap_or_default();
 
-        let transcript_record = self
-            .transcripts_db
-            .get_session(&notification.session_id, "transcript")
-            .ok()
-            .flatten();
-
         for stream in streams {
             let stream_path = match stream.resolve_path(&canonical_path) {
                 Some(p) if p.exists() => p,
                 _ => continue,
             };
 
-            if stream.stream_kind != "transcript"
-                && let Err(e) = self.ensure_stream_session(
-                    &notification.session_id,
-                    &notification.tool,
-                    &stream,
-                    &stream_path,
-                    transcript_record
-                        .as_ref()
-                        .map(|r| r.external_session_id.as_str()),
-                    transcript_record
-                        .as_ref()
-                        .and_then(|r| r.external_parent_session_id.as_deref()),
-                    notification.repo_work_dir.as_deref(),
-                )
-            {
+            if let Err(e) = self.ensure_stream_session(
+                &notification.session_id,
+                &notification.tool,
+                &stream,
+                &stream_path,
+                Some(notification.external_session_id.as_str()),
+                notification.external_parent_session_id.as_deref(),
+                notification.repo_work_dir.as_deref(),
+            ) {
                 tracing::warn!(
                     session_id = %notification.session_id,
                     stream_kind = %stream.stream_kind,
@@ -1007,6 +991,8 @@ mod subagent_sweep_tests {
             tool_use_id: None,
             transcript_path: main_transcript.clone(),
             repo_work_dir: Some(tmp.path().to_path_buf()),
+            external_session_id: "sess-abc".to_string(),
+            external_parent_session_id: None,
         };
 
         worker.sweep_subagents_for_session(&notification);
@@ -1046,6 +1032,8 @@ mod subagent_sweep_tests {
             tool_use_id: None,
             transcript_path: main_transcript,
             repo_work_dir: None,
+            external_session_id: "sess-xyz".to_string(),
+            external_parent_session_id: None,
         };
 
         worker.sweep_subagents_for_session(&notification);
@@ -1075,6 +1063,8 @@ mod subagent_sweep_tests {
             tool_use_id: None,
             transcript_path: main_transcript,
             repo_work_dir: None,
+            external_session_id: "sess-abc".to_string(),
+            external_parent_session_id: None,
         };
 
         worker.handle_checkpoint_notification(notification).await;
@@ -1118,6 +1108,8 @@ mod subagent_sweep_tests {
             tool_use_id: None,
             transcript_path: main_transcript,
             repo_work_dir: None,
+            external_session_id: "sess-dup".to_string(),
+            external_parent_session_id: None,
         };
 
         worker.sweep_subagents_for_session(&notification);

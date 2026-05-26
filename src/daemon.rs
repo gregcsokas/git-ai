@@ -7479,18 +7479,6 @@ impl ActorDaemonCoordinator {
 
                     let repo_work_dir = request.files.first().map(|f| f.repo_work_dir.clone());
 
-                    if let Some(db) = &self.transcripts_db
-                        && let Err(e) = Self::ensure_session_exists(
-                            db,
-                            &session_id,
-                            &tool,
-                            transcript_source,
-                            repo_work_dir.as_deref(),
-                        )
-                    {
-                        tracing::warn!(session_id = %session_id, error = %e, "failed to ensure session exists");
-                    }
-
                     worker.notify_checkpoint(
                         session_id,
                         tool,
@@ -7498,6 +7486,8 @@ impl ActorDaemonCoordinator {
                         tool_use_id,
                         transcript_source.path.clone(),
                         repo_work_dir,
+                        transcript_source.external_session_id.clone(),
+                        transcript_source.external_parent_session_id.clone(),
                     );
                 }
 
@@ -7646,74 +7636,6 @@ impl ActorDaemonCoordinator {
             Ok(response) => response,
             Err(error) => ControlResponse::err(error.to_string()),
         }
-    }
-
-    fn ensure_session_exists(
-        db: &crate::transcripts::db::TranscriptsDatabase,
-        session_id: &str,
-        tool: &str,
-        transcript_source: &crate::commands::checkpoint_agent::presets::TranscriptSource,
-        repo_work_dir: Option<&std::path::Path>,
-    ) -> Result<(), String> {
-        // Check if session exists
-        if db
-            .get_session(session_id, "transcript")
-            .map_err(|e| e.to_string())?
-            .is_some()
-        {
-            return Ok(());
-        }
-
-        // Create new session record
-        let now = chrono::Utc::now().timestamp();
-
-        let watermark_type = transcript_source.format.watermark_type();
-
-        let initial_watermark = match watermark_type {
-            crate::transcripts::watermark::WatermarkType::ByteOffset => {
-                Box::new(crate::transcripts::watermark::ByteOffsetWatermark::new(0))
-                    as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
-            }
-            crate::transcripts::watermark::WatermarkType::RecordIndex => {
-                Box::new(crate::transcripts::watermark::RecordIndexWatermark::new(0))
-                    as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
-            }
-            crate::transcripts::watermark::WatermarkType::Timestamp => {
-                Box::new(crate::transcripts::watermark::TimestampWatermark::new(
-                    chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
-                )) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
-            }
-            crate::transcripts::watermark::WatermarkType::Hybrid => Box::new(
-                crate::transcripts::watermark::HybridWatermark::new(0, 0, None),
-            )
-                as Box<dyn crate::transcripts::watermark::WatermarkStrategy>,
-            crate::transcripts::watermark::WatermarkType::TimestampCursor => {
-                Box::new(crate::transcripts::watermark::TimestampCursorWatermark::initial())
-                    as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
-            }
-        };
-
-        let record = crate::transcripts::db::SessionRecord {
-            session_id: session_id.to_string(),
-            stream_kind: "transcript".to_string(),
-            tool: tool.to_string(),
-            transcript_path: transcript_source.path.display().to_string(),
-            transcript_format: format!("{:?}", transcript_source.format),
-            watermark_type: format!("{:?}", watermark_type),
-            watermark_value: initial_watermark.serialize(),
-            external_session_id: transcript_source.external_session_id.clone(),
-            external_parent_session_id: transcript_source.external_parent_session_id.clone(),
-            first_seen_at: now,
-            last_processed_at: 0,
-            last_known_size: 0,
-            last_modified: None,
-            processing_errors: 0,
-            last_error: None,
-            repo_work_dir: repo_work_dir.map(|p| p.display().to_string()),
-        };
-
-        db.insert_session(&record).map_err(|e| e.to_string())?;
-        Ok(())
     }
 
     fn store_wrapper_state(
