@@ -662,7 +662,7 @@ impl TranscriptWorker {
                 .events
                 .into_iter()
                 .enumerate()
-                .map(|(idx, raw_event)| {
+                .filter_map(|(idx, raw_event)| {
                     let (eid, pid, tid) = agent.extract_event_ids(&raw_event);
                     let is_first_event = is_initial_watermark && total_events == 0 && idx == 0;
                     let event_ts = match &file_meta {
@@ -681,6 +681,7 @@ impl TranscriptWorker {
 
                     // For shared OTEL streams, derive per-event session_id from the
                     // span's chat_session_id (or conversation_id as fallback).
+                    // Drop spans that have neither.
                     if is_otel_stream {
                         let span = raw_event.get("span");
                         let effective_sid = span
@@ -692,18 +693,16 @@ impl TranscriptWorker {
                                     .and_then(|v| v.as_str())
                                     .filter(|s| !s.is_empty())
                             });
-                        if let Some(sid) = effective_sid {
-                            let derived_session_id =
-                                generate_session_id(sid, &session.tool);
-                            event_attrs = event_attrs
-                                .session_id(derived_session_id)
-                                .external_session_id(sid.to_string());
-                        }
+                        let sid = effective_sid?;
+                        let derived_session_id = generate_session_id(sid, &session.tool);
+                        event_attrs = event_attrs
+                            .session_id(derived_session_id)
+                            .external_session_id(sid.to_string());
                     }
 
                     let attrs_sparse = event_attrs.to_sparse();
                     let raw_event = redact_json_secrets(raw_event);
-                    if is_otel_stream {
+                    Some(if is_otel_stream {
                         MetricEvent::from_values_with_timestamp(
                             OtelTraceValues::with_ids(raw_event, eid, pid, tid),
                             attrs_sparse,
@@ -715,7 +714,7 @@ impl TranscriptWorker {
                             attrs_sparse,
                             Some(event_ts),
                         )
-                    }
+                    })
                 })
                 .collect();
 
