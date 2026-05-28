@@ -331,7 +331,6 @@ fn execute_resolved_checkpoint(
             "[BENCHMARK] Appending checkpoint to working log took {:?}",
             append_start.elapsed()
         );
-
         checkpoints.push(checkpoint.clone());
 
         let mut attrs =
