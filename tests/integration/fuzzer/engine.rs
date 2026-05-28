@@ -372,7 +372,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut operation_log,
                         config.seed,
                     );
-                    registry.mark_all_unverifiable();
                 }
                 RewriteOp::Rebase => {
                     execute_rebase_same_file(
@@ -384,9 +383,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    // Daemon rebase handling has known attribution gaps — mark existing
-                    // chars unverifiable since notes may not transfer correctly.
-                    registry.mark_all_unverifiable();
                 }
                 RewriteOp::SquashMerge => {
                     execute_squash_same_file(
@@ -397,8 +393,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    // Squash merge rewrites history — mark existing chars unverifiable.
-                    registry.mark_all_unverifiable();
                 }
             }
             verify_main_file_with_retention(
@@ -850,7 +844,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    registry.mark_all_unverifiable();
                     verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::Thrash => {
@@ -883,7 +876,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    registry.mark_all_unverifiable();
                     verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::CheckpointNonexistent => {
@@ -906,7 +898,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut operation_log,
                         config.seed,
                     );
-                    registry.mark_all_unverifiable();
                 }
                 StressOp::ExponentialAmend => {
                     execute_exponential_amend(
@@ -1017,14 +1008,10 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    registry.mark_all_unverifiable();
                 }
             }
         } else if file_state.lines.len() > 2 && roll < cumulative_combined {
             // === COMBINED OPERATIONS ===
-            // Most combined ops use git_og for rebase/merge/cherry-pick which bypasses
-            // the daemon. Mark all existing chars unverifiable preemptively.
-            registry.mark_all_unverifiable();
             let op = generators::gen_combined_op(&mut rng);
             match op {
                 CombinedOp::CherryPickConflict => {
@@ -1471,9 +1458,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     );
                 }
             }
-            // Mark all chars (including newly allocated ones) as unverifiable after
-            // combined ops since most involve git_og rebase/merge/cherry-pick.
-            registry.mark_all_unverifiable();
             verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
         } else if file_state.lines.len() > 2 && roll < cumulative_workflow {
             // === WORKFLOW OPERATIONS ===
@@ -1690,25 +1674,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     actual.len()
                 ));
                 file_state.lines = actual;
-            }
-            // Workflow ops that use git_og for rebase/merge/cherry-pick bypass the daemon,
-            // so authorship notes are not transferred and the daemon's state may be
-            // inconsistent with the new HEAD. Mark ALL existing chars as unverifiable
-            // since even subsequent daemon commits may reference old working log bases.
-            // Only chars allocated AFTER this point (in future operations) will be verified.
-            match op {
-                WorkflowOp::BranchLifecycle
-                | WorkflowOp::FixupAutosquash
-                | WorkflowOp::CherryPickNoCommit
-                | WorkflowOp::CherryPickRange
-                | WorkflowOp::RebaseOnto
-                | WorkflowOp::MergeSquashDirect
-                | WorkflowOp::RebaseConflictContinue
-                | WorkflowOp::RevertCherrypick
-                | WorkflowOp::MultiBranchMerge => {
-                    registry.mark_all_unverifiable();
-                }
-                _ => {}
             }
         } else {
             // === STANDARD MULTI-EDIT COMMIT ===
