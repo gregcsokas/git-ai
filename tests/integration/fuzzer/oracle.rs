@@ -461,8 +461,10 @@ impl CharRegistry {
             if has_attributed && !attestation_section.contains(filename) {
                 panic!(
                     "File '{}' has attributed lines but is missing from authorship note\n\
-                     Note:\n{}",
-                    filename, note
+                     Seed: {}\n\
+                     Note:\n{}\n\
+                     Operation log:\n{}",
+                    filename, seed, note, operation_log.join("\n")
                 );
             }
         }
