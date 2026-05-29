@@ -352,11 +352,11 @@ try {
 } catch { }
 
 if ($isElevated -and $env:GIT_AI_ALLOW_SUPERUSER -ne '1') {
-    # Auto-allow in CI environments
+    # Auto-allow in CI environments and daemon-triggered self-updates
     $isCi = $env:CI -or $env:GITHUB_ACTIONS -or $env:GITLAB_CI -or $env:JENKINS_URL `
         -or $env:BUILDKITE -or $env:CIRCLECI -or $env:CODEBUILD_BUILD_ID `
         -or $env:AGENT_OS -or $env:KUBERNETES_SERVICE_HOST `
-        -or $env:GIT_AI_RESTART_DAEMON_AFTER_INSTALL
+        -or $env:GIT_AI_DAEMON_UPGRADE
 
     if (-not $isCi) {
         Write-Host ''

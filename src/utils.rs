@@ -249,10 +249,12 @@ pub fn is_superuser_expected_environment() -> bool {
     false
 }
 
-/// Returns true if the user has explicitly opted in to running as superuser.
+/// Returns true if the user has explicitly opted in to running as superuser
+/// via the `GIT_AI_ALLOW_SUPERUSER` env var or `allow_superuser` config flag.
 pub fn superuser_is_allowed() -> bool {
     std::env::var("GIT_AI_ALLOW_SUPERUSER")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        || crate::config::Config::get().allow_superuser()
 }
 
 pub enum SuperuserCheckResult {

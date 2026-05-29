@@ -176,13 +176,13 @@ detect_all_shells() {
 # ============================================================
 if [ "$(id -u)" = "0" ] && [ "${GIT_AI_ALLOW_SUPERUSER:-}" != "1" ]; then
     # Auto-allow in CI environments, MDM deployments (JAMF, etc.),
-    # and daemon-triggered self-updates (GIT_AI_RELEASE_TAG is set by upgrade command)
+    # and daemon-triggered self-updates (GIT_AI_DAEMON_UPGRADE is set internally by the upgrade command)
     IS_CI_OR_MDM=false
     if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${GITLAB_CI:-}" ] \
         || [ -n "${JENKINS_URL:-}" ] || [ -n "${BUILDKITE:-}" ] || [ -n "${CIRCLECI:-}" ] \
         || [ -n "${CODEBUILD_BUILD_ID:-}" ] || [ -n "${AGENT_OS:-}" ] \
         || [ -n "${KUBERNETES_SERVICE_HOST:-}" ] || [ -n "${INSTALL_USER:-}" ] \
-        || [ -n "${GIT_AI_RELEASE_TAG:-}" ]; then
+        || [ -n "${GIT_AI_DAEMON_UPGRADE:-}" ]; then
         IS_CI_OR_MDM=true
     fi
 
