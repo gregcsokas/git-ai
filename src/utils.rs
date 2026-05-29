@@ -246,6 +246,9 @@ pub fn is_superuser_expected_environment() -> bool {
     if std::env::var_os("KUBERNETES_SERVICE_HOST").is_some() {
         return true;
     }
+    if std::env::var_os("GIT_AI_DAEMON_UPGRADE").is_some() {
+        return true;
+    }
     false
 }
 
