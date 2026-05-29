@@ -9,7 +9,7 @@ use super::generators::{
     WorkflowOp,
 };
 use super::operations::{
-    EditParams, FileState, execute_alternating_amend, execute_alternating_amend_storm,
+    EditParams, FileState, execute_alternating_amend, execute_alternating_amend_storm, git,
     execute_amend_attribution_flip, execute_amend_chain, execute_amend_reset_cycle,
     execute_amend_shrink, execute_amend_with_deletion, execute_branch_switch_dirty,
     execute_checkout_discard, execute_checkpoint_nonexistent, execute_checkpoint_storm,
@@ -484,8 +484,8 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut operation_log,
                     );
                     if !file_state.lines.is_empty() {
-                        repo.git(&["add", "-A"]).unwrap();
-                        let status = repo.git(&["status", "--porcelain"]).unwrap();
+                        git(&repo, &["add", "-A"]).unwrap();
+                        let status = git(&repo, &["status", "--porcelain"]).unwrap();
                         if !status.trim().is_empty() {
                             repo.commit("commit after stash pop").unwrap();
                         }
@@ -511,7 +511,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                             &mut rng,
                             &mut operation_log,
                         );
-                        repo.git(&["add", "-A"]).unwrap();
+                        git(&repo, &["add", "-A"]).unwrap();
                         repo.commit("bootstrap secondary for stash pathspec")
                             .unwrap();
                     }
@@ -620,7 +620,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 ));
                 file_state.lines = actual;
             }
-            let status = repo.git(&["status", "--porcelain"]).unwrap();
+            let status = git(&repo, &["status", "--porcelain"]).unwrap();
             if status.trim().is_empty() && !file_state.lines.is_empty() {
                 verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
             }
@@ -651,7 +651,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         );
                     }
                     if !result.unstaged_lines.is_empty() {
-                        repo.git(&["add", "-A"]).unwrap();
+                        git(&repo, &["add", "-A"]).unwrap();
                         repo.commit("partial-stage: commit remaining").unwrap();
                     }
                     // Now verify against the full working tree
@@ -675,9 +675,9 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    let status = repo.git(&["status", "--porcelain"]).unwrap();
+                    let status = git(&repo, &["status", "--porcelain"]).unwrap();
                     if !status.trim().is_empty() {
-                        repo.git(&["add", "-A"]).unwrap();
+                        git(&repo, &["add", "-A"]).unwrap();
                         repo.commit("selective: commit remaining dirty files")
                             .unwrap();
                     }
@@ -855,7 +855,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    let status = repo.git(&["status", "--porcelain"]).unwrap();
+                    let status = git(&repo, &["status", "--porcelain"]).unwrap();
                     if status.trim().is_empty() && !file_state.lines.is_empty() {
                         verify_main_file(
                             &repo,
@@ -1811,7 +1811,7 @@ fn verify_main_file_with_retention(
         config.seed,
     );
     if config.verify_sessions {
-        let head_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let head_sha = git(&repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
         if let Some(note) = repo.read_authorship_note(&head_sha)
             && note.contains(&file_state.filename)
         {

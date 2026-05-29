@@ -7,7 +7,7 @@ use crate::repos::test_repo::TestRepo;
 
 use super::generators::{EditStrategy, gen_attribution, gen_line_count};
 use super::operations::{
-    EditParams, FileState, checkpoint_with_dirty_files, execute_edit_and_checkpoint,
+    EditParams, FileState, checkpoint_with_dirty_files, execute_edit_and_checkpoint, git,
     read_file_state_from_disk,
     reconstruct_lines_from_content,
 };
@@ -44,13 +44,13 @@ pub fn execute_plumbing_commit_tree(
     }
 
     // Stage everything
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
 
     // Get the current HEAD sha for parent
-    let parent_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let parent_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Write the tree object from the index
-    let tree_sha = repo.git(&["write-tree"]).unwrap().trim().to_string();
+    let tree_sha = git(repo, &["write-tree"]).unwrap().trim().to_string();
 
     // Create the commit object directly
     let commit_sha = repo
@@ -67,11 +67,11 @@ pub fn execute_plumbing_commit_tree(
         .to_string();
 
     // Advance HEAD using update-ref
-    repo.git(&["update-ref", "HEAD", &commit_sha]).unwrap();
+    git(repo, &["update-ref", "HEAD", &commit_sha]).unwrap();
 
     // Amend to trigger the post-commit hook which generates the authorship note.
     // In practice, tools like Graphite run their own post-commit equivalent.
-    repo.git(&["commit", "--amend", "--no-edit"]).unwrap();
+    git(repo, &["commit", "--amend", "--no-edit"]).unwrap();
 
     operation_log.push(format!(
         "plumbing-commit-tree: created commit {} via plumbing (then amend for note)",
@@ -118,11 +118,11 @@ pub fn execute_plumbing_rapid_update_ref(
         execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
 
         // Stage
-        repo.git(&["add", "-A"]).unwrap();
+        git(repo, &["add", "-A"]).unwrap();
 
         // Plumbing commit
-        let parent_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-        let tree_sha = repo.git(&["write-tree"]).unwrap().trim().to_string();
+        let parent_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let tree_sha = git(repo, &["write-tree"]).unwrap().trim().to_string();
         let commit_sha = repo
             .git(&[
                 "commit-tree",
@@ -135,10 +135,10 @@ pub fn execute_plumbing_rapid_update_ref(
             .unwrap()
             .trim()
             .to_string();
-        repo.git(&["update-ref", "HEAD", &commit_sha]).unwrap();
+        git(repo, &["update-ref", "HEAD", &commit_sha]).unwrap();
 
         // Amend to trigger post-commit hook for authorship note generation
-        repo.git(&["commit", "--amend", "--no-edit"]).unwrap();
+        git(repo, &["commit", "--amend", "--no-edit"]).unwrap();
 
         operation_log.push(format!(
             "plumbing-rapid-update-ref: cycle {} commit {} (amend for note)",
@@ -183,7 +183,7 @@ pub fn execute_workflow_branch_lifecycle(
     let pre_branch_lines = file_state.lines.clone();
 
     // Create feature branch
-    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+    git(repo, &["checkout", "-b", &branch_name]).unwrap();
 
     // Make 3-5 commits with mixed attribution on feature branch (append only)
     let commit_count = rng.random_range(3..=5);
@@ -197,14 +197,14 @@ pub fn execute_workflow_branch_lifecycle(
             };
             execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
         }
-        repo.git(&["add", "-A"]).unwrap();
+        git(repo, &["add", "-A"]).unwrap();
         repo.commit(&format!("lifecycle feature commit {}", i))
             .unwrap();
     }
     let feature_lines = file_state.lines.clone();
 
     // Switch to main, make a commit (prepend to avoid conflicts)
-    repo.git(&["checkout", &main_branch]).unwrap();
+    git(repo, &["checkout", &main_branch]).unwrap();
     let pre_branch_len = pre_branch_lines.len();
     file_state.lines = pre_branch_lines;
     // Re-read from disk
@@ -216,17 +216,17 @@ pub fn execute_workflow_branch_lifecycle(
         line_count: gen_line_count(rng, max_lines.min(2)),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &main_params, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("lifecycle: advance main").unwrap();
     let main_new_lines = file_state.lines.clone();
 
     // Switch back to feature, rebase onto main
-    repo.git(&["checkout", &branch_name]).unwrap();
-    let rebase_result = repo.git(&["rebase", &main_branch]);
+    git(repo, &["checkout", &branch_name]).unwrap();
+    let rebase_result = git(repo, &["rebase", &main_branch]);
     if rebase_result.is_err() {
-        repo.git(&["rebase", "--abort"]).ok();
-        repo.git(&["checkout", &main_branch]).unwrap();
-        repo.git(&["branch", "-D", &branch_name]).ok();
+        git(repo, &["rebase", "--abort"]).ok();
+        git(repo, &["checkout", &main_branch]).unwrap();
+        git(repo, &["branch", "-D", &branch_name]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         operation_log.push("workflow-branch-lifecycle: rebase conflict, aborted".to_string());
         return;
@@ -239,14 +239,14 @@ pub fn execute_workflow_branch_lifecycle(
     file_state.lines = expected_lines;
 
     // Switch to main, merge feature
-    repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git(&["merge", &branch_name]).unwrap();
+    git(repo, &["checkout", &main_branch]).unwrap();
+    git(repo, &["merge", &branch_name]).unwrap();
 
     // Re-read from disk
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Cleanup
-    repo.git(&["branch", "-d", &branch_name]).ok();
+    git(repo, &["branch", "-d", &branch_name]).ok();
 
     operation_log.push("workflow-branch-lifecycle: done".to_string());
 }
@@ -280,7 +280,7 @@ pub fn execute_workflow_stash_sandwich(
     let stashed_lines = file_state.lines.clone();
 
     // Stash the changes
-    repo.git(&["stash", "push", "-m", "sandwich stash"])
+    git(repo, &["stash", "push", "-m", "sandwich stash"])
         .unwrap();
     repo.sync_daemon_force();
     file_state.lines = pre_stash_lines.clone();
@@ -300,16 +300,16 @@ pub fn execute_workflow_stash_sandwich(
         };
         execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
     }
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("stash-sandwich: interim commit").unwrap();
 
     let post_commit_lines = file_state.lines.clone();
 
     // Pop the stash
-    let pop_result = repo.git(&["stash", "pop"]);
+    let pop_result = git(repo, &["stash", "pop"]);
     if pop_result.is_err() {
-        repo.git(&["reset", "--hard", "HEAD"]).ok();
-        repo.git(&["stash", "drop"]).ok();
+        git(repo, &["reset", "--hard", "HEAD"]).ok();
+        git(repo, &["stash", "drop"]).ok();
         operation_log.push("workflow-stash-sandwich: conflict on pop, dropped".to_string());
         return;
     }
@@ -334,8 +334,8 @@ pub fn execute_workflow_stash_sandwich(
     }
 
     // Commit the popped state
-    repo.git(&["add", "-A"]).unwrap();
-    let status = repo.git(&["status", "--porcelain"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
+    let status = git(repo, &["status", "--porcelain"]).unwrap();
     if !status.trim().is_empty() {
         repo.commit("stash-sandwich: commit after pop").unwrap();
     }
@@ -367,7 +367,7 @@ pub fn execute_workflow_fixup_autosquash(
     operation_log.push("workflow-fixup-autosquash: starting".to_string());
 
     // Remember HEAD before we start
-    let base_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let base_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Main commit: "feat: main work"
     let main_params = EditParams {
@@ -380,7 +380,7 @@ pub fn execute_workflow_fixup_autosquash(
         line_count: gen_line_count(rng, max_lines),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &main_params, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("feat: main work").unwrap();
 
     // Make 2-3 fixup commits, each with different attribution
@@ -392,7 +392,7 @@ pub fn execute_workflow_fixup_autosquash(
             line_count: gen_line_count(rng, max_lines.min(2)),
         };
         execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
-        repo.git(&["add", "-A"]).unwrap();
+        git(repo, &["add", "-A"]).unwrap();
         repo.commit(&format!("fixup! feat: main work (fix {})", i))
             .unwrap();
     }
@@ -401,7 +401,7 @@ pub fn execute_workflow_fixup_autosquash(
     let total_commits = 1 + fixup_count;
 
     // Real autosquash rebase
-    let rebase_result = repo.git(&[
+    let rebase_result = git(repo, &[
         "-c",
         "sequence.editor=true",
         "rebase",
@@ -411,10 +411,10 @@ pub fn execute_workflow_fixup_autosquash(
 
     if rebase_result.is_err() {
         // Abort the failed rebase before retrying with a different base
-        repo.git(&["rebase", "--abort"]).ok();
+        git(repo, &["rebase", "--abort"]).ok();
 
         // Fallback: try with the base sha directly
-        let rebase_result2 = repo.git(&[
+        let rebase_result2 = git(repo, &[
             "-c",
             "sequence.editor=true",
             "rebase",
@@ -422,7 +422,7 @@ pub fn execute_workflow_fixup_autosquash(
             &base_sha,
         ]);
         if rebase_result2.is_err() {
-            repo.git(&["rebase", "--abort"]).ok();
+            git(repo, &["rebase", "--abort"]).ok();
             operation_log.push("workflow-fixup-autosquash: rebase failed, aborted".to_string());
             return;
         }
@@ -452,26 +452,26 @@ pub fn execute_cherry_pick_no_commit(
     let branch_name = format!("cpnc-{}", registry.next_index());
 
     // Create branch and make a commit with attributed content (append only)
-    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+    git(repo, &["checkout", "-b", &branch_name]).unwrap();
     let params = EditParams {
         attribution: gen_attribution(rng),
         strategy: EditStrategy::Append,
         line_count: gen_line_count(rng, max_lines.min(4)),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("cpnc: feature commit").unwrap();
-    let feature_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let feature_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Switch back to main (file reverts)
-    repo.git(&["checkout", &main_branch]).unwrap();
+    git(repo, &["checkout", &main_branch]).unwrap();
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Cherry-pick with --no-commit
-    let cp_result = repo.git(&["cherry-pick", "--no-commit", &feature_sha]);
+    let cp_result = git(repo, &["cherry-pick", "--no-commit", &feature_sha]);
     if cp_result.is_err() {
-        repo.git(&["cherry-pick", "--abort"]).ok();
-        repo.git(&["branch", "-D", &branch_name]).ok();
+        git(repo, &["cherry-pick", "--abort"]).ok();
+        git(repo, &["branch", "-D", &branch_name]).ok();
         operation_log.push("cherry-pick-no-commit: conflict, aborted".to_string());
         return;
     }
@@ -495,11 +495,11 @@ pub fn execute_cherry_pick_no_commit(
     );
 
     // Commit everything together (goes through proxy, generates authorship note)
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("cpnc: cherry-pick + extra edits").unwrap();
 
     // Cleanup
-    repo.git(&["branch", "-D", &branch_name]).ok();
+    git(repo, &["branch", "-D", &branch_name]).ok();
 
     operation_log.push("cherry-pick-no-commit: done".to_string());
 }
@@ -523,7 +523,7 @@ pub fn execute_cherry_pick_range(
     let branch_name = format!("cprange-{}", registry.next_index());
 
     // Create source branch with multiple commits
-    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+    git(repo, &["checkout", "-b", &branch_name]).unwrap();
     let mut shas = Vec::new();
 
     for i in 0..range_count {
@@ -533,16 +533,16 @@ pub fn execute_cherry_pick_range(
             line_count: gen_line_count(rng, max_lines.min(2)),
         };
         execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
-        repo.git(&["add", "-A"]).unwrap();
+        git(repo, &["add", "-A"]).unwrap();
         repo.commit(&format!("cprange: commit {}", i)).unwrap();
-        shas.push(repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string());
+        shas.push(git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string());
     }
 
     let first_sha = &shas[0];
     let last_sha = &shas[shas.len() - 1];
 
     // Switch back to main
-    repo.git(&["checkout", &main_branch]).unwrap();
+    git(repo, &["checkout", &main_branch]).unwrap();
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Make a divergence commit on main (prepend to avoid conflict)
@@ -552,15 +552,15 @@ pub fn execute_cherry_pick_range(
         line_count: gen_line_count(rng, max_lines.min(2)),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &div_params, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("cprange: divergence on main").unwrap();
 
     // Cherry-pick the range
     let range_spec = format!("{}^..{}", first_sha, last_sha);
-    let cp_result = repo.git(&["cherry-pick", &range_spec]);
+    let cp_result = git(repo, &["cherry-pick", &range_spec]);
     if cp_result.is_err() {
-        repo.git(&["cherry-pick", "--abort"]).ok();
-        repo.git(&["branch", "-D", &branch_name]).ok();
+        git(repo, &["cherry-pick", "--abort"]).ok();
+        git(repo, &["branch", "-D", &branch_name]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         operation_log.push("cherry-pick-range: conflict, aborted".to_string());
         return;
@@ -570,7 +570,7 @@ pub fn execute_cherry_pick_range(
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Cleanup
-    repo.git(&["branch", "-D", &branch_name]).ok();
+    git(repo, &["branch", "-D", &branch_name]).ok();
 
     operation_log.push("cherry-pick-range: done".to_string());
 }
@@ -595,7 +595,7 @@ pub fn execute_rebase_onto(
     let branch_b = format!("onto-b-{}", idx);
 
     // Create branch A from main with 2 commits (append)
-    repo.git(&["checkout", "-b", &branch_a]).unwrap();
+    git(repo, &["checkout", "-b", &branch_a]).unwrap();
     for i in 0..2 {
         let params = EditParams {
             attribution: gen_attribution(rng),
@@ -603,12 +603,12 @@ pub fn execute_rebase_onto(
             line_count: gen_line_count(rng, max_lines.min(2)),
         };
         execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
-        repo.git(&["add", "-A"]).unwrap();
+        git(repo, &["add", "-A"]).unwrap();
         repo.commit(&format!("onto-a: commit {}", i)).unwrap();
     }
 
     // Create branch B from A with 2 more commits (append)
-    repo.git(&["checkout", "-b", &branch_b]).unwrap();
+    git(repo, &["checkout", "-b", &branch_b]).unwrap();
     for i in 0..2 {
         let params = EditParams {
             attribution: gen_attribution(rng),
@@ -616,17 +616,17 @@ pub fn execute_rebase_onto(
             line_count: gen_line_count(rng, max_lines.min(2)),
         };
         execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
-        repo.git(&["add", "-A"]).unwrap();
+        git(repo, &["add", "-A"]).unwrap();
         repo.commit(&format!("onto-b: commit {}", i)).unwrap();
     }
 
     // Rebase --onto main A B
-    let rebase_result = repo.git(&["rebase", "--onto", &main_branch, &branch_a, &branch_b]);
+    let rebase_result = git(repo, &["rebase", "--onto", &main_branch, &branch_a, &branch_b]);
     if rebase_result.is_err() {
-        repo.git(&["rebase", "--abort"]).ok();
-        repo.git(&["checkout", &main_branch]).unwrap();
-        repo.git(&["branch", "-D", &branch_a]).ok();
-        repo.git(&["branch", "-D", &branch_b]).ok();
+        git(repo, &["rebase", "--abort"]).ok();
+        git(repo, &["checkout", &main_branch]).unwrap();
+        git(repo, &["branch", "-D", &branch_a]).ok();
+        git(repo, &["branch", "-D", &branch_b]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         operation_log.push("rebase-onto: conflict, aborted".to_string());
         return;
@@ -634,15 +634,15 @@ pub fn execute_rebase_onto(
 
     // We're now on branch_b which has been rebased onto main
     // Move main to point here
-    repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git(&["merge", &branch_b]).unwrap();
+    git(repo, &["checkout", &main_branch]).unwrap();
+    git(repo, &["merge", &branch_b]).unwrap();
 
     // Re-read state from disk
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Cleanup
-    repo.git(&["branch", "-D", &branch_a]).ok();
-    repo.git(&["branch", "-D", &branch_b]).ok();
+    git(repo, &["branch", "-D", &branch_a]).ok();
+    git(repo, &["branch", "-D", &branch_b]).ok();
 
     operation_log.push("rebase-onto: done".to_string());
 }
@@ -707,7 +707,7 @@ pub fn execute_rapid_multi_file_burst(
     execute_edit_and_checkpoint(repo, file_state, registry, &main_params, rng, operation_log);
 
     // Single commit for all
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("rapid-multi-file-burst: all at once").unwrap();
 
     // Verify each file independently
@@ -748,7 +748,7 @@ pub fn execute_merge_squash_direct(
     let pre_branch_lines = file_state.lines.clone();
 
     // Create branch with commits (append to avoid conflicts)
-    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+    git(repo, &["checkout", "-b", &branch_name]).unwrap();
     let commit_count = rng.random_range(2..=4);
     for i in 0..commit_count {
         let params = EditParams {
@@ -757,12 +757,12 @@ pub fn execute_merge_squash_direct(
             line_count: gen_line_count(rng, max_lines.min(3)),
         };
         execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
-        repo.git(&["add", "-A"]).unwrap();
+        git(repo, &["add", "-A"]).unwrap();
         repo.commit(&format!("msquash: branch commit {}", i))
             .unwrap();
     }
     // Back on main, make a commit too (prepend so it's not ff)
-    repo.git(&["checkout", &main_branch]).unwrap();
+    git(repo, &["checkout", &main_branch]).unwrap();
     file_state.lines = pre_branch_lines;
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
@@ -772,15 +772,15 @@ pub fn execute_merge_squash_direct(
         line_count: gen_line_count(rng, max_lines.min(2)),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &main_params, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("msquash: advance main").unwrap();
 
     // Merge --squash branch
-    let squash_result = repo.git(&["merge", "--squash", &branch_name]);
+    let squash_result = git(repo, &["merge", "--squash", &branch_name]);
     if squash_result.is_err() {
         // Conflict - abort
-        repo.git(&["reset", "--hard", "HEAD"]).unwrap();
-        repo.git(&["branch", "-D", &branch_name]).ok();
+        git(repo, &["reset", "--hard", "HEAD"]).unwrap();
+        git(repo, &["branch", "-D", &branch_name]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         operation_log.push("merge-squash-direct: conflict, aborted".to_string());
         return;
@@ -796,7 +796,7 @@ pub fn execute_merge_squash_direct(
     // won't be tracked. File state is updated for the engine's next verification.
 
     // Cleanup
-    repo.git(&["branch", "-D", &branch_name]).ok();
+    git(repo, &["branch", "-D", &branch_name]).ok();
 
     operation_log.push("merge-squash-direct: done".to_string());
 }
@@ -827,12 +827,12 @@ pub fn execute_rebase_conflict_continue(
             line_count: gen_line_count(rng, max_lines),
         };
         execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
-        repo.git(&["add", "-A"]).unwrap();
+        git(repo, &["add", "-A"]).unwrap();
         repo.commit("rebase-conflict: bootstrap").unwrap();
     }
 
     // Create branch and modify existing lines (replace)
-    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+    git(repo, &["checkout", "-b", &branch_name]).unwrap();
     let branch_params = EditParams {
         attribution: gen_attribution(rng),
         strategy: EditStrategy::Prepend,
@@ -846,11 +846,11 @@ pub fn execute_rebase_conflict_continue(
         rng,
         operation_log,
     );
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("rebase-conflict: branch edit").unwrap();
 
     // Switch to main and make conflicting edit at the same location (prepend)
-    repo.git(&["checkout", &main_branch]).unwrap();
+    git(repo, &["checkout", &main_branch]).unwrap();
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     let main_params = EditParams {
@@ -859,12 +859,12 @@ pub fn execute_rebase_conflict_continue(
         line_count: gen_line_count(rng, max_lines.min(3)),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &main_params, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("rebase-conflict: main edit").unwrap();
 
     // Switch to branch and try rebase
-    repo.git(&["checkout", &branch_name]).unwrap();
-    let rebase_result = repo.git(&["rebase", &main_branch]);
+    git(repo, &["checkout", &branch_name]).unwrap();
+    let rebase_result = git(repo, &["rebase", &main_branch]);
 
     if rebase_result.is_err() {
         // Conflict! Resolve by taking "theirs" (main's version)
@@ -873,24 +873,24 @@ pub fn execute_rebase_conflict_continue(
 
         if conflicted.contains("<<<<<<<") {
             // Resolve by accepting theirs (checkout --theirs)
-            repo.git(&["checkout", "--theirs", "--", &file_state.filename])
+            git(repo, &["checkout", "--theirs", "--", &file_state.filename])
                 .unwrap();
-            repo.git(&["add", &file_state.filename]).unwrap();
+            git(repo, &["add", &file_state.filename]).unwrap();
 
-            let continue_result = repo.git(&["rebase", "--continue"]);
+            let continue_result = git(repo, &["rebase", "--continue"]);
             if continue_result.is_err() {
-                repo.git(&["rebase", "--abort"]).ok();
-                repo.git(&["checkout", &main_branch]).unwrap();
-                repo.git(&["branch", "-D", &branch_name]).ok();
+                git(repo, &["rebase", "--abort"]).ok();
+                git(repo, &["checkout", &main_branch]).unwrap();
+                git(repo, &["branch", "-D", &branch_name]).ok();
                 file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
                 operation_log
                     .push("rebase-conflict-continue: continue failed, aborted".to_string());
                 return;
             }
         } else {
-            repo.git(&["rebase", "--abort"]).ok();
-            repo.git(&["checkout", &main_branch]).unwrap();
-            repo.git(&["branch", "-D", &branch_name]).ok();
+            git(repo, &["rebase", "--abort"]).ok();
+            git(repo, &["checkout", &main_branch]).unwrap();
+            git(repo, &["branch", "-D", &branch_name]).ok();
             file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
             operation_log.push("rebase-conflict-continue: no markers, aborted".to_string());
             return;
@@ -898,14 +898,14 @@ pub fn execute_rebase_conflict_continue(
     }
 
     // Merge back to main
-    repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git(&["merge", &branch_name]).ok();
+    git(repo, &["checkout", &main_branch]).unwrap();
+    git(repo, &["merge", &branch_name]).ok();
 
     // Re-read state from disk
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Cleanup
-    repo.git(&["branch", "-D", &branch_name]).ok();
+    git(repo, &["branch", "-D", &branch_name]).ok();
 
     operation_log.push("rebase-conflict-continue: done".to_string());
 }
@@ -935,9 +935,9 @@ pub fn execute_restore_from_commit(
         line_count: gen_line_count(rng, max_lines),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &a_params, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("restore-from-commit: commit A").unwrap();
-    let commit_a_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let commit_a_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
     let commit_a_lines = file_state.lines.clone();
 
     // Make commit B with different content (overwrite or append)
@@ -947,11 +947,11 @@ pub fn execute_restore_from_commit(
         line_count: gen_line_count(rng, max_lines),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &b_params, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("restore-from-commit: commit B").unwrap();
 
     // Restore file from commit A
-    repo.git(&[
+    git(repo, &[
         "restore",
         &format!("--source={}", commit_a_sha),
         "--",
@@ -967,7 +967,7 @@ pub fn execute_restore_from_commit(
     checkpoint_with_dirty_files(repo, file_state, "mock_known_human");
 
     // Commit the restored file
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("restore-from-commit: restored to A").unwrap();
 
     // Verify attribution
@@ -1003,14 +1003,14 @@ pub fn execute_workflow_revert_cherrypick(
         line_count: gen_line_count(rng, max_lines.min(4)),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("revert-cp: original commit").unwrap();
-    let original_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let original_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Revert it
-    let revert_result = repo.git(&["revert", "--no-edit", &original_sha]);
+    let revert_result = git(repo, &["revert", "--no-edit", &original_sha]);
     if revert_result.is_err() {
-        repo.git(&["revert", "--abort"]).ok();
+        git(repo, &["revert", "--abort"]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         operation_log.push("workflow-revert-cherrypick: revert conflict, aborted".to_string());
         return;
@@ -1020,9 +1020,9 @@ pub fn execute_workflow_revert_cherrypick(
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Cherry-pick the ORIGINAL commit back
-    let cp_result = repo.git(&["cherry-pick", &original_sha]);
+    let cp_result = git(repo, &["cherry-pick", &original_sha]);
     if cp_result.is_err() {
-        repo.git(&["cherry-pick", "--abort"]).ok();
+        git(repo, &["cherry-pick", "--abort"]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         operation_log.push("workflow-revert-cherrypick: cherry-pick conflict, aborted".to_string());
         return;
@@ -1059,7 +1059,7 @@ pub fn execute_workflow_multi_branch_merge(
     let mut file_b = FileState::new(&file_b_name);
 
     // Branch A: AI commits on file_a
-    repo.git(&["checkout", "-b", &branch_a]).unwrap();
+    git(repo, &["checkout", "-b", &branch_a]).unwrap();
     let a_commit_count = rng.random_range(2..=3);
     for i in 0..a_commit_count {
         let params = EditParams {
@@ -1072,14 +1072,14 @@ pub fn execute_workflow_multi_branch_merge(
             line_count: gen_line_count(rng, max_lines.min(3)),
         };
         execute_edit_and_checkpoint(repo, &mut file_a, registry, &params, rng, operation_log);
-        repo.git(&["add", "-A"]).unwrap();
+        git(repo, &["add", "-A"]).unwrap();
         repo.commit(&format!("mbmerge: branch A commit {}", i))
             .unwrap();
     }
 
     // Branch B from main: human commits on file_b
-    repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git(&["checkout", "-b", &branch_b]).unwrap();
+    git(repo, &["checkout", &main_branch]).unwrap();
+    git(repo, &["checkout", "-b", &branch_b]).unwrap();
     let b_commit_count = rng.random_range(2..=3);
     for i in 0..b_commit_count {
         let params = EditParams {
@@ -1092,35 +1092,35 @@ pub fn execute_workflow_multi_branch_merge(
             line_count: gen_line_count(rng, max_lines.min(3)),
         };
         execute_edit_and_checkpoint(repo, &mut file_b, registry, &params, rng, operation_log);
-        repo.git(&["add", "-A"]).unwrap();
+        git(repo, &["add", "-A"]).unwrap();
         repo.commit(&format!("mbmerge: branch B commit {}", i))
             .unwrap();
     }
 
     // Back to main, merge A
-    repo.git(&["checkout", &main_branch]).unwrap();
-    let merge_a_result = repo.git(&["merge", &branch_a, "--no-edit"]);
+    git(repo, &["checkout", &main_branch]).unwrap();
+    let merge_a_result = git(repo, &["merge", &branch_a, "--no-edit"]);
     if merge_a_result.is_err() {
-        repo.git(&["merge", "--abort"]).ok();
-        repo.git(&["branch", "-D", &branch_a]).ok();
-        repo.git(&["branch", "-D", &branch_b]).ok();
+        git(repo, &["merge", "--abort"]).ok();
+        git(repo, &["branch", "-D", &branch_a]).ok();
+        git(repo, &["branch", "-D", &branch_b]).ok();
         operation_log.push("workflow-multi-branch-merge: merge A failed".to_string());
         return;
     }
 
     // Merge B
-    let merge_b_result = repo.git(&["merge", &branch_b, "--no-edit"]);
+    let merge_b_result = git(repo, &["merge", &branch_b, "--no-edit"]);
     if merge_b_result.is_err() {
-        repo.git(&["merge", "--abort"]).ok();
-        repo.git(&["branch", "-D", &branch_a]).ok();
-        repo.git(&["branch", "-D", &branch_b]).ok();
+        git(repo, &["merge", "--abort"]).ok();
+        git(repo, &["branch", "-D", &branch_a]).ok();
+        git(repo, &["branch", "-D", &branch_b]).ok();
         operation_log.push("workflow-multi-branch-merge: merge B failed".to_string());
         return;
     }
 
     // Cleanup
-    repo.git(&["branch", "-d", &branch_a]).ok();
-    repo.git(&["branch", "-d", &branch_b]).ok();
+    git(repo, &["branch", "-d", &branch_a]).ok();
+    git(repo, &["branch", "-d", &branch_b]).ok();
 
     operation_log.push("workflow-multi-branch-merge: done".to_string());
 }
@@ -1162,7 +1162,7 @@ pub fn execute_file_cross_rename(
     execute_edit_and_checkpoint(repo, &mut file_b, registry, &b_params, rng, operation_log);
 
     // Commit both
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("cross-rename: initial").unwrap();
 
     // Cross-rename: A -> temp, B -> A, temp -> B
@@ -1176,7 +1176,7 @@ pub fn execute_file_cross_rename(
     fs::rename(&path_temp, &path_b).unwrap();
 
     // Commit the rename
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("cross-rename: swapped").unwrap();
 
     // Cross-rename detection is unreliable in git blame (git may not detect
@@ -1238,7 +1238,7 @@ pub fn execute_file_spaces_path(
     }
 
     // Commit
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("file-spaces-path: commit").unwrap();
 
     // Verify blame works with the spaced filename
@@ -1273,7 +1273,7 @@ pub fn execute_working_log_base_race(
         line_count: gen_line_count(rng, max_lines.min(3)),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &params1, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("wl-race: commit 1").unwrap();
 
     // Verify first commit
@@ -1292,7 +1292,7 @@ pub fn execute_working_log_base_race(
         line_count: gen_line_count(rng, max_lines.min(3)),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &params2, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("wl-race: commit 2").unwrap();
 
     // Verify second commit
@@ -1311,7 +1311,7 @@ pub fn execute_working_log_base_race(
         line_count: gen_line_count(rng, max_lines.min(3)),
     };
     execute_edit_and_checkpoint(repo, file_state, registry, &params3, rng, operation_log);
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("wl-race: commit 3").unwrap();
 
     // Final verification
@@ -1380,7 +1380,7 @@ pub fn execute_interleaved_line_attribution(
     }
 
     // Commit
-    repo.git(&["add", "-A"]).unwrap();
+    git(repo, &["add", "-A"]).unwrap();
     repo.commit("interleaved-line-attribution: mixed commit")
         .unwrap();
 
