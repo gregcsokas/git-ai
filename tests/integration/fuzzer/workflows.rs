@@ -15,8 +15,6 @@ use super::oracle::{Attribution, CharRegistry};
 /// Uses git plumbing (write-tree, commit-tree, update-ref) to create a commit
 /// without going through `git commit`. This exercises the daemon's HistoryAnalyzer
 /// for update-ref, which is the path tools like Graphite/git-town use.
-/// NOTE: update-ref bypasses daemon trace2 tracking, so we don't register chars
-/// in the registry (attribution is expected to be lost through this path).
 #[allow(clippy::too_many_arguments)]
 pub fn execute_plumbing_commit_tree(
     repo: &TestRepo,
@@ -29,7 +27,6 @@ pub fn execute_plumbing_commit_tree(
 ) {
     operation_log.push("plumbing-commit-tree: starting".to_string());
 
-    // Make edits but don't register in registry (plumbing bypasses daemon tracking)
     let edit_count = rng.random_range(1..=3);
     for _ in 0..edit_count {
         let attribution = gen_attribution(rng);
@@ -41,7 +38,6 @@ pub fn execute_plumbing_commit_tree(
         let line_count = gen_line_count(rng, max_lines);
 
         let ch = registry.allocate(attribution);
-        registry.remove(ch);
 
         let checkpoint_type = match attribution {
             Attribution::Ai => "mock_ai",
@@ -116,9 +112,6 @@ pub fn execute_plumbing_rapid_update_ref(
     operation_log.push(format!("plumbing-rapid-update-ref: {} cycles", cycle_count));
 
     for i in 0..cycle_count {
-        // Plumbing update-ref bypasses the daemon's trace2 event tracking, so working
-        // logs get miskeyed and attribution is lost. We still edit+checkpoint normally,
-        // but DON'T register the char in the registry so verification skips these lines.
         let attribution = gen_attribution(rng);
         let strategy = if file_state.lines.is_empty() {
             EditStrategy::Append
@@ -127,9 +120,7 @@ pub fn execute_plumbing_rapid_update_ref(
         };
         let line_count = gen_line_count(rng, max_lines.min(3));
 
-        // Allocate a char but immediately remove it from registry so verify_blame skips it
         let ch = registry.allocate(attribution);
-        registry.remove(ch);
 
         let checkpoint_type = match attribution {
             Attribution::Ai => "mock_ai",
