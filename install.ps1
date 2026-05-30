@@ -374,6 +374,8 @@ if ($isElevated -and $env:GIT_AI_ALLOW_SUPERUSER -ne '1') {
         Write-Host ''
         exit 1
     }
+    # Propagate to child git-ai invocations (install-hooks, exchange-nonce, login)
+    $env:GIT_AI_ALLOW_SUPERUSER = '1'
 }
 
 # Install directory: %USERPROFILE%\.git-ai\bin

@@ -200,6 +200,8 @@ if [ "$(id -u)" = "0" ] && [ "${GIT_AI_ALLOW_SUPERUSER:-}" != "1" ]; then
         echo ""
         exit 1
     fi
+    # Propagate to child git-ai invocations (install-hooks, exchange-nonce, login)
+    export GIT_AI_ALLOW_SUPERUSER=1
 fi
 
 # Detect OS and architecture
