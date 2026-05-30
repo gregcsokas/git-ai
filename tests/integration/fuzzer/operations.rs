@@ -2786,8 +2786,9 @@ pub fn execute_cherry_pick_conflict(
         .trim()
         .to_string();
 
-    // Switch back to previous branch
+    // Switch back to previous branch and restore file state from disk
     git(repo, &["checkout", "-"]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Make a conflicting edit on main (different content at same position)
     let main_params = EditParams {

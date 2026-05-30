@@ -105,6 +105,11 @@ impl CharRegistry {
         self.next
     }
 
+    /// Remove a character from the registry so verify_blame skips it.
+    pub fn remove(&mut self, ch: char) {
+        self.entries.remove(&ch);
+    }
+
     /// Look up attribution for a character.
     pub fn get(&self, ch: char) -> Option<&CharEntry> {
         self.entries.get(&ch)
@@ -423,26 +428,36 @@ impl CharRegistry {
         }
 
         // Verify that the authorship note contains all files with attributions
+        // that were MODIFIED in this commit (not all files across history)
         let head_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let modified_in_commit: std::collections::HashSet<String> = repo
+            .git(&["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"])
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+
         let note = match repo.read_authorship_note(&head_sha) {
             Some(n) => n,
             None => {
-                // No note is only acceptable if no files have AI/known-human lines
-                let has_attributed_lines = files.iter().any(|(_, file_lines)| {
-                    file_lines.iter().any(|&ch| {
-                        self.get(ch).is_some_and(|e| {
-                            matches!(e.attribution, Attribution::Ai | Attribution::KnownHuman)
+                // No note is only acceptable if no committed files have AI/known-human lines
+                let has_attributed_lines = files.iter().any(|(filename, file_lines)| {
+                    modified_in_commit.contains(*filename)
+                        && file_lines.iter().any(|&ch| {
+                            self.get(ch).is_some_and(|e| {
+                                matches!(e.attribution, Attribution::Ai | Attribution::KnownHuman)
+                            })
                         })
-                    })
                 });
                 if has_attributed_lines {
                     panic!(
-                        "Multi-file verification failed: no authorship note but files have attributed lines\n\
-                         Seed: {}\nHead: {}\nFiles: {:?}\n\
+                        "Multi-file verification failed: no authorship note but committed files have attributed lines\n\
+                         Seed: {}\nHead: {}\nModified: {:?}\n\
                          Operation log:\n{}",
                         seed,
                         head_sha,
-                        files.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+                        modified_in_commit,
                         operation_log.join("\n"),
                     );
                 }
@@ -458,6 +473,11 @@ impl CharRegistry {
         };
 
         for &(filename, file_lines) in files {
+            // Only check files that were actually modified in this commit
+            if !modified_in_commit.contains(filename) {
+                continue;
+            }
+
             let has_attributed = file_lines.iter().any(|&ch| {
                 self.get(ch).is_some_and(|e| {
                     matches!(e.attribution, Attribution::Ai | Attribution::KnownHuman)
@@ -620,7 +640,8 @@ impl CharRegistry {
         };
 
         // Check for separator - note may start with "---" if there are no attestations
-        let (attestation_section, json_section) = if let Some(stripped) = note.strip_prefix("---\n") {
+        let (attestation_section, json_section) = if let Some(stripped) = note.strip_prefix("---\n")
+        {
             // Empty attestation section
             ("", stripped)
         } else if let Some(separator_idx) = note.find("\n---\n") {
