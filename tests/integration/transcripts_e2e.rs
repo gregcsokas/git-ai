@@ -62,7 +62,9 @@ fn test_session_database_basic() {
     db.insert_session(&session).unwrap();
 
     // Read
-    let retrieved = db.get_session("s_test_123", "transcript").unwrap();
+    let retrieved = db
+        .get_session("s_test_123", "transcript", "/path/to/transcript.jsonl")
+        .unwrap();
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.session_id, "s_test_123");
@@ -71,9 +73,17 @@ fn test_session_database_basic() {
 
     // Update watermark
     let new_watermark = ByteOffsetWatermark::new(100);
-    db.update_watermark("s_test_123", "transcript", &new_watermark)
+    db.update_watermark(
+        "s_test_123",
+        "transcript",
+        "/path/to/transcript.jsonl",
+        &new_watermark,
+    )
+    .unwrap();
+    let retrieved_updated = db
+        .get_session("s_test_123", "transcript", "/path/to/transcript.jsonl")
+        .unwrap()
         .unwrap();
-    let retrieved_updated = db.get_session("s_test_123", "transcript").unwrap().unwrap();
     assert_eq!(retrieved_updated.watermark_value, "100");
 
     // List all sessions
@@ -174,7 +184,11 @@ fn test_multiple_sessions_isolation() {
     // Verify each session has correct data
     for i in 0..5 {
         let session = db
-            .get_session(&format!("s_session_{}", i), "transcript")
+            .get_session(
+                &format!("s_session_{}", i),
+                "transcript",
+                &format!("/path/to/transcript_{}.jsonl", i),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(session.watermark_value, (i * 10).to_string());
@@ -216,7 +230,10 @@ fn test_database_persistence() {
     // Reopen database
     {
         let db = TranscriptsDatabase::open(&db_path).unwrap();
-        let retrieved = db.get_session("s_persist", "transcript").unwrap().unwrap();
+        let retrieved = db
+            .get_session("s_persist", "transcript", "/path/to/transcript.jsonl")
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.session_id, "s_persist");
         assert_eq!(retrieved.watermark_value, "42");
         assert_eq!(retrieved.processing_errors, 0);
@@ -252,16 +269,32 @@ fn test_error_tracking() {
     db.insert_session(&session).unwrap();
 
     // Simulate errors
-    db.record_error("s_errors", "transcript", "First error")
+    db.record_error(
+        "s_errors",
+        "transcript",
+        "/path/to/transcript.jsonl",
+        "First error",
+    )
+    .unwrap();
+    let retrieved = db
+        .get_session("s_errors", "transcript", "/path/to/transcript.jsonl")
+        .unwrap()
         .unwrap();
-    let retrieved = db.get_session("s_errors", "transcript").unwrap().unwrap();
     assert_eq!(retrieved.processing_errors, 1);
     assert_eq!(retrieved.last_error, Some("First error".to_string()));
 
     // More errors
-    db.record_error("s_errors", "transcript", "Second error")
+    db.record_error(
+        "s_errors",
+        "transcript",
+        "/path/to/transcript.jsonl",
+        "Second error",
+    )
+    .unwrap();
+    let retrieved2 = db
+        .get_session("s_errors", "transcript", "/path/to/transcript.jsonl")
+        .unwrap()
         .unwrap();
-    let retrieved2 = db.get_session("s_errors", "transcript").unwrap().unwrap();
     assert_eq!(retrieved2.processing_errors, 2);
     assert_eq!(retrieved2.last_error, Some("Second error".to_string()));
 }
@@ -296,7 +329,11 @@ fn test_full_pipeline_claude_session_ids_flow_through() {
     db.insert_session(&session).unwrap();
 
     let retrieved = db
-        .get_session("sess-parent-abc", "transcript")
+        .get_session(
+            "sess-parent-abc",
+            "transcript",
+            &fixture.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(retrieved.external_session_id, "sess-parent-abc".to_string());
@@ -472,7 +509,11 @@ fn test_subagent_session_record_has_parent_link() {
     db.insert_session(&session).unwrap();
 
     let retrieved = db
-        .get_session("agent-a1b2c3d4e5f6", "transcript")
+        .get_session(
+            "agent-a1b2c3d4e5f6",
+            "transcript",
+            &subagent_path.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(

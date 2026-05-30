@@ -36,7 +36,7 @@
 //! let mut watermark = ByteOffsetWatermark::new(0);
 //! // ... read and process transcript ...
 //! watermark.advance(1024, 10);
-//! db.update_watermark("session-123", &watermark)?;
+//! db.update_watermark("session-123", "transcript", "/path/to/file", &watermark)?;
 //! ```
 
 pub mod agent;

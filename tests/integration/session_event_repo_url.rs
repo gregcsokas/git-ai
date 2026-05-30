@@ -239,7 +239,10 @@ fn test_db_new_schema_has_repo_work_dir() {
 
     let record = make_session_record("test-1", "claude", &transcript, Some("/Users/dev/project"));
     db.insert_session(&record).unwrap();
-    let retrieved = db.get_session("test-1", "transcript").unwrap().unwrap();
+    let retrieved = db
+        .get_session("test-1", "transcript", &transcript.display().to_string())
+        .unwrap()
+        .unwrap();
     assert_eq!(
         retrieved.repo_work_dir,
         Some("/Users/dev/project".to_string()),
@@ -256,7 +259,10 @@ fn test_db_insert_session_without_repo_work_dir() {
 
     let record = make_session_record("test-2", "claude", &transcript, None);
     db.insert_session(&record).unwrap();
-    let retrieved = db.get_session("test-2", "transcript").unwrap().unwrap();
+    let retrieved = db
+        .get_session("test-2", "transcript", &transcript.display().to_string())
+        .unwrap()
+        .unwrap();
     assert_eq!(
         retrieved.repo_work_dir, None,
         "repo_work_dir must be None when not provided"
@@ -273,9 +279,17 @@ fn test_db_update_repo_work_dir() {
     let record = make_session_record("test-3", "claude", &transcript, None);
     db.insert_session(&record).unwrap();
 
-    db.update_repo_work_dir("test-3", "transcript", "/Users/dev/my-project")
+    db.update_repo_work_dir(
+        "test-3",
+        "transcript",
+        &transcript.display().to_string(),
+        "/Users/dev/my-project",
+    )
+    .unwrap();
+    let retrieved = db
+        .get_session("test-3", "transcript", &transcript.display().to_string())
+        .unwrap()
         .unwrap();
-    let retrieved = db.get_session("test-3", "transcript").unwrap().unwrap();
     assert_eq!(
         retrieved.repo_work_dir,
         Some("/Users/dev/my-project".to_string()),
@@ -305,7 +319,11 @@ fn test_session_events_include_repo_url_from_hook_triggered_checkpoint() {
     db.insert_session(&record).unwrap();
 
     let session = db
-        .get_session("test-hook-sess", "transcript")
+        .get_session(
+            "test-hook-sess",
+            "transcript",
+            &transcript.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     let repo_work_dir = session.repo_work_dir.as_ref().map(PathBuf::from);
@@ -357,7 +375,11 @@ fn test_session_events_no_repo_url_when_no_remote() {
     db.insert_session(&record).unwrap();
 
     let session = db
-        .get_session("test-no-remote", "transcript")
+        .get_session(
+            "test-no-remote",
+            "transcript",
+            &transcript.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     let repo_work_dir = session.repo_work_dir.as_ref().map(PathBuf::from);
@@ -382,7 +404,11 @@ fn test_session_events_no_repo_url_when_no_work_dir() {
     db.insert_session(&record).unwrap();
 
     let session = db
-        .get_session("test-no-workdir", "transcript")
+        .get_session(
+            "test-no-workdir",
+            "transcript",
+            &transcript.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(session.repo_work_dir, None);
@@ -413,7 +439,11 @@ fn test_session_events_repo_url_from_sweep_inferred_cwd() {
     db.insert_session(&record).unwrap();
 
     let session = db
-        .get_session("test-sweep-sess", "transcript")
+        .get_session(
+            "test-sweep-sess",
+            "transcript",
+            &transcript.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -458,12 +488,17 @@ fn test_inferred_cwd_persisted_to_db() {
     db.update_repo_work_dir(
         "test-persist",
         "transcript",
+        &transcript.display().to_string(),
         &inferred.display().to_string(),
     )
     .unwrap();
 
     let session = db
-        .get_session("test-persist", "transcript")
+        .get_session(
+            "test-persist",
+            "transcript",
+            &transcript.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -502,7 +537,11 @@ fn test_repo_work_dir_priority_hook_wins_over_db() {
     // Hook provides repo_b's path (should take priority)
     let task_repo_work_dir = Some(repo_b.path().to_path_buf());
     let session = db
-        .get_session("test-priority", "transcript")
+        .get_session(
+            "test-priority",
+            "transcript",
+            &transcript.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     let db_repo_work_dir = session.repo_work_dir.as_ref().map(PathBuf::from);
@@ -541,7 +580,11 @@ fn test_repo_work_dir_priority_db_used_when_no_hook() {
 
     let task_repo_work_dir: Option<PathBuf> = None;
     let session = db
-        .get_session("test-db-prio", "transcript")
+        .get_session(
+            "test-db-prio",
+            "transcript",
+            &transcript.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     let db_repo_work_dir = session.repo_work_dir.as_ref().map(PathBuf::from);
@@ -574,7 +617,11 @@ fn test_repo_work_dir_priority_infer_fallback() {
 
     let task_repo_work_dir: Option<PathBuf> = None;
     let session = db
-        .get_session("test-infer-prio", "transcript")
+        .get_session(
+            "test-infer-prio",
+            "transcript",
+            &transcript.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     let db_repo_work_dir = session.repo_work_dir.as_ref().map(PathBuf::from);
@@ -650,7 +697,11 @@ fn test_full_pipeline_session_events_carry_repo_url() {
 
     // Replicate process_session_blocking logic
     let retrieved = db
-        .get_session("pipeline-test", "transcript")
+        .get_session(
+            "pipeline-test",
+            "transcript",
+            &transcript.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     let agent = ClaudeAgent::new();
@@ -737,7 +788,11 @@ fn test_full_pipeline_session_events_no_repo_url_when_unavailable() {
     db.insert_session(&record).unwrap();
 
     let retrieved = db
-        .get_session("no-repo-test", "transcript")
+        .get_session(
+            "no-repo-test",
+            "transcript",
+            &transcript.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     let agent = ClaudeAgent::new();

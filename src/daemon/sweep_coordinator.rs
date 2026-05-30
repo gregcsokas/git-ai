@@ -47,17 +47,20 @@ impl SweepCoordinator {
             };
 
             for session in discovered {
+                let canonical = Self::canonicalize_path(&session.transcript_path);
+                let canonical_str = canonical.display().to_string();
                 // Check against transcripts-db
-                match self
-                    .transcripts_db
-                    .get_session(&session.session_id, "transcript")?
-                {
+                match self.transcripts_db.get_session(
+                    &session.session_id,
+                    "transcript",
+                    &canonical_str,
+                )? {
                     None => {
                         // New session - queue for processing (worker creates DB record)
                         sessions_to_process.push(SessionToProcess {
                             session_id: session.session_id.clone(),
                             tool: session.tool.clone(),
-                            canonical_path: Self::canonicalize_path(&session.transcript_path),
+                            canonical_path: canonical,
                             external_session_id: session.external_session_id.clone(),
                             external_parent_session_id: session.external_parent_session_id.clone(),
                         });
@@ -68,7 +71,7 @@ impl SweepCoordinator {
                             sessions_to_process.push(SessionToProcess {
                                 session_id: session.session_id.clone(),
                                 tool: session.tool.clone(),
-                                canonical_path: Self::canonicalize_path(&session.transcript_path),
+                                canonical_path: canonical,
                                 external_session_id: session.external_session_id.clone(),
                                 external_parent_session_id: session
                                     .external_parent_session_id

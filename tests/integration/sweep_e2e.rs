@@ -261,7 +261,13 @@ fn test_sweep_deduplication_via_session_id() {
     let session_id = "claude:conversation_abc";
 
     // First sweep - session doesn't exist
-    let session1 = db.get_session(session_id, "transcript").unwrap();
+    let session1 = db
+        .get_session(
+            session_id,
+            "transcript",
+            &transcript_path.display().to_string(),
+        )
+        .unwrap();
     assert!(session1.is_none(), "Session should not exist initially");
 
     // Insert session (simulating SweepCoordinator.insert_new_session)
@@ -287,7 +293,13 @@ fn test_sweep_deduplication_via_session_id() {
     db.insert_session(&record).unwrap();
 
     // Second sweep - session exists, should not be inserted again
-    let session2 = db.get_session(session_id, "transcript").unwrap();
+    let session2 = db
+        .get_session(
+            session_id,
+            "transcript",
+            &transcript_path.display().to_string(),
+        )
+        .unwrap();
     assert!(session2.is_some(), "Session should exist after insert");
 
     // Attempting to insert again should fail (unique constraint)
@@ -340,7 +352,11 @@ fn test_behind_detection_on_file_growth() {
 
     // SweepCoordinator.is_session_behind would detect this
     let existing = db
-        .get_session("test_session", "transcript")
+        .get_session(
+            "test_session",
+            "transcript",
+            &transcript_path.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     assert_ne!(
@@ -425,12 +441,21 @@ fn test_watermark_persistence_after_processing() {
     assert_eq!(batch.events.len(), 2);
 
     // Update watermark in DB (simulating TranscriptWorker.process_session_blocking)
-    db.update_watermark("test_session", "transcript", batch.new_watermark.as_ref())
-        .unwrap();
+    db.update_watermark(
+        "test_session",
+        "transcript",
+        &transcript_path.display().to_string(),
+        batch.new_watermark.as_ref(),
+    )
+    .unwrap();
 
     // Verify watermark persisted
     let updated = db
-        .get_session("test_session", "transcript")
+        .get_session(
+            "test_session",
+            "transcript",
+            &transcript_path.display().to_string(),
+        )
         .unwrap()
         .unwrap();
     let watermark_value: u64 = updated.watermark_value.parse().unwrap();
