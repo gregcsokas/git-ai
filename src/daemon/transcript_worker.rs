@@ -218,61 +218,25 @@ impl TranscriptWorker {
         let mut enqueued_this_sweep: HashSet<(PathBuf, String)> = HashSet::new();
 
         for session in sessions {
-            let agent = crate::transcripts::agent::get_agent(&session.tool);
-            let streams = agent.as_ref().map(|a| a.streams()).unwrap_or_default();
-
-            let inferred_cwd = agent
+            let inferred_cwd = crate::transcripts::agent::get_agent(&session.tool)
                 .as_ref()
                 .and_then(|a| a.infer_cwd(&session.canonical_path));
 
-            for stream in streams {
-                let stream_path = match stream.resolve_path(&session.canonical_path) {
-                    Some(p) if p.exists() => p,
-                    _ => continue,
-                };
+            let tasks = self.enqueue_streams_for_session(
+                &session.tool,
+                &session.canonical_path,
+                Priority::Low,
+                None,
+                None,
+                Some(session.external_session_id.as_str()),
+                session.external_parent_session_id.as_deref(),
+                inferred_cwd.as_deref(),
+                &session.session_id,
+                &mut enqueued_this_sweep,
+            );
 
-                let effective_session_id = if stream.shared {
-                    generate_session_id(&stream_path.display().to_string(), &session.tool)
-                } else {
-                    session.session_id.clone()
-                };
-
-                if let Err(e) = self.ensure_stream_session(
-                    &effective_session_id,
-                    &session.tool,
-                    &stream,
-                    &stream_path,
-                    Some(session.external_session_id.as_str()),
-                    session.external_parent_session_id.as_deref(),
-                    inferred_cwd.as_deref(),
-                ) {
-                    tracing::warn!(
-                        session_id = %effective_session_id,
-                        stream_kind = %stream.stream_kind,
-                        error = %e,
-                        "failed to ensure stream session exists"
-                    );
-                    continue;
-                }
-
-                let dedup_key = (stream_path.clone(), stream.stream_kind.to_string());
-                if self.in_flight.contains(&dedup_key) || enqueued_this_sweep.contains(&dedup_key) {
-                    continue;
-                }
-
-                enqueued_this_sweep.insert(dedup_key);
-                self.priority_queue.push(ProcessingTask {
-                    priority: Priority::Low,
-                    session_id: effective_session_id,
-                    stream_kind: stream.stream_kind.to_string(),
-                    tool: session.tool.clone(),
-                    trace_id: None,
-                    tool_use_id: None,
-                    canonical_path: stream_path,
-                    repo_work_dir: inferred_cwd.clone(),
-                    retry_count: 0,
-                    next_retry_at: None,
-                });
+            for task in tasks {
+                self.priority_queue.push(task);
             }
         }
 
@@ -284,56 +248,22 @@ impl TranscriptWorker {
         let canonical_path = std::fs::canonicalize(&notification.transcript_path)
             .unwrap_or_else(|_| notification.transcript_path.clone());
 
-        let agent = crate::transcripts::agent::get_agent(&notification.tool);
-        let streams = agent.as_ref().map(|a| a.streams()).unwrap_or_default();
+        let mut enqueued: HashSet<(PathBuf, String)> = HashSet::new();
+        let tasks = self.enqueue_streams_for_session(
+            &notification.tool,
+            &canonical_path,
+            Priority::Immediate,
+            Some(notification.trace_id.clone()),
+            notification.tool_use_id.clone(),
+            Some(notification.external_session_id.as_str()),
+            notification.external_parent_session_id.as_deref(),
+            notification.repo_work_dir.as_deref(),
+            &notification.session_id,
+            &mut enqueued,
+        );
 
-        for stream in streams {
-            let stream_path = match stream.resolve_path(&canonical_path) {
-                Some(p) if p.exists() => p,
-                _ => continue,
-            };
-
-            let effective_session_id = if stream.shared {
-                generate_session_id(&stream_path.display().to_string(), &notification.tool)
-            } else {
-                notification.session_id.clone()
-            };
-
-            if let Err(e) = self.ensure_stream_session(
-                &effective_session_id,
-                &notification.tool,
-                &stream,
-                &stream_path,
-                Some(notification.external_session_id.as_str()),
-                notification.external_parent_session_id.as_deref(),
-                notification.repo_work_dir.as_deref(),
-            ) {
-                tracing::warn!(
-                    session_id = %effective_session_id,
-                    stream_kind = %stream.stream_kind,
-                    error = %e,
-                    "failed to ensure stream session exists"
-                );
-                continue;
-            }
-
-            let dedup_key = (stream_path.clone(), stream.stream_kind.to_string());
-            if self.in_flight.contains(&dedup_key) {
-                continue;
-            }
-
-            self.priority_queue.push(ProcessingTask {
-                priority: Priority::Immediate,
-                session_id: effective_session_id,
-                stream_kind: stream.stream_kind.to_string(),
-                tool: notification.tool.clone(),
-                trace_id: Some(notification.trace_id.clone()),
-                tool_use_id: notification.tool_use_id.clone(),
-                canonical_path: stream_path,
-                repo_work_dir: notification.repo_work_dir.clone(),
-                retry_count: 0,
-                next_retry_at: None,
-            });
+        for task in tasks {
+            self.priority_queue.push(task);
         }
 
         // Sweep subagent transcripts for this main session (Claude only for now)
@@ -418,6 +348,77 @@ impl TranscriptWorker {
                 next_retry_at: None,
             });
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_streams_for_session(
+        &self,
+        tool: &str,
+        canonical_path: &Path,
+        priority: Priority,
+        trace_id: Option<String>,
+        tool_use_id: Option<String>,
+        external_session_id: Option<&str>,
+        external_parent_session_id: Option<&str>,
+        repo_work_dir: Option<&Path>,
+        non_shared_session_id: &str,
+        enqueued: &mut HashSet<(PathBuf, String)>,
+    ) -> Vec<ProcessingTask> {
+        let agent = crate::transcripts::agent::get_agent(tool);
+        let streams = agent.as_ref().map(|a| a.streams()).unwrap_or_default();
+        let mut tasks = Vec::new();
+
+        for stream in streams {
+            let stream_path = match stream.resolve_path(canonical_path) {
+                Some(p) if p.exists() => p,
+                _ => continue,
+            };
+
+            let effective_session_id = if stream.shared {
+                generate_session_id(&stream_path.display().to_string(), tool)
+            } else {
+                non_shared_session_id.to_string()
+            };
+
+            if let Err(e) = self.ensure_stream_session(
+                &effective_session_id,
+                tool,
+                &stream,
+                &stream_path,
+                external_session_id,
+                external_parent_session_id,
+                repo_work_dir,
+            ) {
+                tracing::warn!(
+                    session_id = %effective_session_id,
+                    stream_kind = %stream.stream_kind,
+                    error = %e,
+                    "failed to ensure stream session exists"
+                );
+                continue;
+            }
+
+            let dedup_key = (stream_path.clone(), stream.stream_kind.to_string());
+            if self.in_flight.contains(&dedup_key) || enqueued.contains(&dedup_key) {
+                continue;
+            }
+
+            enqueued.insert(dedup_key);
+            tasks.push(ProcessingTask {
+                priority,
+                session_id: effective_session_id,
+                stream_kind: stream.stream_kind.to_string(),
+                tool: tool.to_string(),
+                trace_id: trace_id.clone(),
+                tool_use_id: tool_use_id.clone(),
+                canonical_path: stream_path,
+                repo_work_dir: repo_work_dir.map(|p| p.to_path_buf()),
+                retry_count: 0,
+                next_retry_at: None,
+            });
+        }
+
+        tasks
     }
 
     fn ensure_subagent_session(
@@ -641,11 +642,13 @@ impl TranscriptWorker {
         }
 
         let file_meta = std::fs::metadata(&path).ok();
+        let watermark_type_str = &session.watermark_type;
         let is_initial_watermark = session.watermark_value.is_empty()
-            || session.watermark_value == "0"
-            || session.watermark_value == "0|"
-            || session.watermark_value == "0|0|"
-            || session.watermark_value == "1970-01-01T00:00:00+00:00";
+            || watermark_type_str
+                .parse::<crate::transcripts::watermark::WatermarkType>()
+                .ok()
+                .map(|wt| wt.create_initial_watermark().serialize() == session.watermark_value)
+                .unwrap_or(false);
 
         loop {
             let batch = agent.read_incremental(&path, current_watermark, &session.session_id)?;
@@ -690,6 +693,10 @@ impl TranscriptWorker {
                             .session_id(derived_session_id)
                             .external_session_id(event_sid);
                     } else if is_otel_stream {
+                        tracing::debug!(
+                            session_id = %task.session_id,
+                            "dropping OTEL span without extractable session identifier"
+                        );
                         return None;
                     }
 

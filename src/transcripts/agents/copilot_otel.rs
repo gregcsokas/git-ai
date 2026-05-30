@@ -5,6 +5,22 @@ use rusqlite::Connection;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
+
+fn map_sqlite_error(e: rusqlite::Error, context: &str) -> TranscriptError {
+    if let rusqlite::Error::SqliteFailure(ref err, _) = e
+        && (err.code == rusqlite::ffi::ErrorCode::DatabaseBusy
+            || err.code == rusqlite::ffi::ErrorCode::DatabaseLocked)
+    {
+        return TranscriptError::Transient {
+            message: format!("{}: {}", context, e),
+            retry_after: Duration::from_secs(2),
+        };
+    }
+    TranscriptError::Fatal {
+        message: format!("{}: {}", context, e),
+    }
+}
 
 /// Read OTEL spans incrementally from a Copilot traces SQLite DB.
 ///
@@ -137,9 +153,9 @@ fn read_spans_after(
         )
     };
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| TranscriptError::Fatal {
-        message: format!("Failed to prepare spans query: {}", e),
-    })?;
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| map_sqlite_error(e, "Failed to prepare spans query"))?;
 
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params.iter()), |row| {
@@ -170,14 +186,10 @@ fn read_spans_after(
                 ttft_ms: row.get(23)?,
             })
         })
-        .map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to query spans: {}", e),
-        })?;
+        .map_err(|e| map_sqlite_error(e, "Failed to query spans"))?;
 
     rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to read span row: {}", e),
-        })
+        .map_err(|e| map_sqlite_error(e, "Failed to read span row"))
 }
 
 fn read_attributes_for_spans(
@@ -192,9 +204,9 @@ fn read_attributes_for_spans(
         "SELECT span_id, key, value FROM span_attributes WHERE span_id IN ({})",
         placeholders
     );
-    let mut stmt = conn.prepare(&sql).map_err(|e| TranscriptError::Fatal {
-        message: format!("Failed to prepare attributes query: {}", e),
-    })?;
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| map_sqlite_error(e, "Failed to prepare attributes query"))?;
 
     let mut result: HashMap<String, HashMap<String, String>> = HashMap::new();
     let rows = stmt
@@ -205,14 +217,11 @@ fn read_attributes_for_spans(
                 row.get::<_, Option<String>>(2)?,
             ))
         })
-        .map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to query attributes: {}", e),
-        })?;
+        .map_err(|e| map_sqlite_error(e, "Failed to query attributes"))?;
 
     for row in rows {
-        let (span_id, key, value) = row.map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to read attribute row: {}", e),
-        })?;
+        let (span_id, key, value) =
+            row.map_err(|e| map_sqlite_error(e, "Failed to read attribute row"))?;
         if let Some(v) = value {
             result.entry(span_id).or_default().insert(key, v);
         }
@@ -233,9 +242,9 @@ fn read_events_for_spans(
          WHERE span_id IN ({}) ORDER BY timestamp_ms ASC",
         placeholders
     );
-    let mut stmt = conn.prepare(&sql).map_err(|e| TranscriptError::Fatal {
-        message: format!("Failed to prepare events query: {}", e),
-    })?;
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| map_sqlite_error(e, "Failed to prepare events query"))?;
 
     let mut result: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     let rows = stmt
@@ -247,15 +256,11 @@ fn read_events_for_spans(
                 row.get::<_, Option<String>>(3)?,
             ))
         })
-        .map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to query events: {}", e),
-        })?;
+        .map_err(|e| map_sqlite_error(e, "Failed to query events"))?;
 
     for row in rows {
         let (span_id, name, timestamp_ms, attributes_json) =
-            row.map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to read event row: {}", e),
-            })?;
+            row.map_err(|e| map_sqlite_error(e, "Failed to read event row"))?;
         let attrs: serde_json::Value = attributes_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(serde_json::Value::Null);
@@ -587,5 +592,304 @@ mod tests {
         // Verify token fields are present
         assert!(first["span"].get("input_tokens").is_some());
         assert!(first["span"].get("output_tokens").is_some());
+    }
+
+    #[test]
+    fn test_extract_event_session_id_chat_session_id() {
+        use crate::transcripts::agent::Agent;
+        use crate::transcripts::agents::CopilotAgent;
+
+        let agent = CopilotAgent::new();
+        let event = serde_json::json!({
+            "span": {
+                "chat_session_id": "chat-sess-123",
+                "conversation_id": "conv-456",
+            },
+            "attributes": {},
+            "events": [],
+        });
+        // Prefers chat_session_id over conversation_id
+        assert_eq!(
+            agent.extract_event_session_id(&event),
+            Some("chat-sess-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_event_session_id_fallback_to_conversation_id() {
+        use crate::transcripts::agent::Agent;
+        use crate::transcripts::agents::CopilotAgent;
+
+        let agent = CopilotAgent::new();
+        let event = serde_json::json!({
+            "span": {
+                "chat_session_id": null,
+                "conversation_id": "conv-789",
+            },
+            "attributes": {},
+            "events": [],
+        });
+        assert_eq!(
+            agent.extract_event_session_id(&event),
+            Some("conv-789".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_event_session_id_empty_strings_return_none() {
+        use crate::transcripts::agent::Agent;
+        use crate::transcripts::agents::CopilotAgent;
+
+        let agent = CopilotAgent::new();
+        let event = serde_json::json!({
+            "span": {
+                "chat_session_id": "",
+                "conversation_id": "",
+            },
+            "attributes": {},
+            "events": [],
+        });
+        assert_eq!(agent.extract_event_session_id(&event), None);
+    }
+
+    #[test]
+    fn test_extract_event_session_id_no_span_key() {
+        use crate::transcripts::agent::Agent;
+        use crate::transcripts::agents::CopilotAgent;
+
+        let agent = CopilotAgent::new();
+        let event = serde_json::json!({"type": "user", "content": "hello"});
+        assert_eq!(agent.extract_event_session_id(&event), None);
+    }
+
+    #[test]
+    fn test_extract_event_session_id_missing_both_fields() {
+        use crate::transcripts::agent::Agent;
+        use crate::transcripts::agents::CopilotAgent;
+
+        let agent = CopilotAgent::new();
+        let event = serde_json::json!({
+            "span": {
+                "span_id": "abc",
+                "trace_id": "t1",
+            },
+            "attributes": {},
+            "events": [],
+        });
+        assert_eq!(agent.extract_event_session_id(&event), None);
+    }
+
+    #[test]
+    fn test_extract_event_session_id_empty_chat_falls_to_conversation() {
+        use crate::transcripts::agent::Agent;
+        use crate::transcripts::agents::CopilotAgent;
+
+        let agent = CopilotAgent::new();
+        let event = serde_json::json!({
+            "span": {
+                "chat_session_id": "",
+                "conversation_id": "conv-fallback",
+            },
+            "attributes": {},
+            "events": [],
+        });
+        assert_eq!(
+            agent.extract_event_session_id(&event),
+            Some("conv-fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn test_spans_without_session_ids_are_filtered() {
+        let (_dir, db_path) = create_test_otel_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+        // Span WITH session ID (should be included)
+        conn.execute(
+            "INSERT INTO spans (span_id, trace_id, name, start_time_ms, end_time_ms, status_code, \
+             chat_session_id, conversation_id) \
+             VALUES ('has-session', 'trace1', 'chat', 1000, 2000, 0, 'sess-1', NULL)",
+            [],
+        )
+        .unwrap();
+
+        // Span with only conversation_id (should be included)
+        conn.execute(
+            "INSERT INTO spans (span_id, trace_id, name, start_time_ms, end_time_ms, status_code, \
+             chat_session_id, conversation_id) \
+             VALUES ('has-conv-only', 'trace1', 'chat', 2000, 3000, 0, NULL, 'conv-1')",
+            [],
+        )
+        .unwrap();
+
+        // Span WITHOUT any session ID (should be excluded by SQL filter)
+        conn.execute(
+            "INSERT INTO spans (span_id, trace_id, name, start_time_ms, end_time_ms, status_code, \
+             chat_session_id, conversation_id) \
+             VALUES ('no-session', 'trace1', 'chat', 3000, 4000, 0, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+        // Span with empty strings (should be excluded)
+        conn.execute(
+            "INSERT INTO spans (span_id, trace_id, name, start_time_ms, end_time_ms, status_code, \
+             chat_session_id, conversation_id) \
+             VALUES ('empty-session', 'trace1', 'chat', 4000, 5000, 0, '', '')",
+            [],
+        )
+        .unwrap();
+
+        drop(conn);
+
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
+        let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
+
+        assert_eq!(
+            batch.events.len(),
+            2,
+            "only spans with session IDs should be returned"
+        );
+        let ids: Vec<&str> = batch
+            .events
+            .iter()
+            .map(|e| e["span"]["span_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"has-session"));
+        assert!(ids.contains(&"has-conv-only"));
+    }
+
+    #[test]
+    fn test_watermark_advances_correctly_after_batch() {
+        let (_dir, db_path) = create_test_otel_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        insert_span(&conn, "span-a", 5000, 100, 50);
+        insert_span(&conn, "span-b", 7000, 200, 100);
+        drop(conn);
+
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
+        let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
+
+        // Watermark should point to last span
+        let new_wm = batch
+            .new_watermark
+            .as_any()
+            .downcast_ref::<TimestampCursorWatermark>()
+            .unwrap();
+        assert_eq!(new_wm.timestamp_millis, 7000);
+        assert_eq!(new_wm.last_id, "span-b");
+    }
+
+    #[test]
+    fn test_map_sqlite_error_busy_is_transient() {
+        let err = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            Some("database is locked".to_string()),
+        );
+        let result = super::map_sqlite_error(err, "test operation");
+        match result {
+            TranscriptError::Transient {
+                message,
+                retry_after,
+            } => {
+                assert!(message.contains("test operation"));
+                assert!(message.contains("database is locked"));
+                assert_eq!(retry_after, Duration::from_secs(2));
+            }
+            other => panic!("Expected Transient, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_map_sqlite_error_other_is_fatal() {
+        let err = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseCorrupt,
+                extended_code: 11,
+            },
+            Some("database disk image is malformed".to_string()),
+        );
+        let result = super::map_sqlite_error(err, "test operation");
+        match result {
+            TranscriptError::Fatal { message } => {
+                assert!(message.contains("test operation"));
+                assert!(message.contains("malformed"));
+            }
+            other => panic!("Expected Fatal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_otel_json_structure_has_all_span_fields() {
+        let (_dir, db_path) = create_test_otel_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO spans (span_id, trace_id, parent_span_id, name, start_time_ms, end_time_ms, \
+             status_code, status_message, operation_name, provider_name, agent_name, \
+             conversation_id, request_model, response_model, input_tokens, output_tokens, \
+             cached_tokens, reasoning_tokens, tool_name, tool_call_id, tool_type, \
+             chat_session_id, turn_index, ttft_ms) \
+             VALUES ('full-span', 'trace-abc', 'parent-123', 'chat gpt-4.1', 1000, 2000, \
+             1, 'OK', 'chat', 'openai', 'copilot-agent', \
+             'conv-1', 'gpt-4.1', 'gpt-4.1-2025-04-14', 500, 200, \
+             100, 50, 'read_file', 'call-xyz', 'function', \
+             'session-abc', 3, 125.5)",
+            [],
+        ).unwrap();
+        drop(conn);
+
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
+        let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
+        assert_eq!(batch.events.len(), 1);
+
+        let span = &batch.events[0]["span"];
+        assert_eq!(span["span_id"], "full-span");
+        assert_eq!(span["trace_id"], "trace-abc");
+        assert_eq!(span["parent_span_id"], "parent-123");
+        assert_eq!(span["name"], "chat gpt-4.1");
+        assert_eq!(span["start_time_ms"], 1000);
+        assert_eq!(span["end_time_ms"], 2000);
+        assert_eq!(span["status_code"], 1);
+        assert_eq!(span["status_message"], "OK");
+        assert_eq!(span["operation_name"], "chat");
+        assert_eq!(span["provider_name"], "openai");
+        assert_eq!(span["agent_name"], "copilot-agent");
+        assert_eq!(span["conversation_id"], "conv-1");
+        assert_eq!(span["request_model"], "gpt-4.1");
+        assert_eq!(span["response_model"], "gpt-4.1-2025-04-14");
+        assert_eq!(span["input_tokens"], 500);
+        assert_eq!(span["output_tokens"], 200);
+        assert_eq!(span["cached_tokens"], 100);
+        assert_eq!(span["reasoning_tokens"], 50);
+        assert_eq!(span["tool_name"], "read_file");
+        assert_eq!(span["tool_call_id"], "call-xyz");
+        assert_eq!(span["tool_type"], "function");
+        assert_eq!(span["chat_session_id"], "session-abc");
+        assert_eq!(span["turn_index"], 3);
+        assert_eq!(span["ttft_ms"], 125.5);
+    }
+
+    #[test]
+    fn test_initial_watermark_uses_simple_greater_than() {
+        let (_dir, db_path) = create_test_otel_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        // Span at time 0 should still be found with initial watermark (end_time_ms > 0 fails for this!)
+        // Actually initial watermark is timestamp_millis=0, so end_time_ms > 0 catches spans at ms=1+
+        // Span at ms=0 would NOT be found since > 0 excludes it. This is OK since ms=0 means epoch.
+        insert_span(&conn, "span-early", 1, 10, 5);
+        insert_span(&conn, "span-at-zero", 0, 10, 5);
+        drop(conn);
+
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
+        let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
+        // span-at-zero has end_time_ms=0, initial watermark is > 0, so it's excluded
+        // However span-at-zero also needs a session ID to pass the filter
+        // Our insert_span helper sets chat_session_id='session1', so it passes the session filter
+        // But end_time_ms=0 is NOT > 0, so it's excluded from the initial query
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["span"]["span_id"], "span-early");
     }
 }

@@ -34,9 +34,9 @@ pub fn open_sqlite_readonly(path: &Path) -> Result<Connection, TranscriptError> 
             }
         })?;
 
-    conn.execute_batch("PRAGMA cache_size = -2000;")
+    conn.execute_batch("PRAGMA cache_size = -2000; PRAGMA busy_timeout = 5000;")
         .map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to set PRAGMA cache_size: {}", e),
+            message: format!("Failed to set PRAGMAs: {}", e),
         })?;
 
     Ok(conn)

@@ -88,6 +88,7 @@ const MIGRATIONS: &[&str] = &[
     // The path is part of the PK to prevent collisions when two physically distinct files
     // produce the same session_id (issue #1461).
     r#"
+    BEGIN;
     CREATE TABLE sessions_v4 (
         session_id TEXT NOT NULL,
         stream_kind TEXT NOT NULL DEFAULT 'transcript',
@@ -114,6 +115,7 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_sessions_last_processed ON sessions(last_processed_at);
     CREATE INDEX idx_sessions_errors ON sessions(processing_errors) WHERE processing_errors > 0;
     CREATE INDEX idx_sessions_transcript_path ON sessions(transcript_path);
+    COMMIT;
     INSERT INTO schema_version (version) VALUES (4);
     "#,
 ];
@@ -986,5 +988,252 @@ mod tests {
         let result = db_arc.get_session("session-1", "transcript", "/path/to/transcript.jsonl");
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_migration_v3_to_v4_preserves_data() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("migration_test.db");
+
+        // Manually create a v3 database
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            // Run migrations 0..=2 (versions 1, 2, 3)
+            for migration in &MIGRATIONS[..3] {
+                conn.execute_batch(migration).unwrap();
+            }
+            // Insert a session using the v3 schema (no stream_kind column)
+            conn.execute(
+                "INSERT INTO sessions (session_id, tool, transcript_path, transcript_format, \
+                 watermark_type, watermark_value, external_session_id, external_parent_session_id, \
+                 first_seen_at, last_processed_at, last_known_size, last_modified, \
+                 processing_errors, last_error, repo_work_dir) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                rusqlite::params![
+                    "sess-migrate-1",
+                    "claude",
+                    "/path/to/transcript.jsonl",
+                    "ClaudeJsonl",
+                    "ByteOffset",
+                    "1234",
+                    "external-sess-1",
+                    None::<String>,
+                    1000,
+                    500,
+                    5678,
+                    Some(900),
+                    2,
+                    Some("some error"),
+                    Some("/work/dir"),
+                ],
+            )
+            .unwrap();
+
+            // Verify we're at version 3
+            let version: i64 = conn
+                .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(version, 3);
+        }
+
+        // Reopen via TranscriptsDatabase (triggers migration to v4)
+        let db = TranscriptsDatabase::open(&db_path).unwrap();
+
+        // Verify the session migrated with stream_kind = 'transcript'
+        let session = db
+            .get_session("sess-migrate-1", "transcript", "/path/to/transcript.jsonl")
+            .unwrap();
+        assert!(session.is_some(), "session should exist after migration");
+        let session = session.unwrap();
+        assert_eq!(session.session_id, "sess-migrate-1");
+        assert_eq!(session.stream_kind, "transcript");
+        assert_eq!(session.tool, "claude");
+        assert_eq!(session.transcript_path, "/path/to/transcript.jsonl");
+        assert_eq!(session.watermark_value, "1234");
+        assert_eq!(session.external_session_id, "external-sess-1");
+        assert_eq!(session.external_parent_session_id, None);
+        assert_eq!(session.last_known_size, 5678);
+        assert_eq!(session.last_modified, Some(900));
+        assert_eq!(session.processing_errors, 2);
+        assert_eq!(session.last_error, Some("some error".to_string()));
+        assert_eq!(session.repo_work_dir, Some("/work/dir".to_string()));
+    }
+
+    #[test]
+    fn test_migration_v3_to_v4_multiple_sessions_no_conflict() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("migration_multi.db");
+
+        // Create v3 DB with multiple sessions
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            for migration in &MIGRATIONS[..3] {
+                conn.execute_batch(migration).unwrap();
+            }
+            for i in 0..5 {
+                conn.execute(
+                    "INSERT INTO sessions (session_id, tool, transcript_path, transcript_format, \
+                     watermark_type, watermark_value, external_session_id, external_parent_session_id, \
+                     first_seen_at, last_processed_at, last_known_size, last_modified, \
+                     processing_errors, last_error, repo_work_dir) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    rusqlite::params![
+                        format!("sess-{}", i),
+                        "claude",
+                        format!("/path/to/transcript_{}.jsonl", i),
+                        "ClaudeJsonl",
+                        "ByteOffset",
+                        format!("{}", i * 100),
+                        format!("ext-{}", i),
+                        None::<String>,
+                        1000 + i,
+                        500 + i,
+                        0,
+                        None::<i64>,
+                        0,
+                        None::<String>,
+                        None::<String>,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        // Reopen (triggers migration)
+        let db = TranscriptsDatabase::open(&db_path).unwrap();
+
+        // All 5 sessions should be present
+        let all = db.all_sessions().unwrap();
+        assert_eq!(all.len(), 5);
+
+        // Each should have stream_kind = 'transcript'
+        for i in 0..5 {
+            let session = db
+                .get_session(
+                    &format!("sess-{}", i),
+                    "transcript",
+                    &format!("/path/to/transcript_{}.jsonl", i),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(session.stream_kind, "transcript");
+            assert_eq!(session.watermark_value, format!("{}", i * 100));
+        }
+    }
+
+    #[test]
+    fn test_composite_pk_allows_same_session_id_different_streams() {
+        let (db, _temp) = create_test_db();
+
+        // Insert same session_id with different stream_kind
+        let mut transcript_session = create_test_session("shared-session");
+        transcript_session.stream_kind = "transcript".to_string();
+        transcript_session.transcript_path = "/path/to/transcript.jsonl".to_string();
+        db.insert_session(&transcript_session).unwrap();
+
+        let mut otel_session = create_test_session("shared-session");
+        otel_session.stream_kind = "otel_traces".to_string();
+        otel_session.transcript_path = "/path/to/traces.db".to_string();
+        otel_session.watermark_type = "TimestampCursor".to_string();
+        otel_session.watermark_value = "0|".to_string();
+        db.insert_session(&otel_session).unwrap();
+
+        // Both should exist independently
+        let t = db
+            .get_session("shared-session", "transcript", "/path/to/transcript.jsonl")
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.stream_kind, "transcript");
+
+        let o = db
+            .get_session("shared-session", "otel_traces", "/path/to/traces.db")
+            .unwrap()
+            .unwrap();
+        assert_eq!(o.stream_kind, "otel_traces");
+
+        // Update one without affecting the other
+        let new_watermark = super::super::watermark::ByteOffsetWatermark::new(999);
+        db.update_watermark(
+            "shared-session",
+            "transcript",
+            "/path/to/transcript.jsonl",
+            &new_watermark,
+        )
+        .unwrap();
+
+        let t_updated = db
+            .get_session("shared-session", "transcript", "/path/to/transcript.jsonl")
+            .unwrap()
+            .unwrap();
+        assert_eq!(t_updated.watermark_value, "999");
+
+        // OTEL watermark unchanged
+        let o_unchanged = db
+            .get_session("shared-session", "otel_traces", "/path/to/traces.db")
+            .unwrap()
+            .unwrap();
+        assert_eq!(o_unchanged.watermark_value, "0|");
+    }
+
+    #[test]
+    fn test_composite_pk_allows_same_session_id_different_paths() {
+        let (db, _temp) = create_test_db();
+
+        // This is the #1461 scenario: same session_id, same stream_kind, different paths
+        let mut session1 = create_test_session("colliding-session");
+        session1.transcript_path = "/worktree-a/transcript.jsonl".to_string();
+        db.insert_session(&session1).unwrap();
+
+        let mut session2 = create_test_session("colliding-session");
+        session2.transcript_path = "/worktree-b/transcript.jsonl".to_string();
+        db.insert_session(&session2).unwrap();
+
+        // Both exist independently
+        let s1 = db
+            .get_session(
+                "colliding-session",
+                "transcript",
+                "/worktree-a/transcript.jsonl",
+            )
+            .unwrap()
+            .unwrap();
+        let s2 = db
+            .get_session(
+                "colliding-session",
+                "transcript",
+                "/worktree-b/transcript.jsonl",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(s1.transcript_path, "/worktree-a/transcript.jsonl");
+        assert_eq!(s2.transcript_path, "/worktree-b/transcript.jsonl");
+
+        // Delete one, the other remains
+        db.delete_session(
+            "colliding-session",
+            "transcript",
+            "/worktree-a/transcript.jsonl",
+        )
+        .unwrap();
+        assert!(
+            db.get_session(
+                "colliding-session",
+                "transcript",
+                "/worktree-a/transcript.jsonl"
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            db.get_session(
+                "colliding-session",
+                "transcript",
+                "/worktree-b/transcript.jsonl"
+            )
+            .unwrap()
+            .is_some()
+        );
     }
 }

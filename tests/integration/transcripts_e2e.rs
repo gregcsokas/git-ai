@@ -4,6 +4,9 @@
 //! The actual transcript processing and metrics emission are tested via
 //! daemon tests and manual verification.
 
+use git_ai::metrics::{
+    EventAttributes, MetricEvent, OtelTraceValues, PosEncoded, SessionEventValues,
+};
 use git_ai::transcripts::agent::Agent;
 use git_ai::transcripts::agents::{ClaudeAgent, CopilotAgent, OpenCodeAgent};
 use git_ai::transcripts::watermark::{
@@ -349,8 +352,6 @@ fn test_full_pipeline_claude_session_ids_flow_through() {
         )
         .unwrap();
 
-    use git_ai::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
-
     let attrs_sparse = EventAttributes::with_version("test")
         .session_id(retrieved.session_id.clone())
         .external_session_id(retrieved.external_session_id.clone())
@@ -435,8 +436,6 @@ fn test_full_pipeline_opencode_session_ids_flow_through() {
         )
         .unwrap();
 
-    use git_ai::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
-
     let attrs_sparse = EventAttributes::with_version("test")
         .session_id(session.session_id.clone())
         .external_session_id(session.external_session_id.clone())
@@ -474,7 +473,6 @@ fn test_full_pipeline_opencode_session_ids_flow_through() {
 
 #[test]
 fn test_subagent_session_record_has_parent_link() {
-    use git_ai::metrics::{EventAttributes, PosEncoded};
     use git_ai::transcripts::agents::claude::ClaudeAgent as ClaudeAgentImpl;
 
     let temp_dir = TempDir::new().unwrap();
@@ -611,8 +609,6 @@ fn test_copilot_otel_stream_reads_spans_with_event_ids() {
     );
 
     // Verify we can construct MetricEvents from these
-    use git_ai::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
-
     let attrs_sparse = EventAttributes::with_version("test")
         .session_id(session.session_id.clone())
         .external_session_id(session.external_session_id.clone())
@@ -624,7 +620,7 @@ fn test_copilot_otel_stream_reads_spans_with_event_ids() {
         .map(|raw_event| {
             let (eid, pid, tid) = agent.extract_event_ids(&raw_event);
             MetricEvent::from_values(
-                SessionEventValues::with_ids(raw_event, eid, pid, tid),
+                OtelTraceValues::with_ids(raw_event, eid, pid, tid),
                 attrs_sparse.clone(),
             )
         })
@@ -687,4 +683,106 @@ fn test_copilot_agent_streams_declares_otel_stream() {
     assert_eq!(streams.len(), 2, "CopilotAgent should declare 2 streams");
     assert_eq!(streams[0].stream_kind, "transcript");
     assert_eq!(streams[1].stream_kind, "otel_traces");
+}
+
+#[test]
+fn test_copilot_otel_events_use_otel_trace_event_type() {
+    use git_ai::metrics::OtelTraceValues;
+    use git_ai::metrics::events::otel_trace_pos;
+
+    let fixture = test_fixture_path("copilot-otel/traces.db");
+    let agent = CopilotAgent::new();
+
+    let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
+    let batch = agent
+        .read_incremental(&fixture, watermark, "test-session")
+        .unwrap();
+
+    assert!(!batch.events.is_empty());
+
+    // Verify OtelTraceValues roundtrip for actual fixture data
+    for raw_event in batch.events.iter().take(5) {
+        let (eid, pid, tid) = agent.extract_event_ids(raw_event);
+        let values =
+            OtelTraceValues::with_ids(raw_event.clone(), eid.clone(), pid.clone(), tid.clone());
+
+        // Verify sparse encoding preserves the full nested OTEL structure
+        let sparse = git_ai::metrics::PosEncoded::to_sparse(&values);
+        let raw_json = sparse.get(&otel_trace_pos::RAW_JSON.to_string()).unwrap();
+        assert!(
+            raw_json.get("span").is_some(),
+            "raw_json must contain 'span' key"
+        );
+        assert!(
+            raw_json.get("attributes").is_some(),
+            "raw_json must contain 'attributes' key"
+        );
+        assert!(
+            raw_json.get("events").is_some(),
+            "raw_json must contain 'events' key"
+        );
+
+        // Verify IDs are preserved
+        if let Some(ref id) = eid {
+            assert_eq!(
+                sparse.get(&otel_trace_pos::EXTERNAL_EVENT_ID.to_string()),
+                Some(&serde_json::json!(id))
+            );
+        }
+    }
+}
+
+#[test]
+fn test_copilot_otel_per_event_session_id_derivation() {
+    use git_ai::authorship::authorship_log_serialization::generate_session_id;
+
+    let fixture = test_fixture_path("copilot-otel/traces.db");
+    let agent = CopilotAgent::new();
+
+    let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
+    let batch = agent
+        .read_incremental(&fixture, watermark, "test-session")
+        .unwrap();
+
+    // Every event from the fixture should have an extractable session_id
+    // (the SQL filter already excludes spans without session IDs)
+    for event in &batch.events {
+        let session_id = agent.extract_event_session_id(event);
+        assert!(
+            session_id.is_some(),
+            "fixture spans should all have extractable session_id, span: {}",
+            event["span"]["span_id"]
+        );
+
+        // Verify the derived session_id is deterministic
+        let sid = session_id.unwrap();
+        let derived1 = generate_session_id(&sid, "github-copilot");
+        let derived2 = generate_session_id(&sid, "github-copilot");
+        assert_eq!(
+            derived1, derived2,
+            "session_id derivation must be deterministic"
+        );
+    }
+}
+
+#[test]
+fn test_copilot_agent_streams_otel_path_resolution() {
+    use git_ai::transcripts::agent::Agent;
+
+    let agent = CopilotAgent::new();
+    let streams = agent.streams();
+
+    // First stream is transcript (identity path)
+    let transcript_stream = &streams[0];
+    assert_eq!(transcript_stream.stream_kind, "transcript");
+    assert!(!transcript_stream.shared);
+
+    let test_path = std::path::PathBuf::from("/fake/path/transcripts/session.jsonl");
+    let resolved = transcript_stream.resolve_path(&test_path);
+    assert_eq!(resolved, Some(test_path.clone()));
+
+    // Second stream is otel_traces (shared, custom resolver)
+    let otel_stream = &streams[1];
+    assert_eq!(otel_stream.stream_kind, "otel_traces");
+    assert!(otel_stream.shared);
 }
