@@ -63,7 +63,7 @@ That's it — **no per-repo setup or git hooks required.** Commit with the Agent
 
 *Git AI does not "detect" AI code, the Agents report exactly which lines they wrote providing the most accurate, explicit attribution possible.*
 
-**Agents that support the Git AI Standard**
+**The Git AI standard is supported by:**
 <table>
 <tr>
 <td align="center" width="20%"><img src="assets/docs/agents/gray/claude_code.png" alt="Claude Code" width="160" /></td>
@@ -129,10 +129,10 @@ The CLI accurately attributes AI code on every commit. The teams version adds a 
 **Who built this?**
 Aidan and Sasha — say hi in [Discord](https://discord.gg/XJStYvkb5U) or set up a [Meet the maintainers call](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors).
 
-**What are the known limitations?**
-Git AI provides line-level attribution for AI-generated code. When you run Git rewrite operations (`rebase`, `stash`, `squash --merge`, etc) Git AI will move and merge these attributions so nothing is lost.
+**What are the capabilities and known limitations?**
+Git AI provides line-level attribution for AI-generated code - whether it is written with an edit tool or a bash command. When a  Git rewrite operation is run (`rebase`, `stash`, `squash --merge`, etc) Git AI will move and merge attributions so nothing is lost. 
 
-#### Attribution
+Here is a full breakdown of what is supported today: 
 
 | Capability                                                      | Status | Notes                                                                        |
 | --------------------------------------------------------------- | ------ | ---------------------------------------------------------------------------- |
@@ -150,7 +150,7 @@ Git AI provides line-level attribution for AI-generated code. When you run Git r
 | Formatters                                                      | ✅      | Formatting will not change attribution to human.                             |
 | Multi-repo root                                                 | ⚠️     | If you run an agent that edits multiple repos, Bash attributions only work when the agent runs each command with its cwd inside that repo. |
 
-#### Git Rewrite Operations
+Git Rewrite Operations:
 
 | Operation                                                       | Status | Notes                                                                        |
 | --------------------------------------------------------------- | ------ | ---------------------------------------------------------------------------- |
@@ -171,7 +171,7 @@ Git AI provides line-level attribution for AI-generated code. When you run Git r
 | `git replace`                                                  | ❌      | Object replacements are not tracked.                                         |
 
 
-#### GitHub, GitLab, BitBucket, Azure DevOps
+GitHub, GitLab, BitBucket, Azure DevOps:
 
 | Capability                                                      | Status | Notes                                                                        |
 | --------------------------------------------------------------- | ------ | ---------------------------------------------------------------------------- |
