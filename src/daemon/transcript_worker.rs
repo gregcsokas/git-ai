@@ -11,7 +11,7 @@ use crate::daemon::transcript_redaction::redact_json_secrets;
 use crate::metrics::{
     EventAttributes, MetricEvent, OtelTraceValues, PosEncoded, SessionEventValues,
 };
-use crate::transcripts::agent::StreamDescriptor;
+use crate::transcripts::agent::{SHARED_STREAM_SESSION_ID, StreamDescriptor};
 use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
 use crate::transcripts::types::TranscriptError;
 use crate::transcripts::watermark::{WatermarkStrategy, WatermarkType};
@@ -208,35 +208,90 @@ impl TranscriptWorker {
 
     /// Run a sweep across all agents to discover new/behind sessions.
     async fn run_sweep(&mut self) -> Result<(), String> {
-        let sessions = self
+        use crate::daemon::sweep_coordinator::SweepItem;
+
+        let items = self
             .sweep_coordinator
             .run_sweep()
             .map_err(|e| e.to_string())?;
 
-        tracing::info!(discovered = sessions.len(), "sweep completed");
+        tracing::info!(discovered = items.len(), "sweep completed");
 
         let mut enqueued_this_sweep: HashSet<(PathBuf, String)> = HashSet::new();
 
-        for session in sessions {
-            let inferred_cwd = crate::transcripts::agent::get_agent(&session.tool)
-                .as_ref()
-                .and_then(|a| a.infer_cwd(&session.canonical_path));
+        for item in items {
+            match item {
+                SweepItem::Session {
+                    session_id,
+                    tool,
+                    canonical_path,
+                    external_session_id,
+                    external_parent_session_id,
+                } => {
+                    let inferred_cwd = crate::transcripts::agent::get_agent(&tool)
+                        .as_ref()
+                        .and_then(|a| a.infer_cwd(&canonical_path));
 
-            let tasks = self.enqueue_streams_for_session(
-                &session.tool,
-                &session.canonical_path,
-                Priority::Low,
-                None,
-                None,
-                Some(session.external_session_id.as_str()),
-                session.external_parent_session_id.as_deref(),
-                inferred_cwd.as_deref(),
-                &session.session_id,
-                &mut enqueued_this_sweep,
-            );
+                    let tasks = self.enqueue_streams_for_session(
+                        &tool,
+                        &canonical_path,
+                        Priority::Low,
+                        None,
+                        None,
+                        Some(external_session_id.as_str()),
+                        external_parent_session_id.as_deref(),
+                        inferred_cwd.as_deref(),
+                        &session_id,
+                        &mut enqueued_this_sweep,
+                    );
 
-            for task in tasks {
-                self.priority_queue.push(task);
+                    for task in tasks {
+                        self.priority_queue.push(task);
+                    }
+                }
+                SweepItem::SharedStream {
+                    tool,
+                    stream_kind,
+                    canonical_path,
+                } => {
+                    let dedup_key = (canonical_path.clone(), stream_kind.clone());
+                    if self.in_flight.contains(&dedup_key)
+                        || enqueued_this_sweep.contains(&dedup_key)
+                    {
+                        continue;
+                    }
+
+                    if let Some(agent) = crate::transcripts::agent::get_agent(&tool)
+                        && let Some(stream) = agent
+                            .streams()
+                            .into_iter()
+                            .find(|s| s.stream_kind == stream_kind)
+                    {
+                        let _ = self.ensure_stream_session(
+                            SHARED_STREAM_SESSION_ID,
+                            &tool,
+                            &stream,
+                            &canonical_path,
+                            None,
+                            None,
+                            None,
+                        );
+                    }
+
+                    enqueued_this_sweep.insert(dedup_key);
+                    self.priority_queue.push(ProcessingTask {
+                        priority: Priority::Low,
+                        session_id: SHARED_STREAM_SESSION_ID.to_string(),
+                        stream_kind,
+                        tool,
+                        trace_id: None,
+                        tool_use_id: None,
+                        canonical_path,
+                        repo_work_dir: None,
+                        retry_count: 0,
+                        next_retry_at: None,
+                    });
+                }
             }
         }
 
@@ -375,7 +430,7 @@ impl TranscriptWorker {
             };
 
             let effective_session_id = if stream.shared {
-                generate_session_id(&stream_path.display().to_string(), tool)
+                SHARED_STREAM_SESSION_ID.to_string()
             } else {
                 non_shared_session_id.to_string()
             };

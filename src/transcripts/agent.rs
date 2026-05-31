@@ -5,6 +5,12 @@ use super::types::{TranscriptBatch, TranscriptError};
 use super::watermark::WatermarkStrategy;
 use std::path::{Path, PathBuf};
 
+/// Sentinel session_id for shared stream watermark rows.
+/// Shared streams (e.g., a global OTEL SQLite DB) don't belong to any session —
+/// they use this constant as their DB key. The `transcript_path` column
+/// disambiguates when multiple shared streams exist.
+pub const SHARED_STREAM_SESSION_ID: &str = "__shared__";
+
 /// Type alias for the custom path resolver function used in `PathResolverKind::Custom`.
 pub type PathResolverFn = Box<dyn Fn(&Path) -> Option<PathBuf> + Send + Sync>;
 

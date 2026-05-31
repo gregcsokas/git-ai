@@ -1,17 +1,34 @@
-use crate::authorship::authorship_log_serialization::generate_session_id;
-use crate::transcripts::agent::{Agent, StreamDescriptor, get_all_agents};
+use crate::transcripts::agent::{Agent, StreamDescriptor, SHARED_STREAM_SESSION_ID, get_all_agents};
 use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::TranscriptError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Work items discovered by the sweep.
+#[derive(Debug, Clone)]
+pub enum SweepItem {
+    /// A session has at least one owned (non-shared) stream with new data.
+    /// The worker should expand all streams for this session.
+    Session {
+        session_id: String,
+        tool: String,
+        canonical_path: PathBuf,
+        external_session_id: String,
+        external_parent_session_id: Option<String>,
+    },
+    /// A shared stream has new data. Process just this stream.
+    SharedStream {
+        tool: String,
+        stream_kind: String,
+        canonical_path: PathBuf,
+    },
+}
+
 /// Orchestrates periodic sweeps across all registered agents.
 ///
-/// Discovers sessions via each agent's filesystem scan, then checks whether
-/// any of the session's stream files (transcript, OTEL DB, etc.) have changed
-/// since last processing. Only sessions with at least one stale stream are
-/// returned to the worker for re-processing.
+/// Discovers sessions via each agent's filesystem scan, then checks staleness
+/// separately for owned streams (per-session) and shared streams (once per agent).
 pub struct SweepCoordinator {
     transcripts_db: Arc<TranscriptsDatabase>,
     agent_registry: Vec<(String, Box<dyn Agent>)>,
@@ -26,10 +43,8 @@ impl SweepCoordinator {
     }
 
     /// Run a full sweep across all agents.
-    ///
-    /// Returns sessions that need processing (new or with stale streams).
-    pub fn run_sweep(&self) -> Result<Vec<SessionToProcess>, TranscriptError> {
-        let mut sessions_to_process = Vec::new();
+    pub fn run_sweep(&self) -> Result<Vec<SweepItem>, TranscriptError> {
+        let mut items = Vec::new();
 
         for (agent_type, agent) in &self.agent_registry {
             if !matches!(agent.sweep_strategy(), SweepStrategy::Periodic(_)) {
@@ -49,12 +64,14 @@ impl SweepCoordinator {
             };
 
             let streams = agent.streams();
+            let (shared, owned): (Vec<_>, Vec<_>) =
+                streams.into_iter().partition(|s| s.shared);
 
-            for session in discovered {
+            // Per-session: only check owned streams for staleness
+            for session in &discovered {
                 let canonical = Self::canonicalize_path(&session.transcript_path);
-
-                if self.any_stream_stale(&session, &canonical, &streams)? {
-                    sessions_to_process.push(SessionToProcess {
+                if self.any_stream_stale(session, &canonical, &owned)? {
+                    items.push(SweepItem::Session {
                         session_id: session.session_id.clone(),
                         tool: session.tool.clone(),
                         canonical_path: canonical,
@@ -63,13 +80,24 @@ impl SweepCoordinator {
                     });
                 }
             }
+
+            // Shared streams: check once per agent (resolve via first discovered session)
+            if let Some(first) = discovered.first() {
+                let canonical = Self::canonicalize_path(&first.transcript_path);
+                for stream in &shared {
+                    if let Some(item) =
+                        self.check_shared_stream(stream, &canonical, &first.tool)?
+                    {
+                        items.push(item);
+                    }
+                }
+            }
         }
 
-        Ok(sessions_to_process)
+        Ok(items)
     }
 
-    /// Returns true if any stream file for this session is new or has changed
-    /// since it was last processed.
+    /// Returns true if any owned (non-shared) stream file is new or has changed.
     fn any_stream_stale(
         &self,
         session: &DiscoveredSession,
@@ -84,17 +112,12 @@ impl SweepCoordinator {
                 continue;
             }
 
-            let session_id = if stream.shared {
-                generate_session_id(&path.display().to_string(), &session.tool)
-            } else {
-                session.session_id.clone()
-            };
-
             let path_str = path.display().to_string();
-            match self
-                .transcripts_db
-                .get_session(&session_id, stream.stream_kind, &path_str)?
-            {
+            match self.transcripts_db.get_session(
+                &session.session_id,
+                stream.stream_kind,
+                &path_str,
+            )? {
                 None => return Ok(true),
                 Some(existing) => {
                     if Self::is_file_stale(&path, &existing)? {
@@ -104,6 +127,41 @@ impl SweepCoordinator {
             }
         }
         Ok(false)
+    }
+
+    /// Check a single shared stream for staleness.
+    fn check_shared_stream(
+        &self,
+        stream: &StreamDescriptor,
+        canonical_path: &Path,
+        tool: &str,
+    ) -> Result<Option<SweepItem>, TranscriptError> {
+        let Some(path) = stream.resolve_path(canonical_path) else {
+            return Ok(None);
+        };
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let path_str = path.display().to_string();
+        let stale = match self.transcripts_db.get_session(
+            SHARED_STREAM_SESSION_ID,
+            stream.stream_kind,
+            &path_str,
+        )? {
+            None => true,
+            Some(existing) => Self::is_file_stale(&path, &existing)?,
+        };
+
+        if stale {
+            Ok(Some(SweepItem::SharedStream {
+                tool: tool.to_string(),
+                stream_kind: stream.stream_kind.to_string(),
+                canonical_path: path,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     fn is_file_stale(path: &Path, existing: &SessionRecord) -> Result<bool, TranscriptError> {
@@ -128,14 +186,4 @@ impl SweepCoordinator {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
     }
-}
-
-/// A session that needs processing.
-#[derive(Debug, Clone)]
-pub struct SessionToProcess {
-    pub session_id: String,
-    pub tool: String,
-    pub canonical_path: PathBuf,
-    pub external_session_id: String,
-    pub external_parent_session_id: Option<String>,
 }
