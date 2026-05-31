@@ -97,10 +97,61 @@ That's it — **no per-repo setup or git hooks required.** Commit with the Agent
 - **Git native and open standard** — Git AI built the [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
 
 
-## Using with your Team 
+## Using with your Team
 
+<table>
+<tr>
+<td width="50%" valign="top">
 
+### For teams and enterprises
 
+[**Git AI for Teams**](https://usegitai.com) adds a secure prompt store and joins in data from across the SDLC — tying token spend to individual Pull Requests, calculating **% AI by PR, team, and repo**, surfacing how much rework happened during code review, and tracing incidents back to the AI session that caused them.
+
+Connect your SCM once and get aggregate stats across **thousands of repos** plus full observability into everything your coding agents do.
+
+**Self-host it inside your own infrastructure, or run it in our cloud.**
+
+<a href="https://usegitai.com/book-demo"><img src="assets/docs/buttons/get-early-access.svg" alt="Get early access" height="44" /></a>
+
+</td>
+<td width="50%" valign="top">
+
+<a href="https://github.com/user-attachments/assets/416d9597-18eb-4243-b38f-ace8cb684cac"><img src="assets/docs/dashboard.png" alt="Git AI for Teams dashboard — watch the demo" width="100%" /></a>
+
+<sub><i>▶ Watch the 2-minute demo</i></sub>
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### Using open source with your team
+
+The open source CLI gives every engineer:
+
+- **Line-level attribution** on every commit
+- **Model and agent tracking** — know exactly which agent and model wrote each line
+- **% AI** per commit, file, and author
+- Tool-call level resolution and per-session accepted rates
+
+Process the data yourself however you like — pipe it into your own dashboards with the [`git ai stats`](https://usegitai.com/docs/cli) command. ([CLI reference →](https://usegitai.com/docs/cli))
+
+</td>
+<td width="50%" valign="top">
+
+### Preserve attribution in CI
+
+Add the [**Open Source CI Actions**](https://usegitai.com/docs/guides/ci-workflows) to your repos and attributions are preserved when you **Squash Merge** and **Rebase Merge** on GitHub, GitLab, Bitbucket, and Azure DevOps.
+
+> ⚠️ The CI workflows must be installed in **every repo** you want to keep attribution on across these merge types.
+
+*__Need help?__* Hop on a call with us — we'll help you wire up CI and get your team measuring AI usage.
+
+<a href="https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors"><img src="assets/docs/buttons/meet-the-maintainers.svg" alt="Meet the maintainers" height="44" /></a>
+
+</td>
+</tr>
+</table>
 
 
 ### FAQ
