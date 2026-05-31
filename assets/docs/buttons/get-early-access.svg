@@ -1,5 +1,4 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="220" height="48" viewBox="0 0 220 48" fill="none">
-  <rect x="1" y="1" width="218" height="46" rx="8" fill="#0d1117" stroke="#000000" stroke-width="1"/>
-  <text x="98" y="30" text-anchor="middle" fill="#f76a33" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="15" font-weight="600">Get early access</text>
-  <path d="M168 24 H182 M177 19 L182 24 L177 29" stroke="#f76a33" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <rect x="1" y="1" width="218" height="46" rx="8" fill="#1e293b" stroke="#0f172a" stroke-width="1"/>
+  <text x="110" y="31" text-anchor="middle" fill="#f76a33" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="17" font-weight="600">Get early access&#160;&#160;&#8594;</text>
 </svg>
