@@ -36,7 +36,7 @@ fe2c4c8 (claude              2025-12-02 19:25:13 -0500  142)             let fro
 
 **See your personal AI-usage**
 
-..usage command goes here. 
+..usage command goes here...
 
 ## Install
 
@@ -97,15 +97,39 @@ That's it — **no per-repo setup or git hooks required.** Commit with the Agent
 - **Git native and open standard** — Git AI built the [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
 
 
-
 ## Using with your Team 
 
 
 
 
 
-## Capabilities and Limitations
+### FAQ
 
+**Does the agent have to commit for Git AI to attribute the code?**
+No. Git AI works no matter how you commit — your Git client, the Git CLI, and your own Git aliases are all supported.
+
+**Git AI notes are attached to commits — how are attributions preserved when I rebase, squash, stash, cherry-pick, etc.?**
+Git AI analyzes the final state of the code after the operation completes and copies/merges the attributions into a Git Note for any completed commits. It's eventually consistent. The note will be written 5-100ms after the operation completes.
+
+**Can I use this on my own?**
+Yes. Git AI is free and open source, works locally, and requires no login or team setup.
+
+**Is there a performance impact?**
+No. Git AI does not use Git hooks and it does not wrap Git, so you won't see any overhead on your Git commands.
+
+**Do I have to set up agent hooks?**
+Nope — Git AI manages the agent hooks and checks/updates them daily. If you want to trigger this yourself (ie just installed a new agent) run `git ai install-hooks`.
+
+**Who uses this?**
+Hundreds of engineering teams, several in the Fortune 100, use Git AI to understand their AI usage and make agents more effective on their codebase.
+
+**What's the difference between the open source CLI and the [teams version](https://usegitai.com)?**
+The CLI accurately attributes AI code on every commit. The teams version adds a secure prompt store and joins in data from across the SDLC — tying token spend to individual Pull Requests, calculating % AI by PR, team, and repo, and connecting signals like amount of rework during code review, and even tying incidents back to the AI session that caused them. Self-host it or run it in our cloud: connect your SCM and get aggregate stats across thousands of repos plus full observability into everything your coding agents do. [Meet the maintainers](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors) for a demo and early access.
+
+**Who built this?**
+Aidan and Sasha — say hi in [Discord](https://discord.gg/XJStYvkb5U) or set up a [Meet the maintainers call](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors).
+
+**What are the known limitations?**
 Git AI provides line-level attribution for AI-generated code. When you run Git rewrite operations (`rebase`, `stash`, `squash --merge`, etc) Git AI will move and merge these attributions so nothing is lost.
 
 #### Attribution
