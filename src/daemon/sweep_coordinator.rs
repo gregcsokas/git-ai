@@ -1,4 +1,6 @@
-use crate::transcripts::agent::{Agent, StreamDescriptor, SHARED_STREAM_SESSION_ID, get_all_agents};
+use crate::transcripts::agent::{
+    Agent, SHARED_STREAM_SESSION_ID, StreamDescriptor, get_all_agents,
+};
 use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::TranscriptError;
@@ -64,8 +66,7 @@ impl SweepCoordinator {
             };
 
             let streams = agent.streams();
-            let (shared, owned): (Vec<_>, Vec<_>) =
-                streams.into_iter().partition(|s| s.shared);
+            let (shared, owned): (Vec<_>, Vec<_>) = streams.into_iter().partition(|s| s.shared);
 
             // Per-session: only check owned streams for staleness
             for session in &discovered {
@@ -85,9 +86,7 @@ impl SweepCoordinator {
             if let Some(first) = discovered.first() {
                 let canonical = Self::canonicalize_path(&first.transcript_path);
                 for stream in &shared {
-                    if let Some(item) =
-                        self.check_shared_stream(stream, &canonical, &first.tool)?
-                    {
+                    if let Some(item) = self.check_shared_stream(stream, &canonical, &first.tool)? {
                         items.push(item);
                     }
                 }
