@@ -17,9 +17,10 @@ pub enum PathResolverKind {
     Custom(PathResolverFn),
 }
 
-/// Type alias for the watermark type resolver function used in `StreamDescriptor`.
+/// Type alias for resolver functions that derive values from the resolved path.
 pub type WatermarkTypeResolverFn =
     Box<dyn Fn(&Path) -> super::watermark::WatermarkType + Send + Sync>;
+pub type FormatResolverFn = Box<dyn Fn(&Path) -> TranscriptFormat + Send + Sync>;
 
 pub struct StreamDescriptor {
     pub stream_kind: &'static str,
@@ -35,6 +36,8 @@ pub struct StreamDescriptor {
     /// Used when a single stream descriptor covers files with different watermark
     /// strategies (e.g., Copilot .json vs .jsonl files).
     pub watermark_type_resolver: Option<WatermarkTypeResolverFn>,
+    /// Optional function to determine transcript format from the resolved path.
+    pub format_resolver: Option<FormatResolverFn>,
 }
 
 impl StreamDescriptor {
@@ -56,6 +59,14 @@ impl StreamDescriptor {
             resolver(resolved_path)
         } else {
             self.watermark_type
+        }
+    }
+
+    pub fn effective_format(&self, resolved_path: &Path) -> TranscriptFormat {
+        if let Some(resolver) = &self.format_resolver {
+            resolver(resolved_path)
+        } else {
+            self.format
         }
     }
 }
