@@ -491,7 +491,7 @@ impl TranscriptWorker {
             stream_kind: stream.stream_kind.to_string(),
             tool: tool.to_string(),
             transcript_path: path_str,
-            transcript_format: format!("{:?}", stream.format),
+            transcript_format: format!("{:?}", stream.effective_format(stream_path)),
             watermark_type: format!("{:?}", effective_wm_type),
             watermark_value: initial_watermark.serialize(),
             external_session_id: external_session_id.unwrap_or("").to_string(),

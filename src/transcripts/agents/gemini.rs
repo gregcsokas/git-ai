@@ -232,6 +232,7 @@ impl Agent for GeminiAgent {
             path_resolver: PathResolverKind::Identity,
             shared: false,
             watermark_type_resolver: None,
+            format_resolver: None,
         }]
     }
 }
