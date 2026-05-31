@@ -115,8 +115,8 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_sessions_last_processed ON sessions(last_processed_at);
     CREATE INDEX idx_sessions_errors ON sessions(processing_errors) WHERE processing_errors > 0;
     CREATE INDEX idx_sessions_transcript_path ON sessions(transcript_path);
-    COMMIT;
     INSERT INTO schema_version (version) VALUES (4);
+    COMMIT;
     "#,
 ];
 
