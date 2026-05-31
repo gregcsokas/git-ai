@@ -61,7 +61,7 @@ That's it — **no per-repo setup or git hooks required.** Commit with the Agent
 1. Git AI stores this attribution data in Git Notes, linking each line of AI-generated code to the agent, model, and session that created it. Run `git log --show-notes="ai"` to see them. 
 1. Git AI moves, and merges line-level attributions when you `squash`, `merge`, `reset`, `rebase`, `stash`, `cherry-pick`, etc so your AI code is always accurately tracked.
 
-> **"Detecting" AI code is an anti-pattern** — Git AI only relies on explicit attribution. The Agents report exactly which lines they wrote providing the most accurate attribution possible.
+*Git AI does not "detect" AI code, the Agents report exactly which lines they wrote providing the most accurate, explicit attribution possible.*
 
 **Agents that support the Git AI Standard**
 <table>
