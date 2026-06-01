@@ -79,7 +79,7 @@ That's it — **no per-repo setup or git hooks required.** Commit with the Agent
 </tr>
 </table>
 
-## Use with your Team 
+## Using with your team
 
 <table>
 <tr>
@@ -101,7 +101,6 @@ To get started, ask your teammates to install Git AI and add the CI Actions.
 <td width="50%" valign="top">
 
 Add the [**Open Source CI Actions**](https://usegitai.com/docs/guides/ci-workflows) to your repos so attributions are preserved when you **Squash Merge** and **Rebase Merge**. Process the data however you like — pipe it into your own dashboards with the [`git ai stats`](https://usegitai.com/docs/cli) command ([CLI reference →](https://usegitai.com/docs/cli))
-
 
 </td>
 </tr>
@@ -155,9 +154,8 @@ To get started, [setup a call](https://usegitai.com/book-demo) with the maintain
 
 *Git AI does not "detect" AI code — the Agents report exactly which lines they wrote, providing the most accurate, explicit attribution possible.*
 
----
 
-### FAQs
+## FAQs
 
 **Does the agent have to commit for Git AI to attribute the code?**
 No. Git AI works no matter how you commit — your Git client, the Git CLI, and your own Git aliases are all supported.
