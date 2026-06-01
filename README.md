@@ -173,13 +173,13 @@ No. Git AI does not use Git hooks and it does not wrap Git, so you won't see any
 Nope — Git AI manages the agent hooks and checks/updates them daily. If you want to trigger this yourself (ie just installed a new agent) run `git ai install-hooks`.
 
 **Who uses this?**
-Hundreds of engineering teams, several in the Fortune 100, use Git AI to understand their AI usage and make agents more effective on their codebase.
+Hundreds of engineering teams (including many in the Fortune 100) use Git AI to understand their AI usage and make agents more effective on their codebase.
 
 **What's the difference between the open source CLI and the [teams version](https://usegitai.com)?**
 The CLI accurately attributes AI code on every commit. The teams version adds a secure prompt store and joins in data from across the SDLC — tying token spend to individual Pull Requests, calculating % AI by PR, team, and repo, and connecting signals like amount of rework during code review, and even tying incidents back to the AI session that caused them. Self-host it or run it in our cloud: connect your SCM and get aggregate stats across thousands of repos plus full observability into everything your coding agents do. [Meet the maintainers](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors) for a demo and early access.
 
 **Who built this?**
-Aidan and Sasha — say hi in [Discord](https://discord.gg/XJStYvkb5U) or set up a [Meet the maintainers call](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors).
+[Aidan](https://github.com/git-ai-project/git-ai) and [Sasha](https://github.com/svarlamov) — say hi in [Discord](https://discord.gg/XJStYvkb5U) or set up a [Meet the maintainers call](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors).
 
 **What are the capabilities and known limitations?**
 Git AI provides line-level attribution for AI-generated code - whether it is written with an edit tool or a bash command. When a  Git rewrite operation is run (`rebase`, `stash`, `squash --merge`, etc) Git AI will move and merge attributions so nothing is lost. 
