@@ -123,7 +123,6 @@ mod status_ignore;
 mod status_unit;
 mod subdirs;
 mod sweep_e2e;
-mod sync_authorship_types;
 mod test_utils_unit;
 mod tls_native_certs;
 mod transcripts_claude_reader;
