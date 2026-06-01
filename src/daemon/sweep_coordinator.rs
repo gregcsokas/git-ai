@@ -134,7 +134,7 @@ impl SweepCoordinator {
                 &path_str,
             )? {
                 None => {
-                    if !self.is_within_lookback(&session.transcript_path) {
+                    if !self.is_within_lookback(&path) {
                         continue;
                     }
                     return Ok(true);
