@@ -410,6 +410,10 @@ pub fn run_fuzzer(config: FuzzerConfig) {
             match op {
                 DestructiveOp::HardReset => {
                     execute_hard_reset(&repo, &mut file_state, &mut operation_log);
+                    // Hard reset reverts ALL files, update secondary file states
+                    for sec_file in &mut secondary_files {
+                        sec_file.lines = read_file_state_from_disk(&repo, &sec_file.filename);
+                    }
                     if file_state.lines.is_empty() {
                         let params = EditParams {
                             attribution: generators::gen_attribution(&mut rng),
@@ -431,6 +435,18 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     }
                 }
                 DestructiveOp::SoftResetRecommit => {
+                    // DEBUG: check secondary files BEFORE soft-reset-recommit
+                    for sec_file in &secondary_files {
+                        if !sec_file.lines.is_empty() {
+                            registry.verify_blame(
+                                &repo,
+                                &sec_file.filename,
+                                &sec_file.lines,
+                                &operation_log,
+                                config.seed,
+                            );
+                        }
+                    }
                     execute_soft_reset_recommit(
                         &repo,
                         &mut file_state,
@@ -439,6 +455,18 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
+                    // DEBUG: verify secondary files AFTER soft-reset-recommit
+                    for sec_file in &secondary_files {
+                        if !sec_file.lines.is_empty() {
+                            registry.verify_blame(
+                                &repo,
+                                &sec_file.filename,
+                                &sec_file.lines,
+                                &operation_log,
+                                config.seed,
+                            );
+                        }
+                    }
                 }
                 DestructiveOp::MixedReset => {
                     execute_mixed_reset(
@@ -544,6 +572,10 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
+                    // Reset-and-reedit does git reset --hard, update secondary files
+                    for sec_file in &mut secondary_files {
+                        sec_file.lines = read_file_state_from_disk(&repo, &sec_file.filename);
+                    }
                 }
                 DestructiveOp::CheckpointOverwrite => {
                     execute_checkpoint_then_overwrite(
@@ -733,8 +765,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    // File renames permanently break daemon attribution (known limitation)
-                    registry.skip_all_blame = true;
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 FileOp::DeleteAndRecreate => {
                     execute_delete_and_recreate(
@@ -756,8 +787,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    // File moves permanently break daemon attribution (known limitation)
-                    registry.skip_all_blame = true;
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 FileOp::ConcurrentCreation => {
                     let new_files = execute_concurrent_file_creation(
@@ -1738,6 +1768,8 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 }
             }
             registry.verify_multi_file_commit(&repo, &all_files, &operation_log, config.seed);
+
+            // Clear the chars tracker after full verification pass so the next
         }
 
         completed_ops += 1;

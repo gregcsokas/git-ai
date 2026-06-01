@@ -573,6 +573,7 @@ fn get_checkpoint_entry_for_file(
     head_tree_id: Arc<Option<String>>,
     initial_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     initial_snapshot_contents: Arc<HashMap<String, String>>,
+    parent_note_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     ts: u128,
 ) -> Result<Option<(WorkingLogEntry, FileLineStats)>, GitAiError> {
     let file_start = Instant::now();
@@ -645,8 +646,12 @@ fn get_checkpoint_entry_for_file(
             }
         }
 
-        // Start with INITIAL attributions (they win)
+        // Start with INITIAL attributions (they win), augmented by parent note
         let mut prev_line_attributions = initial_attrs_for_file.clone();
+
+        // Parent note seeding removed — handled at post-commit via inheritance.
+        let _ = &parent_note_attributions;
+
         let mut blamed_lines: HashSet<u32> = HashSet::new();
 
         // Default all previous-content lines to "human" (no cross-commit blame).
@@ -848,6 +853,12 @@ async fn get_checkpoint_entries(
         .and_then(|c| c.tree().ok())
         .map(|t| t.id().to_string());
 
+    // Parent note seeding is handled at post-commit time via
+    // inherit_parent_attribution_for_modified_files. Seeding at checkpoint level
+    // causes incorrect attribution when parent note line numbers don't align with
+    // the current file content (e.g., after rapid edits in a burst).
+    let parent_note_attributions: HashMap<String, Vec<LineAttribution>> = HashMap::new();
+
     const MAX_CONCURRENT: usize = 30;
 
     // Create a semaphore to limit concurrent tasks
@@ -860,6 +871,7 @@ async fn get_checkpoint_entries(
     let head_tree_id = Arc::new(head_tree_id);
     let initial_attributions = Arc::new(initial_attributions);
     let initial_snapshot_contents = Arc::new(initial_snapshot_contents);
+    let parent_note_attributions = Arc::new(parent_note_attributions);
 
     // Spawn tasks for each file
     let spawn_start = Instant::now();
@@ -879,6 +891,7 @@ async fn get_checkpoint_entries(
             .unwrap_or_default();
         let initial_attributions = Arc::clone(&initial_attributions);
         let initial_snapshot_contents = Arc::clone(&initial_snapshot_contents);
+        let parent_note_attributions = Arc::clone(&parent_note_attributions);
         let semaphore = Arc::clone(&semaphore);
 
         let task = smol::spawn(async move {
@@ -899,6 +912,7 @@ async fn get_checkpoint_entries(
                     head_tree_id.clone(),
                     initial_attributions.clone(),
                     initial_snapshot_contents.clone(),
+                    parent_note_attributions.clone(),
                     ts,
                 )
             })

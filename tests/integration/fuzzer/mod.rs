@@ -444,25 +444,25 @@ fn fuzz_workflow_random() {
 // =============================================================================
 
 #[test]
-#[ignore]
+#[ignore = "long-running: 150+ ops, run manually via task test EXTRA_TEST_BINARY_ARGS=--ignored TEST_FILTER=fuzz_marathon"]
 fn fuzz_marathon_0() {
     run_fuzzer(FuzzerConfig::chaos(0, 150));
 }
 
 #[test]
-#[ignore]
+#[ignore = "long-running: 150+ ops, run manually via task test EXTRA_TEST_BINARY_ARGS=--ignored TEST_FILTER=fuzz_marathon"]
 fn fuzz_marathon_42() {
     run_fuzzer(FuzzerConfig::chaos(42, 150));
 }
 
 #[test]
-#[ignore]
+#[ignore = "long-running: 200 ops, run manually via task test EXTRA_TEST_BINARY_ARGS=--ignored TEST_FILTER=fuzz_marathon"]
 fn fuzz_marathon_1337() {
     run_fuzzer(FuzzerConfig::chaos(1337, 200));
 }
 
 #[test]
-#[ignore]
+#[ignore = "long-running: 200 ops, run manually via task test EXTRA_TEST_BINARY_ARGS=--ignored TEST_FILTER=fuzz_marathon"]
 fn fuzz_marathon_random() {
     let seed: u64 = rand::random_range(0..u64::MAX);
     eprintln!(
