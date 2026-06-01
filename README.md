@@ -107,7 +107,7 @@ Add the [**Open Source CI Actions**](https://usegitai.com/docs/guides/ci-workflo
 <tr>
 <td width="50%" valign="top">
 
-### For Teams and Enterprises
+### Team and Enterprise Platform
 
 <a href="https://usegitai.com/book-demo" target="_blank"><img src="assets/docs/buttons/get-early-access.svg" alt="Get early access" height="35" /></a>
 
