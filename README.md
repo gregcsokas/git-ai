@@ -134,22 +134,12 @@ To get started, [setup a call](https://usegitai.com/book-demo) with the maintain
 
 <sub><i>▶ Watch the 2-minute demo</i></sub>
 
-Our team will help you get set up the platform, install Git AI on every developer's machine, put the data to work.  
-
 </td>
 </tr>
 </table>
 
 
-### How it works:  
-
-1. Coding Agents that support Git AI's standard call `git-ai checkpoint` whenever they write code or modify files with bash scripts. 
-1. Git AI stores this attribution data in Git Notes, linking each line of AI-generated code to the agent, model, and session that created it. Run `git log --show-notes="ai"` to see them. 
-1. Git AI moves and merges line-level attributions when you `squash`, `merge`, `reset`, `rebase`, `stash`, `cherry-pick`, etc. so your AI code is always accurately tracked.
-
-*Git AI does not "detect" AI code — the Agents report exactly which lines they wrote, providing the most accurate, explicit attribution possible.*
-
-### Our Choices
+## Our Choices
 
 - **Transparent** — Git AI requires no workflow changes. Just prompt and commit as you normally would and Git AI automatically attaches attribution metadata to every commit. 
 - **No performance overhead** — Git AI does not rely on Git Hooks (slow, hard to set up in every repo) and it does not wrap the Git binary. It runs outside the hotpath so your Git operations are just as fast as they would be without Git AI. 
@@ -157,7 +147,17 @@ Our team will help you get set up the platform, install Git AI on every develope
 - **Secure Prompt Storage** — Git AI links each line of AI-code back to the prompt that generated it. These sessions scanned and redacted, and saved outside of Git -- keeping repos lean, enabling fine-grained access control, and preventing PII or secrets from leaking. Learn more about setting up a prompt store here. 
 - **Git native and open standard** — Git AI built the [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
 
-### FAQ
+## How it works:  
+
+1. Coding Agents that support Git AI's standard call `git-ai checkpoint` whenever they write code or modify files with bash scripts. 
+1. Git AI stores this attribution data in Git Notes, linking each line of AI-generated code to the agent, model, and session that created it. Run `git log --show-notes="ai"` to see them. 
+1. Git AI moves and merges line-level attributions when you `squash`, `merge`, `reset`, `rebase`, `stash`, `cherry-pick`, etc. so your AI code is always accurately tracked.
+
+*Git AI does not "detect" AI code — the Agents report exactly which lines they wrote, providing the most accurate, explicit attribution possible.*
+
+---
+
+### FAQs
 
 **Does the agent have to commit for Git AI to attribute the code?**
 No. Git AI works no matter how you commit — your Git client, the Git CLI, and your own Git aliases are all supported.
