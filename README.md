@@ -85,7 +85,7 @@ That's it — **no per-repo setup or git hooks required.** Commit with the Agent
 <tr>
 <td width="50%" valign="top">
 
-### Open source CI Workflows
+### Use `git ai stats`
 
 <a href="https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors" target="_blank"><img src="assets/docs/buttons/meet-the-maintainers.svg" alt="Meet the maintainers" height="35" /></a>
 
@@ -95,12 +95,10 @@ Persistent line level AI-attribution for every repository:
 - **Line-level attribution** on every commit
 - **Model and agent tracking** — know exactly which agent and model wrote each line, including accepted rate
 
-To get started, ask your teammates to install Git AI and add the CI Actions. 
+To get started you'll need to add the [**Open Source CI Actions**](https://usegitai.com/docs/guides/ci-workflows) to your repos so attributions are preserved when you **Squash Merge** and **Rebase Merge**. Then process the data however you like — reading the raw Git notes or using [`git ai stats`](https://usegitai.com/docs/cli) command ([CLI reference →](https://usegitai.com/docs/cli)). 
 
 </td>
 <td width="50%" valign="top">
-
-Add the [**Open Source CI Actions**](https://usegitai.com/docs/guides/ci-workflows) to your repos so attributions are preserved when you **Squash Merge** and **Rebase Merge**. Process the data however you like — pipe it into your own dashboards with the [`git ai stats`](https://usegitai.com/docs/cli) command ([CLI reference →](https://usegitai.com/docs/cli))
 
 </td>
 </tr>
@@ -110,7 +108,6 @@ Add the [**Open Source CI Actions**](https://usegitai.com/docs/guides/ci-workflo
 ### Team and Enterprise Platform
 
 <a href="https://usegitai.com/book-demo" target="_blank"><img src="assets/docs/buttons/get-early-access.svg" alt="Get early access" height="35" /></a>
-
 
 **Observability for your Software Factory.** Connect your SCM once and get aggregate data across thousands of repos plus full observability into everything your coding agents do:
 
