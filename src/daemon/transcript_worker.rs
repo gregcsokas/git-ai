@@ -261,21 +261,33 @@ impl TranscriptWorker {
                         continue;
                     }
 
-                    if let Some(agent) = crate::transcripts::agent::get_agent(&tool)
-                        && let Some(stream) = agent
-                            .streams()
-                            .into_iter()
-                            .find(|s| s.stream_kind == stream_kind)
-                    {
-                        let _ = self.ensure_stream_session(
-                            SHARED_STREAM_SESSION_ID,
-                            &tool,
-                            &stream,
-                            &canonical_path,
-                            None,
-                            None,
-                            None,
+                    let Some(agent) = crate::transcripts::agent::get_agent(&tool) else {
+                        continue;
+                    };
+                    let Some(stream) = agent
+                        .streams()
+                        .into_iter()
+                        .find(|s| s.stream_kind == stream_kind)
+                    else {
+                        continue;
+                    };
+
+                    if let Err(e) = self.ensure_stream_session(
+                        SHARED_STREAM_SESSION_ID,
+                        &tool,
+                        &stream,
+                        &canonical_path,
+                        None,
+                        None,
+                        None,
+                    ) {
+                        tracing::warn!(
+                            tool = %tool,
+                            stream_kind = %stream_kind,
+                            error = %e,
+                            "failed to ensure shared stream session, skipping"
                         );
+                        continue;
                     }
 
                     enqueued_this_sweep.insert(dedup_key);
