@@ -95,14 +95,12 @@ Persistent line level AI-attribution for every repository:
 - **Line-level attribution** on every commit
 - **Model and agent tracking** — know exactly which agent and model wrote each line, including accepted rate
 
+To get started, ask your teammates to install Git AI and add the CI Actions. 
+
 </td>
 <td width="50%" valign="top">
 
-**Guides:**
-
-- Ask developers to install Git AI, or roll it out via MDM
-- Add the [**Open Source CI Actions**](https://usegitai.com/docs/guides/ci-workflows) to your repos so attributions are preserved when you **Squash Merge** and **Rebase Merge**
-- Process the data however you like — pipe it into your own dashboards with the [`git ai stats`](https://usegitai.com/docs/cli) command ([CLI reference →](https://usegitai.com/docs/cli))
+Add the [**Open Source CI Actions**](https://usegitai.com/docs/guides/ci-workflows) to your repos so attributions are preserved when you **Squash Merge** and **Rebase Merge**. Process the data however you like — pipe it into your own dashboards with the [`git ai stats`](https://usegitai.com/docs/cli) command ([CLI reference →](https://usegitai.com/docs/cli))
 
 
 </td>
@@ -126,6 +124,8 @@ Persistent line level AI-attribution for every repository:
 - Save prompts behind every generated hunk of code and share summaries with teammates
 - Run on Git AI's Cloud or self-host 
 
+
+To get started, [setup a call](https://usegitai.com/book-demo) with the maintainers. 
 
 </td>
 <td width="50%" valign="top">
