@@ -1,6 +1,4 @@
-use crate::transcripts::agent::{
-    Agent, SHARED_STREAM_SESSION_ID, StreamDescriptor, get_all_agents,
-};
+use crate::transcripts::agent::{Agent, StreamDescriptor, get_all_agents};
 use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::TranscriptError;
@@ -128,7 +126,12 @@ impl SweepCoordinator {
         Ok(false)
     }
 
-    /// Check a single shared stream for staleness.
+    /// Check a single shared stream for processing.
+    ///
+    /// Shared streams (e.g., SQLite DBs in WAL mode) bypass file-metadata
+    /// staleness checks because WAL writes don't update the main file's
+    /// size/mtime. Instead, we always return them if the file exists —
+    /// the watermark cursor inside the processing logic prevents re-processing.
     fn check_shared_stream(
         &self,
         stream: &StreamDescriptor,
@@ -142,25 +145,11 @@ impl SweepCoordinator {
             return Ok(None);
         }
 
-        let path_str = path.display().to_string();
-        let stale = match self.transcripts_db.get_session(
-            SHARED_STREAM_SESSION_ID,
-            stream.stream_kind,
-            &path_str,
-        )? {
-            None => true,
-            Some(existing) => Self::is_file_stale(&path, &existing)?,
-        };
-
-        if stale {
-            Ok(Some(SweepItem::SharedStream {
-                tool: tool.to_string(),
-                stream_kind: stream.stream_kind.to_string(),
-                canonical_path: path,
-            }))
-        } else {
-            Ok(None)
-        }
+        Ok(Some(SweepItem::SharedStream {
+            tool: tool.to_string(),
+            stream_kind: stream.stream_kind.to_string(),
+            canonical_path: path,
+        }))
     }
 
     fn is_file_stale(path: &Path, existing: &SessionRecord) -> Result<bool, TranscriptError> {
