@@ -634,12 +634,11 @@ impl VirtualAttributions {
         }
 
         for (file_path, line_attrs) in &initial_attributions.files {
-            let file_content = final_state_snapshot
-                .get(file_path)
-                .cloned()
-                .or_else(|| {
-                    working_log.stored_initial_file_content_from(&initial_attributions, file_path)
-                })
+            // Use stored content for INITIAL since line_attrs reference that file version.
+            // Fall back to final_state_snapshot only if no stored content exists.
+            let file_content = working_log
+                .stored_initial_file_content_from(&initial_attributions, file_path)
+                .or_else(|| final_state_snapshot.get(file_path).cloned())
                 .unwrap_or_default();
             file_contents.insert(file_path.clone(), file_content.clone());
 
@@ -1347,6 +1346,38 @@ fn collect_committed_hunks(
     Ok(committed_hunks)
 }
 
+/// Detect file renames between parent and commit. Returns a map of old_path → new_path.
+fn detect_renames_in_commit(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+) -> Result<HashMap<String, String>, GitAiError> {
+    use crate::git::repository::exec_git_allow_nonzero;
+
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "diff-tree".to_string(),
+        "-r".to_string(),
+        "-M".to_string(),
+        "--diff-filter=R".to_string(),
+        parent_sha.to_string(),
+        commit_sha.to_string(),
+    ]);
+    let output = exec_git_allow_nonzero(&args)?;
+    let mut renames = HashMap::new();
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            // Format: :old_mode new_mode old_hash new_hash Rxx\told_path\tnew_path
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() == 3 {
+                renames.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+    }
+    Ok(renames)
+}
+
 /// Helper function to collect unstaged line ranges (lines in working directory but not in commit)
 /// Returns (unstaged_hunks, pure_insertion_hunks)
 /// pure_insertion_hunks contains lines that were purely inserted (old_count=0), not modifications
@@ -1567,14 +1598,41 @@ impl VirtualAttributions {
         let mut initial_humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut initial_sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
 
+        // Detect renames so we can look up committed hunks by new path when
+        // the working log references the old path.
+        let rename_map = if parent_sha != "initial" {
+            detect_renames_in_commit(repo, parent_sha, commit_sha).unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+
+        // Extend pathspecs with renamed-to paths so diff_added_lines doesn't filter them out.
+        let extended_pathspecs;
+        let effective_pathspecs = if !rename_map.is_empty()
+            && let Some(ps_ref) = pathspecs
+        {
+            let mut ps = ps_ref.clone();
+            for (old_path, new_path) in &rename_map {
+                if ps.contains(old_path) {
+                    ps.insert(new_path.clone());
+                }
+            }
+            extended_pathspecs = ps;
+            Some(&extended_pathspecs)
+        } else {
+            pathspecs
+        };
+
         // Get committed hunks (in commit coordinates) and unstaged hunks (in working directory coordinates)
-        let committed_hunks = collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?;
-        let (mut unstaged_hunks, pure_insertion_hunks) =
-            if let Some(snapshot) = final_state_snapshot {
-                collect_unstaged_hunks_from_snapshot(repo, commit_sha, pathspecs, snapshot)?
-            } else {
-                collect_unstaged_hunks(repo, commit_sha, pathspecs)?
-            };
+        let committed_hunks =
+            collect_committed_hunks(repo, parent_sha, commit_sha, effective_pathspecs)?;
+        let (mut unstaged_hunks, pure_insertion_hunks) = if let Some(snapshot) =
+            final_state_snapshot
+        {
+            collect_unstaged_hunks_from_snapshot(repo, commit_sha, effective_pathspecs, snapshot)?
+        } else {
+            collect_unstaged_hunks(repo, commit_sha, effective_pathspecs)?
+        };
 
         // IMPORTANT: If a line appears in both committed_hunks and unstaged_hunks, it means:
         // - The line was committed in this commit (in commit coordinates)
@@ -1637,7 +1695,12 @@ impl VirtualAttributions {
 
             // Get unstaged lines for this file (in working directory coordinates).
             let mut unstaged_lines: Vec<u32> = Vec::new();
-            if let Some(unstaged_ranges) = unstaged_hunks.get(&nfc_file_path) {
+            let unstaged_lookup = unstaged_hunks.get(&nfc_file_path).or_else(|| {
+                rename_map
+                    .get(&nfc_file_path)
+                    .and_then(|np| unstaged_hunks.get(np))
+            });
+            if let Some(unstaged_ranges) = unstaged_lookup {
                 for range in unstaged_ranges {
                     unstaged_lines.extend(range.expand());
                 }
@@ -1651,7 +1714,12 @@ impl VirtualAttributions {
             let mut uncommitted_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
 
             // Get the committed hunks for this file (if any) - these are in commit coordinates.
-            let file_committed_hunks = committed_hunks.get(&nfc_file_path);
+            // If the file was renamed, committed_hunks is keyed by the new path.
+            let file_committed_hunks = committed_hunks.get(&nfc_file_path).or_else(|| {
+                rename_map
+                    .get(&nfc_file_path)
+                    .and_then(|np| committed_hunks.get(np))
+            });
 
             for line_attr in line_attrs {
                 // Check each line individually
@@ -1682,15 +1750,27 @@ impl VirtualAttributions {
                             false
                         };
 
+                        let is_renamed_file = rename_map.contains_key(&nfc_file_path);
+
                         if is_committed {
                             // Line was committed in this commit (use commit coordinates)
                             committed_lines_map
                                 .entry(line_attr.author_id.clone())
                                 .or_default()
                                 .push(commit_line_num);
+                        } else if is_renamed_file
+                            && line_attr.author_id != CheckpointKind::Human.to_str()
+                            && !line_attr.author_id.starts_with("h_")
+                        {
+                            // For renamed files, git blame attributes ALL lines to
+                            // this commit. Include AI lines in the note even if they're
+                            // not in committed_hunks — without this, they'd have no
+                            // attestation and blame would fall back to the git committer.
+                            committed_lines_map
+                                .entry(line_attr.author_id.clone())
+                                .or_default()
+                                .push(commit_line_num);
                         }
-                        // Note: Lines that are neither unstaged nor in committed_hunks are lines that
-                        // already existed in the parent commit. They are discarded (not added to uncommitted).
                     }
                 }
             }
@@ -1718,6 +1798,29 @@ impl VirtualAttributions {
 
                 let mut gap_fills: Vec<(String, u32)> = Vec::new();
 
+                // Read file content for content-based gap matching
+                let gap_file_content = self
+                    .file_contents
+                    .get(file_path)
+                    .or_else(|| self.file_contents.get(&nfc_file_path));
+                let gap_file_lines: Vec<&str> = gap_file_content
+                    .map(|c| c.lines().collect())
+                    .unwrap_or_default();
+
+                // Build content→author map from AI-attributed lines
+                let mut content_to_ai_author: StdHashMap<&str, &str> = StdHashMap::new();
+                if !gap_file_lines.is_empty() {
+                    for &(line_num, author) in &line_to_author {
+                        if !author.starts_with("h_")
+                            && author != CheckpointKind::Human.to_str()
+                            && let Some(&content) = gap_file_lines.get((line_num - 1) as usize)
+                            && !content.trim().is_empty()
+                        {
+                            content_to_ai_author.insert(content, author);
+                        }
+                    }
+                }
+
                 for hunk in hunks {
                     for line in hunk.expand() {
                         // Skip lines that already have attribution
@@ -1734,12 +1837,20 @@ impl VirtualAttributions {
                         // Find nearest attributed neighbor after this line
                         let next = line_to_author.iter().find(|(l, _)| *l > line);
 
-                        // Fill only if both neighbors exist and are the same AI author
+                        // Fill if both neighbors exist and are the same AI author
                         if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
                             && prev_author == next_author
                             && !prev_author.starts_with("h_")
                         {
                             gap_fills.push((prev_author.to_string(), line));
+                        } else if let Some(&content) = gap_file_lines.get((line - 1) as usize) {
+                            // Content-based fallback: if the gap line has the same
+                            // content as an AI-attributed line in this file, it's
+                            // likely part of the same AI edit (imara_diff matched it
+                            // as Equal against old content by mistake).
+                            if let Some(&author) = content_to_ai_author.get(content) {
+                                gap_fills.push((author.to_string(), line));
+                            }
                         }
                     }
                 }
@@ -1807,7 +1918,8 @@ impl VirtualAttributions {
                             author_id, ranges,
                         );
 
-                    let file_attestation = authorship_log.get_or_create_file(&nfc_file_path);
+                    let attestation_path = rename_map.get(&nfc_file_path).unwrap_or(&nfc_file_path);
+                    let file_attestation = authorship_log.get_or_create_file(attestation_path);
                     file_attestation.add_entry(entry);
                 }
             }
@@ -1880,7 +1992,8 @@ impl VirtualAttributions {
                     });
                 }
 
-                initial_files.insert(file_path.clone(), uncommitted_line_attrs);
+                let initial_path = rename_map.get(file_path).unwrap_or(file_path);
+                initial_files.insert(initial_path.clone(), uncommitted_line_attrs);
             }
         }
 
@@ -2466,135 +2579,6 @@ pub fn merge_attributions_favoring_first(
     Ok(merged)
 }
 
-/// Restore stashed VirtualAttributions after an operation that may have shifted lines.
-/// Used by pull --rebase --autostash, checkout --merge, and switch --merge.
-///
-/// This function:
-/// 1. Reads current working directory file contents
-/// 2. Builds a VA for any existing attributions at the new HEAD
-/// 3. Merges the stashed VA with the new VA, favoring the stashed one
-/// 4. Writes the result as INITIAL attributions for the new HEAD
-pub fn restore_stashed_va(
-    repository: &mut Repository,
-    old_head: &str,
-    new_head: &str,
-    stashed_va: VirtualAttributions,
-) {
-    tracing::debug!("Restoring stashed VA: {} -> {}", old_head, new_head);
-
-    // Get the files that were in the stashed VA
-    let stashed_files: Vec<String> = stashed_va.files();
-
-    if stashed_files.is_empty() {
-        tracing::debug!("Stashed VA has no files, nothing to restore");
-        return;
-    }
-
-    // Get current working directory file contents (final state after operation)
-    let mut working_files = std::collections::HashMap::new();
-    if let Ok(workdir) = repository.workdir() {
-        for file_path in &stashed_files {
-            let abs_path = workdir.join(file_path);
-            if abs_path.exists()
-                && let Ok(content) = std::fs::read_to_string(&abs_path)
-            {
-                // Fix #957: Strip conflict markers from working files before merging
-                // attributions. When --merge checkout produces conflicts, the working
-                // file may contain conflict markers. We keep "ours" (stashed VA) lines
-                // so the attribution merge operates on clean content.
-                let clean_content = if content_has_conflict_markers(&content) {
-                    tracing::debug!(
-                        "Conflict markers detected in {}, stripping for VA merge",
-                        file_path
-                    );
-                    strip_conflict_markers_keep_ours(&content)
-                } else {
-                    content
-                };
-                working_files.insert(file_path.clone(), clean_content);
-            }
-        }
-    }
-
-    if working_files.is_empty() {
-        tracing::debug!("No working files to restore attributions for");
-        return;
-    }
-
-    // Build a VA for the new HEAD state (if there are any existing attributions)
-    let new_va = match VirtualAttributions::from_just_working_log(
-        repository.clone(),
-        new_head.to_string(),
-        None,
-    ) {
-        Ok(va) => va,
-        Err(e) => {
-            tracing::debug!("Failed to build new VA: {}, using empty", e);
-            VirtualAttributions::new(
-                repository.clone(),
-                new_head.to_string(),
-                std::collections::HashMap::new(),
-                std::collections::HashMap::new(),
-                0,
-            )
-        }
-    };
-
-    // Merge VAs, favoring the stashed VA (our original work)
-    let merged_va = match merge_attributions_favoring_first(stashed_va, new_va, working_files) {
-        Ok(va) => va,
-        Err(e) => {
-            tracing::debug!("Failed to merge VirtualAttributions: {}", e);
-            return;
-        }
-    };
-
-    // Extract INITIAL attributions directly from the merged VA.
-    //
-    // We intentionally avoid `to_authorship_log_and_initial_working_log` here because
-    // that function runs `git diff HEAD -- <file>` to categorise lines as "committed vs
-    // uncommitted".  After `checkout --merge`, the working-tree files may contain git
-    // conflict markers, so the diff line numbers are meaningless relative to the merged
-    // VA's line attributions (which were computed on the stripped, conflict-free content).
-    // Similarly, newly created files that are not yet tracked by git are invisible to
-    // `git diff HEAD` without explicit pathspecs, causing their attributions to be lost.
-    //
-    // `to_initial_working_log_only` simply promotes all AI line attributions in the
-    // merged VA into INITIAL form — exactly what we want since every attribution here
-    // is uncommitted work being preserved across the checkout operation.
-    let initial_attributions = merged_va.to_initial_working_log_only();
-
-    // Write INITIAL attributions to working log for new HEAD
-    if !initial_attributions.files.is_empty() || !initial_attributions.prompts.is_empty() {
-        let working_log = match repository.storage.working_log_for_base_commit(new_head) {
-            Ok(wl) => wl,
-            Err(e) => {
-                tracing::debug!("Failed to get working log for {}: {}", new_head, e);
-                return;
-            }
-        };
-        // Snapshot the file contents from the merged VA so the pre-commit hook can
-        // use them for attribution remapping if the files change before staging.
-        let initial_file_contents =
-            merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
-        if let Err(e) = working_log.write_initial_attributions_with_contents(
-            initial_attributions.files,
-            initial_attributions.prompts,
-            initial_attributions.humans,
-            initial_file_contents,
-            initial_attributions.sessions,
-        ) {
-            tracing::debug!("Failed to write INITIAL attributions: {}", e);
-            return;
-        }
-
-        tracing::debug!(
-            "Restored AI attributions to INITIAL for new HEAD {}",
-            &new_head[..8.min(new_head.len())]
-        );
-    }
-}
-
 /// Check whether a file's content contains git conflict markers.
 ///
 /// Requires both an opening `<<<<<<<` and a closing `>>>>>>>` marker to avoid
@@ -2912,4 +2896,65 @@ fn file_exists_in_commit(
         }
     }
     Ok(false)
+}
+
+pub fn restore_working_log_carryover(
+    repo: &Repository,
+    old_head: &str,
+    new_head: &str,
+    final_state: HashMap<String, String>,
+    human_author: Option<String>,
+) -> Result<(), GitAiError> {
+    if old_head.is_empty() || new_head.is_empty() || final_state.is_empty() {
+        return Ok(());
+    }
+
+    let old_va = VirtualAttributions::from_persisted_working_log(
+        repo.clone(),
+        old_head.to_string(),
+        human_author,
+    )?;
+    restore_virtual_attribution_carryover(repo, new_head, old_va, final_state)
+}
+
+pub fn restore_virtual_attribution_carryover(
+    repo: &Repository,
+    new_head: &str,
+    carried_va: VirtualAttributions,
+    final_state: HashMap<String, String>,
+) -> Result<(), GitAiError> {
+    if new_head.is_empty() || final_state.is_empty() || carried_va.attributions.is_empty() {
+        return Ok(());
+    }
+
+    let new_va =
+        VirtualAttributions::from_persisted_working_log(repo.clone(), new_head.to_string(), None)
+            .unwrap_or_else(|_| {
+                VirtualAttributions::new(
+                    repo.clone(),
+                    new_head.to_string(),
+                    HashMap::new(),
+                    HashMap::new(),
+                    0,
+                )
+            });
+
+    let merged_va = merge_attributions_favoring_first(carried_va, new_va, final_state.clone())?;
+    let initial_attributions = merged_va.to_initial_working_log_only();
+    if initial_attributions.files.is_empty()
+        && initial_attributions.prompts.is_empty()
+        && initial_attributions.sessions.is_empty()
+    {
+        return Ok(());
+    }
+
+    let working_log = repo.storage.working_log_for_base_commit(new_head)?;
+    working_log.write_initial_attributions_with_contents(
+        initial_attributions.files,
+        initial_attributions.prompts,
+        initial_attributions.humans,
+        final_state,
+        initial_attributions.sessions,
+    )?;
+    Ok(())
 }

@@ -139,6 +139,10 @@ pub enum SemanticEvent {
         original_head: String,
         new_head: String,
     },
+    CherryPickNoCommit {
+        source_refs: Vec<String>,
+        head: String,
+    },
     CherryPickAbort {
         head: String,
     },
@@ -186,7 +190,6 @@ pub enum SemanticEvent {
     CleanedWorkspace,
     StashOperation {
         kind: StashOpKind,
-        stash_ref: Option<String>,
         head: Option<String>,
     },
     FetchCompleted {

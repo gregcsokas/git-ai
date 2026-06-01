@@ -25,7 +25,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
 
         let mut events = Vec::new();
         match name {
-            "commit" => {
+            "commit" | "revert" => {
                 let amend = args.iter().any(|arg| arg == "--amend");
                 let post_head =
                     non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()));
@@ -41,7 +41,12 @@ impl CommandAnalyzer for HistoryAnalyzer {
                         old_head = pre_head;
                     }
                     if amend {
-                        events.push(SemanticEvent::CommitAmended { old_head, new_head });
+                        let pre_head =
+                            non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()));
+                        let is_stale = pre_head.as_deref().is_some_and(|ph| ph == new_head);
+                        if !is_stale {
+                            events.push(SemanticEvent::CommitAmended { old_head, new_head });
+                        }
                     } else {
                         events.push(SemanticEvent::CommitCreated {
                             base: sanitize_base(Some(old_head), &new_head),
@@ -96,6 +101,20 @@ impl CommandAnalyzer for HistoryAnalyzer {
             "cherry-pick" => {
                 if args.iter().any(|arg| arg == "--abort") {
                     events.push(SemanticEvent::CherryPickAbort {
+                        head: cmd
+                            .post_repo
+                            .as_ref()
+                            .and_then(|repo| repo.head.clone())
+                            .unwrap_or_default(),
+                    });
+                } else if args.iter().any(|arg| arg == "--no-commit" || arg == "-n") {
+                    let source_refs: Vec<String> = args
+                        .iter()
+                        .filter(|arg| !arg.starts_with('-') && !arg.is_empty())
+                        .cloned()
+                        .collect();
+                    events.push(SemanticEvent::CherryPickNoCommit {
+                        source_refs,
                         head: cmd
                             .post_repo
                             .as_ref()
@@ -487,6 +506,17 @@ fn parse_update_ref_heads(
         [ref_name, new_oid] => (ref_name.clone(), new_oid.clone(), None),
         [ref_name, new_oid, old_oid] => (ref_name.clone(), new_oid.clone(), Some(old_oid.clone())),
         _ => return None,
+    };
+
+    let ref_name = if ref_name == "HEAD" {
+        let branch = cmd.pre_repo.as_ref().and_then(|r| r.branch.as_ref())?;
+        if branch.starts_with("refs/heads/") {
+            branch.clone()
+        } else {
+            format!("refs/heads/{}", branch)
+        }
+    } else {
+        ref_name
     };
 
     if !ref_name.starts_with("refs/heads/") {
