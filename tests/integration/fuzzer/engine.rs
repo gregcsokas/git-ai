@@ -84,7 +84,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 8,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 
@@ -103,7 +103,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 
@@ -122,7 +122,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 10,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 
@@ -141,7 +141,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 
@@ -160,7 +160,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 
@@ -179,7 +179,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 
@@ -198,7 +198,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 8,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 
@@ -217,7 +217,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 
@@ -236,7 +236,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 
@@ -255,7 +255,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 8,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 
@@ -274,7 +274,7 @@ impl FuzzerConfig {
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: false,
+            verify_sessions: true,
         }
     }
 }
@@ -295,6 +295,10 @@ pub fn run_fuzzer(config: FuzzerConfig) {
 
     // Extra files created by concurrent creation ops
     let mut extra_files: Vec<FileState> = Vec::new();
+
+    // All filenames to verify (secondary + extra, grows as extra files are created)
+    let mut all_verify_filenames: Vec<String> =
+        secondary_files.iter().map(|f| f.filename.clone()).collect();
 
     operation_log.push(format!(
         "=== Fuzzer seed={} ops={} rewrite={:.0}% destructive={:.0}% partial={:.0}% file={:.0}% stress={:.0}% combined={:.0}% workflow={:.0}% ===",
@@ -328,7 +332,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
             );
         }
         execute_commit(&repo, "initial fuzzer commit", &mut operation_log);
-        verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+        verify_main_file(
+            &repo,
+            &mut registry,
+            &file_state.filename,
+            &operation_log,
+            &config,
+        );
     }
 
     // Main loop
@@ -397,9 +407,16 @@ pub fn run_fuzzer(config: FuzzerConfig) {
             verify_main_file_with_retention(
                 &repo,
                 &mut registry,
-                &file_state,
+                &file_state.filename,
                 &operation_log,
                 &config,
+            );
+            verify_secondary_files(
+                &repo,
+                &mut registry,
+                &all_verify_filenames,
+                &operation_log,
+                config.seed,
             );
         } else if file_state.lines.len() > 2 && roll < cumulative_destructive {
             // === DESTRUCTIVE OPERATIONS ===
@@ -435,18 +452,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     }
                 }
                 DestructiveOp::SoftResetRecommit => {
-                    // DEBUG: check secondary files BEFORE soft-reset-recommit
-                    for sec_file in &secondary_files {
-                        if !sec_file.lines.is_empty() {
-                            registry.verify_blame(
-                                &repo,
-                                &sec_file.filename,
-                                &sec_file.lines,
-                                &operation_log,
-                                config.seed,
-                            );
-                        }
-                    }
                     execute_soft_reset_recommit(
                         &repo,
                         &mut file_state,
@@ -455,18 +460,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    // DEBUG: verify secondary files AFTER soft-reset-recommit
-                    for sec_file in &secondary_files {
-                        if !sec_file.lines.is_empty() {
-                            registry.verify_blame(
-                                &repo,
-                                &sec_file.filename,
-                                &sec_file.lines,
-                                &operation_log,
-                                config.seed,
-                            );
-                        }
-                    }
                 }
                 DestructiveOp::MixedReset => {
                     execute_mixed_reset(
@@ -652,10 +645,20 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 ));
                 file_state.lines = actual;
             }
-            let status = git(&repo, &["status", "--porcelain"]).unwrap();
-            if status.trim().is_empty() && !file_state.lines.is_empty() {
-                verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
-            }
+            verify_main_file(
+                &repo,
+                &mut registry,
+                &file_state.filename,
+                &operation_log,
+                &config,
+            );
+            verify_secondary_files(
+                &repo,
+                &mut registry,
+                &all_verify_filenames,
+                &operation_log,
+                config.seed,
+            );
         } else if file_state.lines.len() > 1 && roll < cumulative_partial {
             // === PARTIAL STAGING OPERATIONS ===
             let op = generators::gen_partial_stage_op(&mut rng);
@@ -669,25 +672,18 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    // Don't verify blame immediately after partial stage if there are unstaged lines,
-                    // because git-ai blame shows working tree state (committed + unstaged), not just
-                    // committed state. We'll verify after committing the remaining lines.
-                    if result.unstaged_lines.is_empty() {
-                        // All lines were staged, safe to verify against committed_lines
-                        registry.verify_blame(
-                            &repo,
-                            &file_state.filename,
-                            &result.committed_lines,
-                            &operation_log,
-                            config.seed,
-                        );
-                    }
                     if !result.unstaged_lines.is_empty() {
                         git(&repo, &["add", "-A"]).unwrap();
                         repo.commit("partial-stage: commit remaining").unwrap();
                     }
                     // Now verify against the full working tree
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 PartialStageOp::SelectiveFileCommit => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -707,16 +703,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         repo.commit("selective: commit remaining dirty files")
                             .unwrap();
                     }
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
-                    if !secondary_files[sec_idx].lines.is_empty() {
-                        registry.verify_blame(
-                            &repo,
-                            &secondary_files[sec_idx].filename,
-                            &secondary_files[sec_idx].lines,
-                            &operation_log,
-                            config.seed,
-                        );
-                    }
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 PartialStageOp::InterleavedPartialCommits => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -729,16 +722,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
-                    if !secondary_files[sec_idx].lines.is_empty() {
-                        registry.verify_blame(
-                            &repo,
-                            &secondary_files[sec_idx].filename,
-                            &secondary_files[sec_idx].lines,
-                            &operation_log,
-                            config.seed,
-                        );
-                    }
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 PartialStageOp::SquashPartialStage => {
                     execute_squash_partial_stage(
@@ -749,9 +739,22 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
             }
+            verify_secondary_files(
+                &repo,
+                &mut registry,
+                &all_verify_filenames,
+                &operation_log,
+                config.seed,
+            );
         } else if file_state.lines.len() > 2 && roll < cumulative_file_op {
             // === FILE OPERATIONS ===
             let op = generators::gen_file_op(&mut rng);
@@ -765,7 +768,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 FileOp::DeleteAndRecreate => {
                     execute_delete_and_recreate(
@@ -776,7 +785,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 FileOp::MoveToSubdir => {
                     execute_move_to_subdir(
@@ -787,7 +802,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 FileOp::ConcurrentCreation => {
                     let new_files = execute_concurrent_file_creation(
@@ -797,19 +818,26 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    // Verify all newly created files
                     for nf in &new_files {
-                        registry.verify_blame(
-                            &repo,
-                            &nf.filename,
-                            &nf.lines,
-                            &operation_log,
-                            config.seed,
-                        );
+                        all_verify_filenames.push(nf.filename.clone());
                     }
                     extra_files.extend(new_files);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
             }
+            verify_secondary_files(
+                &repo,
+                &mut registry,
+                &all_verify_filenames,
+                &operation_log,
+                config.seed,
+            );
         } else if file_state.lines.len() > 2 && roll < cumulative_stress {
             // === STRESS OPERATIONS ===
             let op = generators::gen_stress_op(&mut rng);
@@ -823,7 +851,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::DoubleCommitRapid => {
                     execute_double_commit_rapid(
@@ -834,7 +868,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::AlternatingAmend => {
                     execute_alternating_amend(
@@ -845,7 +885,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::AmendAttributionFlip => {
                     execute_amend_attribution_flip(
@@ -856,7 +902,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::MultiCommitRebase => {
                     execute_multi_commit_rebase(
@@ -867,7 +919,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::Thrash => {
                     registry.reset_session_tracking();
@@ -879,16 +937,19 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    let status = git(&repo, &["status", "--porcelain"]).unwrap();
-                    if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(
-                            &repo,
-                            &mut registry,
-                            &file_state,
-                            &operation_log,
-                            &config,
-                        );
+                    let actual = read_file_state_from_disk(&repo, &file_state.filename);
+                    if actual != file_state.lines {
+                        operation_log
+                            .push("post-thrash: model diverged, trusting disk".to_string());
+                        file_state.lines = actual;
                     }
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::RebaseThenAmend => {
                     execute_rebase_then_amend(
@@ -899,7 +960,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::CheckpointNonexistent => {
                     execute_checkpoint_nonexistent(
@@ -910,7 +977,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::TwoBranchMerge => {
                     execute_two_branch_merge(
@@ -921,6 +994,14 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut operation_log,
                         config.seed,
                     );
+                    file_state.lines = read_file_state_from_disk(&repo, &file_state.filename);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::ExponentialAmend => {
                     execute_exponential_amend(
@@ -930,7 +1011,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::SessionInterleave => {
                     execute_session_interleave(
@@ -941,7 +1028,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::CrossFileCheckpointRace => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -955,16 +1048,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
-                    if !secondary_files[sec_idx].lines.is_empty() {
-                        registry.verify_blame(
-                            &repo,
-                            &secondary_files[sec_idx].filename,
-                            &secondary_files[sec_idx].lines,
-                            &operation_log,
-                            config.seed,
-                        );
-                    }
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::WhitespaceNoise => {
                     execute_whitespace_noise(
@@ -975,7 +1065,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::AmendResetCycle => {
                     registry.reset_session_tracking();
@@ -987,7 +1083,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::PartialThenAmend => {
                     execute_partial_then_amend(
@@ -998,7 +1100,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::CheckpointStorm => {
                     execute_checkpoint_storm(
@@ -1009,7 +1117,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::AlternatingAmendStorm => {
                     execute_alternating_amend_storm(
@@ -1020,7 +1134,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 StressOp::MultiSquash => {
                     execute_multi_squash(
@@ -1031,8 +1151,22 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state.filename,
+                        &operation_log,
+                        &config,
+                    );
                 }
             }
+            verify_secondary_files(
+                &repo,
+                &mut registry,
+                &all_verify_filenames,
+                &operation_log,
+                config.seed,
+            );
         } else if file_state.lines.len() > 2 && roll < cumulative_combined {
             // === COMBINED OPERATIONS ===
             let op = generators::gen_combined_op(&mut rng);
@@ -1106,14 +1240,8 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    for f in &kept {
-                        registry.verify_blame(
-                            &repo,
-                            &f.filename,
-                            &f.lines,
-                            &operation_log,
-                            config.seed,
-                        );
+                    for nf in &kept {
+                        all_verify_filenames.push(nf.filename.clone());
                     }
                     extra_files.extend(kept);
                 }
@@ -1191,16 +1319,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-
-                    if !secondary_files[sec_idx].lines.is_empty() {
-                        registry.verify_blame(
-                            &repo,
-                            &secondary_files[sec_idx].filename,
-                            &secondary_files[sec_idx].lines,
-                            &operation_log,
-                            config.seed,
-                        );
-                    }
                 }
                 CombinedOp::InitialCarryover => {
                     execute_initial_carryover(
@@ -1448,16 +1566,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-
-                    if !secondary_files[sec_idx].lines.is_empty() {
-                        registry.verify_blame(
-                            &repo,
-                            &secondary_files[sec_idx].filename,
-                            &secondary_files[sec_idx].lines,
-                            &operation_log,
-                            config.seed,
-                        );
-                    }
                 }
                 CombinedOp::SquashResetRecommit => {
                     registry.reset_session_tracking();
@@ -1481,7 +1589,20 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     );
                 }
             }
-            verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+            verify_main_file(
+                &repo,
+                &mut registry,
+                &file_state.filename,
+                &operation_log,
+                &config,
+            );
+            verify_secondary_files(
+                &repo,
+                &mut registry,
+                &all_verify_filenames,
+                &operation_log,
+                config.seed,
+            );
         } else if file_state.lines.len() > 2 && roll < cumulative_workflow {
             // === WORKFLOW OPERATIONS ===
             // Reset session tracking: workflow ops use non-standard commit paths (plumbing,
@@ -1698,6 +1819,20 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 ));
                 file_state.lines = actual;
             }
+            verify_main_file(
+                &repo,
+                &mut registry,
+                &file_state.filename,
+                &operation_log,
+                &config,
+            );
+            verify_secondary_files(
+                &repo,
+                &mut registry,
+                &all_verify_filenames,
+                &operation_log,
+                config.seed,
+            );
         } else {
             // === STANDARD MULTI-EDIT COMMIT ===
             let edit_count = rng.random_range(1..=config.max_edits_per_commit);
@@ -1744,30 +1879,36 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 &mut operation_log,
             );
 
-            verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+            verify_main_file(
+                &repo,
+                &mut registry,
+                &file_state.filename,
+                &operation_log,
+                &config,
+            );
+            verify_secondary_files(
+                &repo,
+                &mut registry,
+                &all_verify_filenames,
+                &operation_log,
+                config.seed,
+            );
 
-            // Also verify secondary files if they have content
-            for sec_file in &secondary_files {
-                if !sec_file.lines.is_empty() {
-                    registry.verify_blame(
-                        &repo,
-                        &sec_file.filename,
-                        &sec_file.lines,
-                        &operation_log,
-                        config.seed,
-                    );
+            // Multi-file verification: verify all files together (reads from disk)
+            let main_lines = read_file_state_from_disk(&repo, &file_state.filename);
+            let mut all_files: Vec<(&str, Vec<char>)> =
+                vec![(file_state.filename.as_str(), main_lines)];
+            for filename in &all_verify_filenames {
+                let lines = read_file_state_from_disk(&repo, filename);
+                if !lines.is_empty() {
+                    all_files.push((filename.as_str(), lines));
                 }
             }
-
-            // Multi-file verification: verify all files together
-            let mut all_files: Vec<(&str, &[char])> =
-                vec![(file_state.filename.as_str(), file_state.lines.as_slice())];
-            for sec_file in &secondary_files {
-                if !sec_file.lines.is_empty() {
-                    all_files.push((sec_file.filename.as_str(), sec_file.lines.as_slice()));
-                }
-            }
-            registry.verify_multi_file_commit(&repo, &all_files, &operation_log, config.seed);
+            let all_files_refs: Vec<(&str, &[char])> = all_files
+                .iter()
+                .map(|(name, lines)| (*name, lines.as_slice()))
+                .collect();
+            registry.verify_multi_file_commit(&repo, &all_files_refs, &operation_log, config.seed);
 
             // Clear the chars tracker after full verification pass so the next
         }
@@ -1795,55 +1936,58 @@ pub fn run_fuzzer(config: FuzzerConfig) {
 fn verify_main_file(
     repo: &TestRepo,
     registry: &mut CharRegistry,
-    file_state: &FileState,
+    filename: &str,
     operation_log: &[String],
     config: &FuzzerConfig,
 ) {
-    registry.verify_blame(
-        repo,
-        &file_state.filename,
-        &file_state.lines,
-        operation_log,
-        config.seed,
-    );
-
-    // Verify note schema
+    let lines = read_file_state_from_disk(repo, filename);
+    if lines.is_empty() {
+        return;
+    }
+    registry.verify_blame(repo, filename, &lines, operation_log, config.seed);
     registry.verify_note_schema(repo, operation_log, config.seed);
-
-    // Verify line ranges in the note match actual attributions
-    registry.verify_note_line_ranges(
-        repo,
-        &file_state.filename,
-        &file_state.lines,
-        operation_log,
-        config.seed,
-    );
+    registry.verify_note_line_ranges(repo, filename, &lines, operation_log, config.seed);
+    if config.verify_sessions {
+        registry.verify_sessions(repo, &lines, operation_log, config.seed);
+    }
 }
 
 fn verify_main_file_with_retention(
     repo: &TestRepo,
     registry: &mut CharRegistry,
-    file_state: &FileState,
+    filename: &str,
     operation_log: &[String],
     config: &FuzzerConfig,
 ) {
-    registry.verify_blame(
-        repo,
-        &file_state.filename,
-        &file_state.lines,
-        operation_log,
-        config.seed,
-    );
+    let lines = read_file_state_from_disk(repo, filename);
+    if lines.is_empty() {
+        return;
+    }
+    registry.verify_blame(repo, filename, &lines, operation_log, config.seed);
     if config.verify_sessions {
         let head_sha = git(repo, &["rev-parse", "HEAD"])
             .unwrap()
             .trim()
             .to_string();
         if let Some(note) = repo.read_authorship_note(&head_sha)
-            && note.contains(&file_state.filename)
+            && note.contains(filename)
         {
-            registry.verify_sessions(repo, &file_state.lines, operation_log, config.seed);
-            registry.verify_session_retention(repo, operation_log, config.seed);
+            registry.verify_sessions(repo, &lines, operation_log, config.seed);
+        }
+    }
+}
+
+fn verify_secondary_files(
+    repo: &TestRepo,
+    registry: &mut CharRegistry,
+    filenames: &[String],
+    operation_log: &[String],
+    seed: u64,
+) {
+    for filename in filenames {
+        let lines = read_file_state_from_disk(repo, filename);
+        if !lines.is_empty() {
+            registry.verify_blame(repo, filename, &lines, operation_log, seed);
         }
     }
 }
