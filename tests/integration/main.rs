@@ -132,4 +132,3 @@ mod utf8_filenames;
 mod virtual_attribution_unit;
 mod windsurf;
 mod worktrees;
-mod fuzzer;
