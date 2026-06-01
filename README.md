@@ -54,15 +54,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com
 
 That's it — **no per-repo setup or git hooks required.** Commit with the Agent, the CLI or your Git AI. Attribution is captured and linked to commits automatically.
 
-
-### How it works:  
-
-1. Coding Agents that support Git AI's standard call `git-ai checkpoint` whenever they write code or modify files with bash scripts. 
-1. Git AI stores this attribution data in Git Notes, linking each line of AI-generated code to the agent, model, and session that created it. Run `git log --show-notes="ai"` to see them. 
-1. Git AI moves and merges line-level attributions when you `squash`, `merge`, `reset`, `rebase`, `stash`, `cherry-pick`, etc. so your AI code is always accurately tracked.
-
-*Git AI does not "detect" AI code — the Agents report exactly which lines they wrote, providing the most accurate, explicit attribution possible.*
-
 **The Git AI standard is supported by:**
 <table>
 <tr>
@@ -88,22 +79,38 @@ That's it — **no per-repo setup or git hooks required.** Commit with the Agent
 </tr>
 </table>
 
-### Our Choices
-
-- **Transparent** — Git AI requires no workflow changes. Just prompt and commit as you normally would and Git AI automatically attaches attribution metadata to every commit. 
-- **No performance overhead** — Git AI does not rely on Git Hooks (slow, hard to set up in every repo) and it does not wrap the Git binary. It runs outside the hotpath so your Git operations are just as fast as they would be without Git AI. 
-- **Local-first** — Works offline, no login required.
-- **Secure Prompt Storage** — Git AI links each line of AI-code back to the prompt that generated it. These sessions scanned and redacted, and saved outside of Git -- keeping repos lean, enabling fine-grained access control, and preventing PII or secrets from leaking. Learn more about setting up a prompt store here. 
-- **Git native and open standard** — Git AI built the [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
-
-
-## Using with your team
+## Use with your Team 
 
 <table>
 <tr>
 <td width="50%" valign="top">
 
-### Teams and enterprises
+### Open source CI Workflows
+
+<a href="https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors" target="_blank"><img src="assets/docs/buttons/meet-the-maintainers.svg" alt="Meet the maintainers" height="35" /></a>
+
+Persistent line level AI-attribution for every repository:
+
+- Measure **% AI** per commit, PR, and contributor
+- **Line-level attribution** on every commit
+- **Model and agent tracking** — know exactly which agent and model wrote each line, including accepted rate
+
+</td>
+<td width="50%" valign="top">
+
+**Guides:**
+
+- Ask developers to install Git AI, or roll it out via MDM
+- Add the [**Open Source CI Actions**](https://usegitai.com/docs/guides/ci-workflows) to your repos so attributions are preserved when you **Squash Merge** and **Rebase Merge**
+- Process the data however you like — pipe it into your own dashboards with the [`git ai stats`](https://usegitai.com/docs/cli) command ([CLI reference →](https://usegitai.com/docs/cli))
+
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### For Teams and Enterprises
 
 <a href="https://usegitai.com/book-demo" target="_blank"><img src="assets/docs/buttons/get-early-access.svg" alt="Get early access" height="35" /></a>
 
@@ -131,33 +138,24 @@ Our team will help you get set up the platform, install Git AI on every develope
 
 </td>
 </tr>
-<tr>
-<td width="50%" valign="top">
-
-### Deploy the open source CLI
-
-<a href="https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors" target="_blank"><img src="assets/docs/buttons/meet-the-maintainers.svg" alt="Meet the maintainers" height="35" /></a>
-
-Persistent AI-attribution for every repository:
-
-- Measure **% AI** per commit, PR, and contributor
-- **Line-level attribution** on every commit
-- **Model and agent tracking** — know exactly which agent and model wrote each line, including accepted rate
-
-</td>
-<td width="50%" valign="top">
-
-**Guides:**
-
-- Ask developers to install Git AI, or roll it out via MDM
-- Add the [**Open Source CI Actions**](https://usegitai.com/docs/guides/ci-workflows) to your repos so attributions are preserved when you **Squash Merge** and **Rebase Merge**
-- Process the data however you like — pipe it into your own dashboards with the [`git ai stats`](https://usegitai.com/docs/cli) command ([CLI reference →](https://usegitai.com/docs/cli))
-
-
-</td>
-</tr>
 </table>
 
+
+### How it works:  
+
+1. Coding Agents that support Git AI's standard call `git-ai checkpoint` whenever they write code or modify files with bash scripts. 
+1. Git AI stores this attribution data in Git Notes, linking each line of AI-generated code to the agent, model, and session that created it. Run `git log --show-notes="ai"` to see them. 
+1. Git AI moves and merges line-level attributions when you `squash`, `merge`, `reset`, `rebase`, `stash`, `cherry-pick`, etc. so your AI code is always accurately tracked.
+
+*Git AI does not "detect" AI code — the Agents report exactly which lines they wrote, providing the most accurate, explicit attribution possible.*
+
+### Our Choices
+
+- **Transparent** — Git AI requires no workflow changes. Just prompt and commit as you normally would and Git AI automatically attaches attribution metadata to every commit. 
+- **No performance overhead** — Git AI does not rely on Git Hooks (slow, hard to set up in every repo) and it does not wrap the Git binary. It runs outside the hotpath so your Git operations are just as fast as they would be without Git AI. 
+- **Local-first** — Works offline, no login required.
+- **Secure Prompt Storage** — Git AI links each line of AI-code back to the prompt that generated it. These sessions scanned and redacted, and saved outside of Git -- keeping repos lean, enabling fine-grained access control, and preventing PII or secrets from leaking. Learn more about setting up a prompt store here. 
+- **Git native and open standard** — Git AI built the [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
 
 ### FAQ
 
