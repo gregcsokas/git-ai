@@ -118,6 +118,7 @@ pub struct Config {
     custom_attributes: HashMap<String, String>,
     git_ai_hooks: HashMap<String, Vec<String>>,
     notes_backend: NotesBackendConfig,
+    transcript_streaming_lookback_days: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
@@ -191,6 +192,8 @@ pub struct FileConfig {
     pub git_ai_hooks: Option<HashMap<String, Vec<String>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_backend: Option<NotesBackendConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_streaming_lookback_days: Option<u32>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -219,6 +222,8 @@ pub struct ConfigPatch {
     pub feature_flags: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_backend: Option<NotesBackendConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_streaming_lookback_days: Option<u32>,
 }
 
 impl Config {
@@ -465,6 +470,11 @@ impl Config {
     /// Returns true when the HTTP notes backend is active.
     pub fn notes_backend_enabled(&self) -> bool {
         matches!(self.notes_backend.kind, NotesBackendKind::Http)
+    }
+
+    /// Returns the transcript streaming lookback in days, or None for unlimited.
+    pub fn transcript_streaming_lookback_days(&self) -> Option<u32> {
+        self.transcript_streaming_lookback_days
     }
 
     /// Returns true if quiet mode is enabled (suppresses chart output after commits)
@@ -762,6 +772,18 @@ fn build_config() -> Config {
             .or_else(|| file_backend.as_ref().and_then(|b| b.backend_url.clone())),
     };
 
+    // Transcript streaming lookback: env > file > default (7 days). 0 means unlimited (None).
+    let transcript_streaming_lookback_days = env::var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.transcript_streaming_lookback_days)
+        })
+        .or(Some(7))
+        .and_then(|v| if v == 0 { None } else { Some(v) });
+
     #[cfg(any(test, feature = "test-support"))]
     {
         let mut config = Config {
@@ -784,6 +806,7 @@ fn build_config() -> Config {
             custom_attributes: custom_attributes.clone(),
             git_ai_hooks: git_ai_hooks.clone(),
             notes_backend,
+            transcript_streaming_lookback_days,
         };
         apply_test_config_patch(&mut config);
         config
@@ -810,6 +833,7 @@ fn build_config() -> Config {
         custom_attributes,
         git_ai_hooks,
         notes_backend,
+        transcript_streaming_lookback_days,
     }
 }
 
@@ -1240,6 +1264,9 @@ fn apply_test_config_patch(config: &mut Config) {
                 config.notes_backend.backend_url = Some(url);
             }
         }
+        if let Some(days) = patch.transcript_streaming_lookback_days {
+            config.transcript_streaming_lookback_days = if days == 0 { None } else { Some(days) };
+        }
     }
 }
 
@@ -1277,6 +1304,7 @@ mod tests {
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
             notes_backend: NotesBackendConfig::default(),
+            transcript_streaming_lookback_days: Some(7),
         }
     }
 
@@ -1387,6 +1415,7 @@ mod tests {
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
             notes_backend: NotesBackendConfig::default(),
+            transcript_streaming_lookback_days: Some(7),
         }
     }
 
@@ -1506,6 +1535,7 @@ mod tests {
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
             notes_backend: NotesBackendConfig::default(),
+            transcript_streaming_lookback_days: Some(7),
         }
     }
 
@@ -1960,5 +1990,43 @@ mod tests {
             NotesBackendKind::Http,
             "GIT_AI_NOTES_BACKEND_KIND=http should override the default git_notes"
         );
+    }
+
+    #[test]
+    fn test_transcript_streaming_lookback_days_default() {
+        let config = create_test_config(vec![], vec![]);
+        assert_eq!(config.transcript_streaming_lookback_days(), Some(7));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_transcript_streaming_lookback_days_env_override() {
+        let old = std::env::var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS").ok();
+        unsafe {
+            std::env::set_var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS", "14");
+        }
+        let cfg = Config::fresh();
+        let result = cfg.transcript_streaming_lookback_days();
+        match old {
+            Some(v) => unsafe { std::env::set_var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS", v) },
+            None => unsafe { std::env::remove_var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS") },
+        }
+        assert_eq!(result, Some(14));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_transcript_streaming_lookback_days_zero_means_unlimited() {
+        let old = std::env::var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS").ok();
+        unsafe {
+            std::env::set_var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS", "0");
+        }
+        let cfg = Config::fresh();
+        let result = cfg.transcript_streaming_lookback_days();
+        match old {
+            Some(v) => unsafe { std::env::set_var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS", v) },
+            None => unsafe { std::env::remove_var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS") },
+        }
+        assert_eq!(result, None);
     }
 }

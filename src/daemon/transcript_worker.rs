@@ -352,10 +352,28 @@ impl TranscriptWorker {
             .and_then(|s| s.to_str())
             .map(|s| s.to_string());
 
+        let lookback_cutoff = config::Config::get()
+            .transcript_streaming_lookback_days()
+            .map(|days| {
+                std::time::SystemTime::now()
+                    - std::time::Duration::from_secs(u64::from(days) * 24 * 60 * 60)
+            });
+
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() || path.extension().map(|ext| ext == "jsonl") != Some(true) {
                 continue;
+            }
+
+            if let Some(cutoff) = lookback_cutoff {
+                let too_old = path
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .is_some_and(|mtime| mtime < cutoff);
+                if too_old {
+                    continue;
+                }
             }
 
             let Some(external_session_id) = path

@@ -1,9 +1,12 @@
-use crate::transcripts::agent::{Agent, StreamDescriptor, SHARED_STREAM_SESSION_ID, get_all_agents};
+use crate::transcripts::agent::{
+    Agent, SHARED_STREAM_SESSION_ID, StreamDescriptor, get_all_agents,
+};
 use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::TranscriptError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// Work items discovered by the sweep.
 #[derive(Debug, Clone)]
@@ -32,13 +35,28 @@ pub enum SweepItem {
 pub struct SweepCoordinator {
     transcripts_db: Arc<TranscriptsDatabase>,
     agent_registry: Vec<(String, Box<dyn Agent>)>,
+    lookback_days: Option<u32>,
 }
 
 impl SweepCoordinator {
     pub fn new(transcripts_db: Arc<TranscriptsDatabase>) -> Self {
+        let lookback_days = crate::config::Config::get().transcript_streaming_lookback_days();
         Self {
             transcripts_db,
             agent_registry: get_all_agents(),
+            lookback_days,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_lookback(
+        transcripts_db: Arc<TranscriptsDatabase>,
+        lookback_days: Option<u32>,
+    ) -> Self {
+        Self {
+            transcripts_db,
+            agent_registry: get_all_agents(),
+            lookback_days,
         }
     }
 
@@ -64,8 +82,7 @@ impl SweepCoordinator {
             };
 
             let streams = agent.streams();
-            let (shared, owned): (Vec<_>, Vec<_>) =
-                streams.into_iter().partition(|s| s.shared);
+            let (shared, owned): (Vec<_>, Vec<_>) = streams.into_iter().partition(|s| s.shared);
 
             // Per-session: only check owned streams for staleness
             for session in &discovered {
@@ -85,9 +102,7 @@ impl SweepCoordinator {
             if let Some(first) = discovered.first() {
                 let canonical = Self::canonicalize_path(&first.transcript_path);
                 for stream in &shared {
-                    if let Some(item) =
-                        self.check_shared_stream(stream, &canonical, &first.tool)?
-                    {
+                    if let Some(item) = self.check_shared_stream(stream, &canonical, &first.tool)? {
                         items.push(item);
                     }
                 }
@@ -118,7 +133,12 @@ impl SweepCoordinator {
                 stream.stream_kind,
                 &path_str,
             )? {
-                None => return Ok(true),
+                None => {
+                    if !self.is_within_lookback(&session.transcript_path) {
+                        continue;
+                    }
+                    return Ok(true);
+                }
                 Some(existing) => {
                     if Self::is_file_stale(&path, &existing)? {
                         return Ok(true);
@@ -149,7 +169,7 @@ impl SweepCoordinator {
             stream.stream_kind,
             &path_str,
         )? {
-            None => true,
+            None => self.is_within_lookback(&path),
             Some(existing) => Self::is_file_stale(&path, &existing)?,
         };
 
@@ -161,6 +181,18 @@ impl SweepCoordinator {
             }))
         } else {
             Ok(None)
+        }
+    }
+
+    fn is_within_lookback(&self, path: &Path) -> bool {
+        let Some(days) = self.lookback_days else {
+            return true;
+        };
+        let cutoff =
+            SystemTime::now() - std::time::Duration::from_secs(u64::from(days) * 24 * 60 * 60);
+        match std::fs::metadata(path) {
+            Ok(meta) => meta.modified().map(|mtime| mtime >= cutoff).unwrap_or(true),
+            Err(_) => true,
         }
     }
 
