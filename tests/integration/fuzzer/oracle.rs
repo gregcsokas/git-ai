@@ -183,6 +183,16 @@ impl CharRegistry {
             return;
         }
 
+        // Get porcelain blame to extract orig_line numbers for each line.
+        // The note stores line numbers in the commit's coordinate space, and
+        // git blame porcelain reports the original line number within that commit.
+        // When there are uncommitted changes after a commit, current and orig line
+        // numbers can diverge.
+        let porcelain_output = repo
+            .git(&["blame", "--line-porcelain", "--", filename])
+            .unwrap_or_default();
+        let orig_lines = parse_porcelain_orig_lines(&porcelain_output);
+
         for (i, (blame_line, &expected_char)) in
             blame_lines.iter().zip(file_lines.iter()).enumerate()
         {
@@ -209,15 +219,19 @@ impl CharRegistry {
                 // this line number, the commit provably didn't touch it. The line is
                 // a survivor from an earlier commit, "untracked" is correct.
                 //
-                // This is maximally narrow: we ask git itself whether the blamed
-                // commit modified this specific line. No heuristics, no state tracking.
+                // IMPORTANT: We use the ORIGINAL line number from git blame porcelain
+                // (the line's position in the blamed commit's tree) because that's
+                // the coordinate space the authorship note uses.
                 if expected_ai && !is_ai_author {
                     let blame_commit = blame_line.split_whitespace().next().unwrap_or("unknown");
                     let blame_commit = blame_commit.trim_start_matches('^');
 
-                    // Check 1: if the commit's diff doesn't include this line at all,
+                    // Use orig_line from porcelain (falls back to current line_num)
+                    let orig_line = orig_lines.get(i).copied().unwrap_or(line_num as u32);
+
+                    // Check 1: if the commit's diff doesn't include this orig_line,
                     // blame is re-attributing a survivor line. Clearly acceptable.
-                    if !commit_touched_line(repo, blame_commit, filename, line_num as u32) {
+                    if !commit_touched_line(repo, blame_commit, filename, orig_line) {
                         continue;
                     }
 
@@ -232,7 +246,7 @@ impl CharRegistry {
                     // line. That would mean git-ai DID process it as AI but blame still
                     // shows human — which should be impossible (git-ai blame reads notes).
                     if let Some(note) = repo.read_authorship_note(blame_commit) {
-                        if !note_covers_line_as_ai(&note, filename, line_num as u32) {
+                        if !note_covers_line_as_ai(&note, filename, orig_line) {
                             continue;
                         }
                     } else {
@@ -256,12 +270,13 @@ impl CharRegistry {
                         filename,
                     ])
                     .unwrap_or_else(|e| format!("<diff failed: {}>", e));
+                let orig_line = orig_lines.get(i).copied().unwrap_or(line_num as u32);
                 let diag_path = repo
                     .path()
                     .join(".git/ai/working_logs/EMPTY_PATHSPECS_DIAG.txt");
                 let diag_content = std::fs::read_to_string(&diag_path).unwrap_or_default();
                 panic!(
-                    "Attribution mismatch on line {} of '{}'\n\
+                    "Attribution mismatch on line {} (orig_line={}) of '{}'\n\
                      Seed: {}\n\
                      Character: '{}' (step {})\n\
                      Expected: {} (should {}be AI author)\n\
@@ -274,6 +289,7 @@ impl CharRegistry {
                      Operation log:\n{}\n\
                      Registry:\n{}",
                     line_num,
+                    orig_line,
                     filename,
                     seed,
                     expected_char,
@@ -832,6 +848,25 @@ impl CharRegistry {
     }
 }
 
+/// Parse `git blame --line-porcelain` output to extract original line numbers.
+/// Returns a Vec where index i contains the orig_line for current line i+1.
+/// Porcelain header format: `<sha> <orig_line> <final_line> [<num_lines>]`
+fn parse_porcelain_orig_lines(porcelain: &str) -> Vec<u32> {
+    let mut result = Vec::new();
+    for line in porcelain.lines() {
+        // Header lines start with a hex SHA (40 chars) followed by spaces and numbers
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3
+            && parts[0].len() == 40
+            && parts[0].chars().all(|c| c.is_ascii_hexdigit())
+            && let Ok(orig_line) = parts[1].parse::<u32>()
+        {
+            result.push(orig_line);
+        }
+    }
+    result
+}
+
 /// Parse a blame line to extract author and content.
 /// Format: `sha (author date line_num) content`
 fn parse_blame_line(line: &str) -> (String, String) {
@@ -1025,10 +1060,15 @@ fn commit_touched_line(repo: &TestRepo, commit_sha: &str, filename: &str, line_n
     false
 }
 
-/// Check if a commit's authorship note has an AI session attestation for a specific line.
-/// Returns true ONLY if an AI session (s_ prefixed) covers this line.
-/// Returns false if the line is uncovered OR covered only by human (h_) attestation.
+/// Check if a commit's authorship note has a VALID AI session attestation for a specific line.
+/// Returns true ONLY if an AI session (s_ prefixed) covers this line AND the session
+/// exists in the note's JSON metadata. Orphaned sessions (in attestation but not in
+/// metadata) are not valid — blame skips them, so the oracle must too.
 fn note_covers_line_as_ai(note: &str, filename: &str, line_num: u32) -> bool {
+    // Extract valid session keys from the JSON metadata section.
+    // Returns None if no "sessions" key exists (legacy/test format — trust all entries).
+    let valid_sessions = extract_metadata_sessions(note);
+
     let mut in_target_file = false;
 
     for raw_line in note.lines() {
@@ -1062,6 +1102,14 @@ fn note_covers_line_as_ai(note: &str, filename: &str, line_num: u32) -> bool {
             let author_part = &trimmed[..space_idx];
             let ranges_part = &trimmed[space_idx + 1..];
             if is_valid_line_ranges(ranges_part) && author_part.starts_with("s_") {
+                // If we have metadata sessions, verify this entry's session exists.
+                // Orphaned sessions (in attestation but not in metadata) are skipped by blame.
+                if let Some(ref sessions) = valid_sessions {
+                    let session_key = author_part.split("::").next().unwrap_or(author_part);
+                    if !sessions.contains(session_key) {
+                        continue;
+                    }
+                }
                 let ranges = parse_line_ranges(ranges_part);
                 for (start, end) in ranges {
                     if line_num >= start && line_num <= end {
@@ -1073,6 +1121,66 @@ fn note_covers_line_as_ai(note: &str, filename: &str, line_num: u32) -> bool {
     }
 
     false
+}
+
+/// Extract session keys from the JSON metadata section of a note.
+/// Returns None if no "sessions" key is found (the note uses a legacy/test format
+/// where all s_ entries should be trusted). Returns Some(set) with the session IDs
+/// that exist in the metadata.
+fn extract_metadata_sessions(note: &str) -> Option<HashSet<&str>> {
+    // Find the JSON metadata section (after "---" separator)
+    let json_section = if let Some(idx) = note.find("\n---\n") {
+        &note[idx + 5..]
+    } else if let Some(stripped) = note.strip_prefix("---\n") {
+        stripped
+    } else {
+        return None;
+    };
+
+    // If no "sessions" key, this is a legacy/test note — trust all entries
+    let sessions_idx = json_section.find("\"sessions\"")?;
+
+    let mut sessions = HashSet::new();
+    let after_sessions = &json_section[sessions_idx..];
+    // Find the opening brace of the sessions object
+    if let Some(brace_start) = after_sessions.find('{') {
+        let sessions_obj = &after_sessions[brace_start..];
+        // Track brace depth to find the end of the sessions object
+        let mut depth = 0;
+        let mut end_idx = sessions_obj.len();
+        for (i, ch) in sessions_obj.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_idx = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let sessions_block = &sessions_obj[..end_idx];
+        // Extract quoted s_ keys from this block
+        let mut in_quote = false;
+        let mut quote_start = 0;
+        for (i, ch) in sessions_block.char_indices() {
+            if ch == '"' {
+                if in_quote {
+                    let segment = &sessions_block[quote_start..i];
+                    if segment.starts_with("s_") && segment.len() > 2 {
+                        sessions.insert(segment);
+                    }
+                } else {
+                    quote_start = i + 1;
+                }
+                in_quote = !in_quote;
+            }
+        }
+    }
+
+    Some(sessions)
 }
 
 #[cfg(test)]
