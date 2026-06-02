@@ -239,6 +239,9 @@ mod tests {
         let status = Command::new("git")
             .arg("init")
             .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join(".config"))
+            .env_remove("GIT_TRACE2_EVENT")
             .status()
             .expect("run git init");
         assert!(status.success(), "git init should succeed");
@@ -249,6 +252,9 @@ mod tests {
         let status = Command::new("git")
             .args(["config", key, value])
             .current_dir(repo)
+            .env("HOME", repo)
+            .env("XDG_CONFIG_HOME", repo.join(".config"))
+            .env_remove("GIT_TRACE2_EVENT")
             .status()
             .expect("run git config");
         assert!(status.success(), "git config should succeed");
