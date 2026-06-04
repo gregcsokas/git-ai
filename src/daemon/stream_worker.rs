@@ -476,11 +476,14 @@ impl StreamWorker {
         let mut tasks = Vec::new();
 
         for stream in streams {
-            // Shared streams (like OTEL traces) are global singletons that serve
-            // all sessions. They should only be processed during periodic sweeps,
-            // not on every checkpoint notification — otherwise each checkpoint
-            // re-enqueues the shared stream causing constant DB opens.
-            if stream.shared && priority == Priority::Immediate {
+            // Shared streams are global singletons that serve all sessions. By
+            // default they are processed during sweeps; Copilot OTEL is the
+            // exception because a Copilot transcript checkpoint implies the
+            // same underlying agent likely wrote fresh trace rows.
+            if stream.shared
+                && priority == Priority::Immediate
+                && !Self::should_enqueue_shared_stream_immediately(tool, &stream)
+            {
                 continue;
             }
 
@@ -534,6 +537,10 @@ impl StreamWorker {
         }
 
         tasks
+    }
+
+    fn should_enqueue_shared_stream_immediately(tool: &str, stream: &StreamDescriptor) -> bool {
+        matches!(tool, "copilot" | "github-copilot") && stream.stream_kind == "otel_traces"
     }
 
     fn ensure_subagent_session(
@@ -1296,6 +1303,82 @@ mod subagent_sweep_tests {
         let task = worker.priority_queue.pop().unwrap();
         assert_eq!(task.session_id, "internal-sess-abc");
         assert_eq!(task.tool, "copilot");
+    }
+
+    #[tokio::test]
+    async fn test_copilot_checkpoint_enqueues_shared_otel_stream_immediately() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("User");
+        let transcript_dir = user_dir
+            .join("workspaceStorage")
+            .join("workspace-hash")
+            .join("GitHub.copilot-chat")
+            .join("transcripts");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript = transcript_dir.join("sess-otel.jsonl");
+        let mut f = std::fs::File::create(&transcript).unwrap();
+        writeln!(f, r#"{{"type":"session.start"}}"#).unwrap();
+
+        let otel_dir = user_dir.join("globalStorage").join("github.copilot-chat");
+        std::fs::create_dir_all(&otel_dir).unwrap();
+        let otel_db = otel_dir.join("agent-traces.db");
+        std::fs::File::create(&otel_db).unwrap();
+        let canonical_otel_db = std::fs::canonicalize(&otel_db).unwrap();
+
+        let repo_work_dir = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_work_dir).unwrap();
+
+        let db_path = tmp.path().join("test.db");
+        let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
+        let mut worker = make_worker(db.clone());
+
+        let notification = CheckpointNotification {
+            session_id: "internal-sess-otel".to_string(),
+            tool: "github-copilot".to_string(),
+            trace_id: "trace-otel".to_string(),
+            tool_use_id: Some("tool-1".to_string()),
+            stream_path: transcript,
+            repo_work_dir: Some(repo_work_dir),
+            external_session_id: "sess-otel".to_string(),
+            external_parent_session_id: None,
+        };
+
+        worker.handle_checkpoint_notification(notification).await;
+
+        let tasks: Vec<_> = worker.priority_queue.iter().collect();
+        assert_eq!(tasks.len(), 2);
+        let transcript_task = tasks
+            .iter()
+            .find(|task| task.stream_kind == "transcript")
+            .unwrap();
+        let otel_task = tasks
+            .iter()
+            .find(|task| task.stream_kind == "otel_traces")
+            .unwrap();
+
+        assert_eq!(transcript_task.priority, Priority::Immediate);
+        assert_eq!(transcript_task.session_id, "internal-sess-otel");
+        assert_eq!(otel_task.priority, Priority::Immediate);
+        assert_eq!(
+            otel_task.session_id,
+            crate::streams::agent::SHARED_STREAM_SESSION_ID
+        );
+        assert_eq!(otel_task.canonical_path, canonical_otel_db);
+
+        let otel_record = db
+            .get_stream(
+                crate::streams::agent::SHARED_STREAM_SESSION_ID,
+                "otel_traces",
+                &canonical_otel_db.display().to_string(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(otel_record.tool, "github-copilot");
+        assert_eq!(otel_record.stream_format, "CopilotOtelSqlite");
+        assert_eq!(otel_record.watermark_type, "TimestampCursor");
+        assert_eq!(otel_record.external_session_id, "");
+        assert_eq!(otel_record.external_parent_session_id, None);
+        assert_eq!(otel_record.repo_work_dir, None);
     }
 
     #[test]
